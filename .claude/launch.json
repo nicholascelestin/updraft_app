@@ -3,9 +3,10 @@
   "configurations": [
     {
       "name": "dev",
-      "runtimeExecutable": "/opt/homebrew/bin/python3",
-      "runtimeArgs": ["-m", "http.server", "8081"],
-      "port": 8081
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["http-server", "-p", "8081", "--cors", "-c-1", "--header", "Cross-Origin-Opener-Policy: same-origin", "--header", "Cross-Origin-Embedder-Policy: require-corp"],
+      "port": 8081,
+      "autoPort": false
     }
   ]
 }

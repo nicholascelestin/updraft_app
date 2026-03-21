@@ -21,17 +21,11 @@ class PerfMonitor extends HTMLElement {
   #startTime = 0;
   #heapInterval = null;
 
-  #backend = '\u2014';
-  #tile = '\u2014';
-  #tileTime = '\u2014';
-  #avgTile = '\u2014';
-  #elapsed = '\u2014';
-  #eta = '\u2014';
-  #heap = '\u2014';
-  #heapLimit = '\u2014';
-  #heapPct = 0;
-  #heapClass = '';
-  #throughput = '\u2014';
+  #stats = {
+    backend: '\u2014', tile: '\u2014', tileTime: '\u2014', avgTile: '\u2014',
+    elapsed: '\u2014', eta: '\u2014', heap: '\u2014', heapLimit: '\u2014',
+    heapPct: 0, heapClass: '', throughput: '\u2014',
+  };
 
   connectedCallback() {
     this.classList.add('perf-monitor');
@@ -42,13 +36,10 @@ class PerfMonitor extends HTMLElement {
     this.#tileTimes = [];
     this.#startTime = performance.now();
 
-    this.#backend = backend.toUpperCase();
-    this.#tile = '\u2014';
-    this.#tileTime = '\u2014';
-    this.#avgTile = '\u2014';
-    this.#elapsed = '0 s';
-    this.#eta = '\u2014';
-    this.#throughput = '\u2014';
+    const s = this.#stats;
+    s.backend = backend.toUpperCase();
+    s.tile = '\u2014'; s.tileTime = '\u2014'; s.avgTile = '\u2014';
+    s.elapsed = '0 s'; s.eta = '\u2014'; s.throughput = '\u2014';
 
     this.#refreshHeap();
     this.style.display = 'block';
@@ -64,12 +55,13 @@ class PerfMonitor extends HTMLElement {
     const totalPixels = this.#tileTimes.length * tilePixels;
     const mpxPerSec = (totalPixels / (elapsed / 1000)) / 1e6;
 
-    this.#tile = `${index + 1} / ${total}`;
-    this.#tileTime = fmtTime(tileMs);
-    this.#avgTile = fmtTime(avg);
-    this.#elapsed = fmtTime(elapsed);
-    this.#eta = remaining > 0 ? '~' + fmtTime(remaining) : '\u2014';
-    this.#throughput = mpxPerSec.toFixed(2) + ' Mpx/s';
+    const s = this.#stats;
+    s.tile = `${index + 1} / ${total}`;
+    s.tileTime = fmtTime(tileMs);
+    s.avgTile = fmtTime(avg);
+    s.elapsed = fmtTime(elapsed);
+    s.eta = remaining > 0 ? '~' + fmtTime(remaining) : '\u2014';
+    s.throughput = mpxPerSec.toFixed(2) + ' Mpx/s';
 
     this.#refreshHeap();
     this.#render();
@@ -80,7 +72,7 @@ class PerfMonitor extends HTMLElement {
       clearInterval(this.#heapInterval);
       this.#heapInterval = null;
     }
-    this.#eta = 'Done';
+    this.#stats.eta = 'Done';
     this.#render();
   }
 
@@ -91,24 +83,23 @@ class PerfMonitor extends HTMLElement {
   hide() { this.style.display = 'none'; }
 
   #refreshHeap() {
+    const s = this.#stats;
     const mem = performance.memory;
     if (!mem) {
-      this.#heap = 'N/A';
-      this.#heapLimit = 'N/A';
-      this.#heapPct = 0;
-      this.#heapClass = '';
+      s.heap = 'N/A'; s.heapLimit = 'N/A'; s.heapPct = 0; s.heapClass = '';
       return;
     }
     const used = mem.usedJSHeapSize;
     const limit = mem.jsHeapSizeLimit;
     const pct = (used / limit) * 100;
-    this.#heap = fmtMB(used);
-    this.#heapLimit = fmtMB(limit);
-    this.#heapPct = pct;
-    this.#heapClass = pct > 80 ? ' crit' : pct > 60 ? ' warn' : '';
+    s.heap = fmtMB(used);
+    s.heapLimit = fmtMB(limit);
+    s.heapPct = pct;
+    s.heapClass = pct > 80 ? ' crit' : pct > 60 ? ' warn' : '';
   }
 
   #render() {
+    const s = this.#stats;
     morph(this, `
       <style>
         .perf-monitor {
@@ -133,18 +124,18 @@ class PerfMonitor extends HTMLElement {
         .perf-monitor .perf-bar-fill.crit { background: #c44; }
       </style>
       <div class="perf-title">Performance</div>
-      <div class="perf-row"><span class="perf-label">Backend</span><span class="perf-value">${this.#backend}</span></div>
-      <div class="perf-row"><span class="perf-label">Tile</span><span class="perf-value">${this.#tile}</span></div>
-      <div class="perf-row"><span class="perf-label">Tile time</span><span class="perf-value">${this.#tileTime}</span></div>
-      <div class="perf-row"><span class="perf-label">Avg tile</span><span class="perf-value">${this.#avgTile}</span></div>
-      <div class="perf-row"><span class="perf-label">Elapsed</span><span class="perf-value">${this.#elapsed}</span></div>
-      <div class="perf-row"><span class="perf-label">ETA</span><span class="perf-value">${this.#eta}</span></div>
-      <div class="perf-row"><span class="perf-label">JS Heap</span><span class="perf-value">${this.#heap}</span></div>
+      <div class="perf-row"><span class="perf-label">Backend</span><span class="perf-value">${s.backend}</span></div>
+      <div class="perf-row"><span class="perf-label">Tile</span><span class="perf-value">${s.tile}</span></div>
+      <div class="perf-row"><span class="perf-label">Tile time</span><span class="perf-value">${s.tileTime}</span></div>
+      <div class="perf-row"><span class="perf-label">Avg tile</span><span class="perf-value">${s.avgTile}</span></div>
+      <div class="perf-row"><span class="perf-label">Elapsed</span><span class="perf-value">${s.elapsed}</span></div>
+      <div class="perf-row"><span class="perf-label">ETA</span><span class="perf-value">${s.eta}</span></div>
+      <div class="perf-row"><span class="perf-label">JS Heap</span><span class="perf-value">${s.heap}</span></div>
       <div class="perf-bar-track">
-        <div class="perf-bar-fill${this.#heapClass}" style="width:${this.#heapPct.toFixed(1)}%"></div>
+        <div class="perf-bar-fill${s.heapClass}" style="width:${s.heapPct.toFixed(1)}%"></div>
       </div>
-      <div class="perf-row" style="margin-top:4px"><span class="perf-label">Heap limit</span><span class="perf-value">${this.#heapLimit}</span></div>
-      <div class="perf-row"><span class="perf-label">Throughput</span><span class="perf-value">${this.#throughput}</span></div>
+      <div class="perf-row" style="margin-top:4px"><span class="perf-label">Heap limit</span><span class="perf-value">${s.heapLimit}</span></div>
+      <div class="perf-row"><span class="perf-label">Throughput</span><span class="perf-value">${s.throughput}</span></div>
     `);
   }
 }

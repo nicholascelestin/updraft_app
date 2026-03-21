@@ -21,6 +21,9 @@ export class RunPodEngine {
 
   get scale() { return this.#scale; }
 
+  /**
+   * @returns {Promise<{ canvas: HTMLCanvasElement, scale: number }>}
+   */
   async upscale(image, onStatus, signal) {
     const imageBase64 = this.#imageToBase64(image);
 
@@ -105,8 +108,9 @@ export class RunPodEngine {
       img.src = `data:image/png;base64,${base64}`;
     });
 
+    let scale = this.#scale;
     if (output.upscaled_size) {
-      this.#scale = Math.round(output.upscaled_size[0] / (output.original_size?.[0] || img.width / 4));
+      scale = Math.round(output.upscaled_size[0] / (output.original_size?.[0] || img.width / 4));
     }
 
     const canvas = document.createElement('canvas');
@@ -114,6 +118,6 @@ export class RunPodEngine {
     canvas.height = img.height;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, 0, 0);
-    return canvas;
+    return { canvas, scale };
   }
 }

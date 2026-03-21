@@ -18,10 +18,7 @@ class UpscalerApp extends HTMLElement {
   connectedCallback() {
     this.#render();
     this.#setupEvents();
-
-    // Restore persisted RunPod settings
-    this.#q('.runpod-endpoint').value = localStorage.getItem('upscaler_runpod_endpoint') || '';
-    this.#q('.runpod-apikey').value = localStorage.getItem('upscaler_runpod_apikey') || '';
+    this.#restoreSettings();
   }
 
   #q(sel) { return this.querySelector(sel); }
@@ -31,6 +28,8 @@ class UpscalerApp extends HTMLElement {
     const modelEl      = this.#q('.model-select');
     const tileSizeEl   = this.#q('.tilesize-select');
     const backendEl    = this.#q('.backend-select');
+    const denoiseEl    = this.#q('.denoise-range');
+    const denoiseValEl = this.#q('.denoise-val');
     const upscaleBtn   = this.#q('.upscale-btn');
     const stopBtn      = this.#q('.stop-btn');
     const startOverBtn = this.#q('.startover-btn');
@@ -48,9 +47,14 @@ class UpscalerApp extends HTMLElement {
 
     statusBar.message = 'Load an image to begin.';
 
-    // Persist RunPod settings
+    // Persist settings on change
     endpointEl.addEventListener('input', () => localStorage.setItem('upscaler_runpod_endpoint', endpointEl.value));
     apikeyEl.addEventListener('input', () => localStorage.setItem('upscaler_runpod_apikey', apikeyEl.value));
+    modeEl.addEventListener('change', () => localStorage.setItem('upscaler_mode', modeEl.value));
+    modelEl.addEventListener('change', () => localStorage.setItem('upscaler_model', modelEl.value));
+    tileSizeEl.addEventListener('change', () => localStorage.setItem('upscaler_tilesize', tileSizeEl.value));
+    backendEl.addEventListener('change', () => localStorage.setItem('upscaler_backend', backendEl.value));
+    denoiseEl.addEventListener('input', () => localStorage.setItem('upscaler_denoise', denoiseEl.value));
 
     // Mode switching
     modeEl.addEventListener('change', () => {
@@ -151,15 +155,18 @@ class UpscalerApp extends HTMLElement {
           const modelUrl = selectedOption.value;
           scale = parseInt(selectedOption.dataset.scale, 10);
           const inputRange = parseInt(selectedOption.dataset.range, 10) || 1;
+          const backend = selectedOption.dataset.backend || backendEl.value;
+          const denoise = parseFloat(denoiseEl.value);
 
           const result = await preview.upscale(
             inputImage,
             parseInt(tileSizeEl.value, 10),
-            backendEl.value,
+            backend,
             {
               modelUrl,
               scale,
               inputRange,
+              denoise,
               onModelProgress(frac, msg) {
                 statusBar.showProgress(frac);
                 statusBar.message = msg;
@@ -212,6 +219,32 @@ class UpscalerApp extends HTMLElement {
       const scale = modelEl.selectedOptions[0].dataset.scale;
       upscaleBtn.textContent = `Upscale ${scale}x`;
     });
+
+    // Denoise slider live value
+    denoiseEl.addEventListener('input', () => {
+      denoiseValEl.textContent = denoiseEl.value;
+    });
+  }
+
+  #restoreSettings() {
+    this.#q('.runpod-endpoint').value = localStorage.getItem('upscaler_runpod_endpoint') || '';
+    this.#q('.runpod-apikey').value = localStorage.getItem('upscaler_runpod_apikey') || '';
+
+    const controls = [
+      ['.mode-select', 'upscaler_mode'],
+      ['.model-select', 'upscaler_model'],
+      ['.tilesize-select', 'upscaler_tilesize'],
+      ['.backend-select', 'upscaler_backend'],
+      ['.denoise-range', 'upscaler_denoise'],
+    ];
+    for (const [sel, key] of controls) {
+      const saved = localStorage.getItem(key);
+      if (saved !== null) this.#q(sel).value = saved;
+    }
+
+    this.#q('.mode-select').dispatchEvent(new Event('change'));
+    this.#q('.model-select').dispatchEvent(new Event('change'));
+    this.#q('.denoise-range').dispatchEvent(new Event('input'));
   }
 
   #render() {
@@ -264,6 +297,7 @@ class UpscalerApp extends HTMLElement {
               <option value="models/4x-UltraMix_Balanced.onnx" data-scale="4">4x UltraMix Balanced (ESRGAN)</option>
               <option value="models/4x-UltraSharpV2_Lite.onnx" data-scale="4">4x UltraSharp V2 Lite (RealPLKSR)</option>
               <option value="models/RMBN_M4C8_x4.onnx" data-scale="4" data-range="255">4x RMBN-M4C8 (Lightweight)</option>
+              <option value="models/4x-ClearRealityV1.onnx" data-scale="4" data-backend="wasm">4x ClearReality V1 (SPAN)</option>
             </select>
           </label>
           <label>Tile size:
@@ -274,6 +308,7 @@ class UpscalerApp extends HTMLElement {
               <option value="256">256</option>
               <option value="384">384</option>
               <option value="512">512</option>
+              <option value="0">Full image (no tiling)</option>
             </select>
           </label>
           <label>Backend:
@@ -282,6 +317,12 @@ class UpscalerApp extends HTMLElement {
               <option value="webgl">WebGL</option>
               <option value="wasm">WASM</option>
             </select>
+          </label>
+          <label title="3×3 bilateral denoise — smooths compression noise while preserving edges">Smooth artifacts:
+            <span style="display:inline-flex;align-items:center;gap:0.3rem">
+              <input class="denoise-range" type="range" min="0" max="1" step="0.05" value="0" style="width:7rem;vertical-align:middle">
+              <span class="denoise-val" style="min-width:2.2ch;font-variant-numeric:tabular-nums">0</span>
+            </span>
           </label>
         </span>
 

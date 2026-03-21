@@ -59,6 +59,7 @@ class VideoUpscalerApp extends HTMLElement {
 
     // Video loaded
     dropZone.addEventListener('video-loaded', (e) => {
+      if (this.#videoInfo?.blobUrl) URL.revokeObjectURL(this.#videoInfo.blobUrl);
       this.#videoInfo = e.detail;
       upscaleBtn.disabled = false;
       startOverBtn.style.display = 'inline-block';

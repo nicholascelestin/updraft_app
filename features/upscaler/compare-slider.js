@@ -10,7 +10,7 @@ class CompareSlider extends HTMLElement {
   #beforeSrc = '';
   #afterSrc = '';
   #expanded = false;
-  #naturalMaxWidth = '';
+  #naturalMaxWidth = 0;
   #downloadSrc = '';   // separate src for download (e.g. transparent PNG for bg-removal)
   #downloadName = '';
 
@@ -35,8 +35,13 @@ class CompareSlider extends HTMLElement {
 
     // Toolbar button delegation
     this.addEventListener('click', e => {
+      const openBtn = e.target.closest('.compare-open-btn');
       const expandBtn = e.target.closest('.compare-expand-btn');
       const downloadBtn = e.target.closest('.compare-download-btn');
+      if (openBtn && this.#downloadSrc) {
+        window.open(this.#downloadSrc, '_blank');
+        return;
+      }
       if (expandBtn) {
         this.toggleExpand();
         expandBtn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
@@ -79,7 +84,7 @@ class CompareSlider extends HTMLElement {
       img.complete ? Promise.resolve() : new Promise(r => { img.onload = r; })
     ));
 
-    this.#naturalMaxWidth = this.style.maxWidth;
+    this.#naturalMaxWidth = parseInt(this.style.maxWidth, 10) || 0;
     this.style.display = 'block';
     this.#applySize();
     this.#setPosition(0.5);
@@ -105,12 +110,12 @@ class CompareSlider extends HTMLElement {
     if (!afterImg) return;
 
     if (this.#expanded) {
-      this.style.maxWidth = this.#naturalMaxWidth || '';
+      this.style.maxWidth = this.#naturalMaxWidth ? this.#naturalMaxWidth + 'px' : '';
     } else {
       const maxH = window.innerHeight - 160;
       const aspect = afterImg.naturalWidth / afterImg.naturalHeight;
       const fittedW = Math.round(maxH * aspect);
-      const callerMax = parseInt(this.#naturalMaxWidth, 10) || Infinity;
+      const callerMax = this.#naturalMaxWidth || Infinity;
       this.style.maxWidth = Math.min(fittedW, callerMax) + 'px';
     }
 
@@ -197,8 +202,9 @@ class CompareSlider extends HTMLElement {
       <span class="compare-label compare-label-before">${this.getAttribute('before-label') || 'Original'}</span>
       <span class="compare-label compare-label-after">${this.getAttribute('after-label') || '4x Upscaled'}</span>
       <div class="compare-toolbar">
-        <button class="compare-expand-btn">${expandLabel}</button>
-        <button class="compare-download-btn"><i class="fas fa-download"></i> Download</button>
+        <button type="button" class="compare-open-btn">Open in Tab</button>
+        <button type="button" class="compare-expand-btn">${expandLabel}</button>
+        <button type="button" class="compare-download-btn"><i class="fas fa-download"></i> Download</button>
       </div>
     `);
   }

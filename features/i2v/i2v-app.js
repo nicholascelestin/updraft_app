@@ -1,17 +1,45 @@
 /**
  * <i2v-app> — RunPod Image-to-Video generation feature.
- * Self-contained web component wrapping API key inputs, prompt,
- * image upload, job submission, polling, and video playback.
+ * Wraps API key inputs, prompt, image upload, job submission,
+ * polling, and video playback into a single web component.
  */
 
 import { morph } from '../../lib/morph.js';
+import '../../components/image-drop-zone.js';
+import '../../components/status-bar.js';
+
+/**
+ * Submit a RunPod job and poll until completion.
+ * @param {{ baseUrl: string, apiKey: string, input: object, onStatus?: (msg: string) => void, pollInterval?: number }} opts
+ * @returns {Promise<{ id: string, output: object }>}
+ */
+async function runpodRun({ baseUrl, apiKey, input, onStatus, pollInterval = 3000 }) {
+  const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+
+  onStatus?.('Submitting job\u2026');
+  const runRes = await fetch(`${baseUrl}/run`, { method: 'POST', headers, body: JSON.stringify({ input }) });
+  if (!runRes.ok) throw new Error(`Submit failed: ${runRes.status} ${await runRes.text()}`);
+  const { id } = await runRes.json();
+
+  onStatus?.(`Job submitted: ${id}. Polling for result\u2026`);
+
+  while (true) {
+    await new Promise(r => setTimeout(r, pollInterval));
+    const pollRes = await fetch(`${baseUrl}/status/${id}`, { headers });
+    if (!pollRes.ok) throw new Error(`Poll failed: ${pollRes.status}`);
+    const data = await pollRes.json();
+
+    if (data.status === 'COMPLETED') return { id, output: data.output };
+    if (data.status === 'FAILED') throw new Error('Job failed: ' + JSON.stringify(data.error || data));
+    onStatus?.(`Job ${id} \u2014 Status: ${data.status}\u2026`);
+  }
+}
 
 class I2vApp extends HTMLElement {
   #imageBase64 = null;
   #lastJobId = null;
   #lastBlobUrl = null;
 
-  // Backend defaults
   static DEFAULTS = {
     num_frames: 97,
     num_inference_steps: 40,
@@ -34,22 +62,27 @@ class I2vApp extends HTMLElement {
   #q(sel) { return this.querySelector(sel); }
 
   #setupEvents() {
-    const fileDrop  = this.#q('.file-drop');
-    const fileInput = this.#q('.file-input');
-    const submitBtn = this.#q('.submit-btn');
+    const dropZone   = this.#q('image-drop-zone');
+    const submitBtn  = this.#q('.submit-btn');
     const refetchBtn = this.#q('.refetch-btn');
+    const statusBar  = this.#q('status-bar');
 
-    // File drop / click
-    fileDrop.addEventListener('click', () => fileInput.click());
-    fileDrop.addEventListener('dragover', (e) => { e.preventDefault(); fileDrop.classList.add('dragover'); });
-    fileDrop.addEventListener('dragleave', () => fileDrop.classList.remove('dragover'));
-    fileDrop.addEventListener('drop', (e) => {
-      e.preventDefault();
-      fileDrop.classList.remove('dragover');
-      if (e.dataTransfer.files.length) this.#handleFile(e.dataTransfer.files[0]);
-    });
-    fileInput.addEventListener('change', () => {
-      if (fileInput.files.length) this.#handleFile(fileInput.files[0]);
+    statusBar.message = 'Provide an image and prompt, then generate.';
+
+    // Image loaded via shared drop zone
+    dropZone.addEventListener('image-loaded', (e) => {
+      const img = e.detail.image;
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      c.getContext('2d').drawImage(img, 0, 0);
+      this.#imageBase64 = c.toDataURL('image/png');
+
+      const preview = this.#q('.preview-img');
+      preview.src = this.#imageBase64;
+      preview.style.display = 'block';
+      dropZone.hide();
+
+      statusBar.message = `Image loaded (${img.width}\u00d7${img.height}) \u2014 ready to generate.`;
     });
 
     // Submit
@@ -57,28 +90,24 @@ class I2vApp extends HTMLElement {
 
     // Re-fetch
     refetchBtn.addEventListener('click', () => this.#refetch());
-  }
 
-  #handleFile(file) {
-    if (!file.type.startsWith('image/')) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      this.#imageBase64 = e.target.result;
-      this.#q('.file-label').textContent = file.name;
-      let img = this.#q('.file-drop img');
-      if (!img) {
-        img = document.createElement('img');
-        this.#q('.file-drop').appendChild(img);
+    // Click preview image to re-show drop zone
+    this.addEventListener('click', (e) => {
+      if (e.target.closest('.preview-img')) {
+        this.#q('.preview-img').style.display = 'none';
+        dropZone.show();
       }
-      img.src = this.#imageBase64;
-    };
-    reader.readAsDataURL(file);
+    });
   }
 
-  #showStatus(msg) {
-    const el = this.#q('.status-output');
-    el.style.display = 'block';
-    el.innerHTML = msg;
+  #showStatus(msg, indeterminate = false) {
+    const statusBar = this.#q('status-bar');
+    statusBar.message = msg;
+    if (indeterminate) {
+      statusBar.showIndeterminate();
+    } else {
+      statusBar.hideProgress();
+    }
   }
 
   async #submit() {
@@ -116,43 +145,15 @@ class I2vApp extends HTMLElement {
     const seedVal = this.#q('.seed').value.trim();
     if (seedVal) input.seed = parseInt(seedVal);
 
-    const runUrl = `https://api.runpod.ai/v2/${endpointId}/run`;
-    const headers = {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    };
-
-    this.#showStatus('<span class="spinner"></span> Submitting job...');
-
     try {
-      const runRes = await fetch(runUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ input }),
+      const { id, output } = await runpodRun({
+        baseUrl: `https://api.runpod.ai/v2/${endpointId}`,
+        apiKey,
+        input,
+        onStatus: (msg) => this.#showStatus(msg, true),
       });
-      if (!runRes.ok) throw new Error(`Submit failed: ${runRes.status} ${await runRes.text()}`);
-      const runData = await runRes.json();
-      const jobId = runData.id;
-      this.#lastJobId = jobId;
-      this.#showStatus(`<span class="spinner"></span> Job submitted: ${jobId}<br>Polling for result...`);
-
-      const statusUrl = `https://api.runpod.ai/v2/${endpointId}/status/${jobId}`;
-      while (true) {
-        await new Promise((r) => setTimeout(r, 3000));
-        const pollRes = await fetch(statusUrl, { headers });
-        if (!pollRes.ok) throw new Error(`Poll failed: ${pollRes.status}`);
-        const pollData = await pollRes.json();
-        const st = pollData.status;
-
-        if (st === 'COMPLETED') {
-          this.#displayVideo(pollData.output);
-          break;
-        } else if (st === 'FAILED') {
-          throw new Error('Job failed: ' + JSON.stringify(pollData.error || pollData));
-        } else {
-          this.#showStatus(`<span class="spinner"></span> Job ${jobId}<br>Status: ${st}...`);
-        }
-      }
+      this.#lastJobId = id;
+      this.#displayVideo(output);
     } catch (err) {
       this.#showStatus('Error: ' + err.message);
     } finally {
@@ -173,7 +174,7 @@ class I2vApp extends HTMLElement {
     };
     const statusUrl = `https://api.runpod.ai/v2/${endpointId}/status/${this.#lastJobId}`;
 
-    this.#showStatus(`<span class="spinner"></span> Re-fetching job ${this.#lastJobId}...`);
+    this.#showStatus(`Re-fetching job ${this.#lastJobId}\u2026`, true);
     this.#q('.refetch-btn').disabled = true;
 
     try {
@@ -198,13 +199,7 @@ class I2vApp extends HTMLElement {
 
     const video = this.#q('.result-video');
     const dl = this.#q('.download-link');
-    let videoData = null;
-
-    if (result && result.video) {
-      videoData = result.video;
-    } else {
-      videoData = this.#findUrl(result);
-    }
+    let videoData = result?.video || this.#findUrl(result);
 
     if (!videoData) {
       this.#showStatus('Done! Output (no video found):\n' + JSON.stringify(result, null, 2));
@@ -230,7 +225,7 @@ class I2vApp extends HTMLElement {
     if (result.fps) meta.push(`${result.fps} fps`);
     if (result.width && result.height) meta.push(`${result.width}x${result.height}`);
     if (result.duration_seconds) meta.push(`${result.duration_seconds}s`);
-    this.#showStatus('Done!' + (meta.length ? ' — ' + meta.join(', ') : ''));
+    this.#showStatus('Done!' + (meta.length ? ' \u2014 ' + meta.join(', ') : ''));
   }
 
   #base64ToBlobUrl(b64, mimeType = 'video/mp4') {
@@ -259,19 +254,9 @@ class I2vApp extends HTMLElement {
       <style>
         i2v-app { display: block; max-width: 640px; }
         i2v-app label { display: block; font-size: 0.85rem; margin-bottom: 0.3rem; }
-        i2v-app .file-drop {
-          border: 2px dashed var(--pico-muted-border-color, #333);
-          border-radius: 8px; padding: 1.5rem; text-align: center;
-          cursor: pointer; margin-bottom: 1rem;
-          transition: border-color 0.2s;
-        }
-        i2v-app .file-drop:hover,
-        i2v-app .file-drop.dragover {
-          border-color: var(--pico-primary);
-        }
-        i2v-app .file-drop img {
-          max-width: 100%; max-height: 240px;
-          border-radius: 4px; margin-top: 0.5rem;
+        i2v-app .preview-img {
+          display: none; max-width: 100%; max-height: 240px;
+          border-radius: 4px; margin-bottom: 1rem; cursor: pointer;
         }
         i2v-app .param-details {
           margin-bottom: 1rem;
@@ -292,25 +277,10 @@ class I2vApp extends HTMLElement {
         i2v-app .param-grid label small {
           color: var(--pico-muted-color, #888);
         }
-        i2v-app .status-output {
-          display: none; margin-top: 1.5rem; padding: 1rem;
-          background: var(--pico-card-background-color, #1a1a1a);
-          border-radius: 8px; font-size: 0.9rem;
-          white-space: pre-wrap; word-break: break-all;
-        }
         i2v-app .result-video {
           margin-top: 1rem; width: 100%;
           border-radius: 8px;
         }
-        i2v-app .spinner {
-          display: inline-block; width: 14px; height: 14px;
-          border: 2px solid var(--pico-muted-border-color, #555);
-          border-top-color: var(--pico-primary);
-          border-radius: 50%;
-          animation: i2v-spin 0.8s linear infinite;
-          vertical-align: middle; margin-right: 0.4rem;
-        }
-        @keyframes i2v-spin { to { transform: rotate(360deg); } }
       </style>
 
       <h2><i class="fas fa-video"></i> Image to Video</h2>
@@ -325,12 +295,8 @@ class I2vApp extends HTMLElement {
       <textarea class="prompt-input" id="i2v-prompt" placeholder="Describe the motion you want..." rows="3"></textarea>
 
       <label><i class="fas fa-image"></i> Input Image</label>
-      <div class="file-drop">
-        <span class="file-label">
-          <i class="fas fa-cloud-upload-alt"></i> Click or drag an image here
-        </span>
-      </div>
-      <input type="file" class="file-input" accept="image/*" hidden>
+      <image-drop-zone></image-drop-zone>
+      <img class="preview-img">
 
       <details class="param-details">
         <summary><i class="fas fa-sliders-h"></i> Generation Parameters</summary>
@@ -375,7 +341,7 @@ class I2vApp extends HTMLElement {
         <i class="fas fa-sync"></i> Re-fetch Last Result
       </button>
 
-      <div class="status-output"></div>
+      <status-bar></status-bar>
       <video class="result-video" controls style="display:none"></video>
       <a class="download-link" style="display:none; margin-top:0.5rem; cursor:pointer">
         <i class="fas fa-download"></i> Download Video

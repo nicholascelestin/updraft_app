@@ -4,6 +4,8 @@
  * and runs background removal on an image.
  */
 
+import { fetchWithProgress } from '../../lib/fetch-progress.js';
+
 const MODELS = {
   'isnet': {
     url: 'https://huggingface.co/onnx-community/ISNet-ONNX/resolve/main/onnx/model_quantized.onnx',
@@ -52,32 +54,8 @@ export class BgRemovalEngine {
       this.#modelBuffer = null;
     }
 
-    // Download model if not cached
     if (!this.#modelBuffer) {
-      onProgress?.(0, 'Downloading model\u2026');
-      const resp = await fetch(cfg.url);
-      if (!resp.ok) throw new Error(`Model download failed: HTTP ${resp.status}`);
-
-      const total = parseInt(resp.headers.get('content-length') || '0', 10);
-      const reader = resp.body.getReader();
-      const chunks = [];
-      let loaded = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        loaded += value.length;
-        if (total) {
-          const frac = loaded / total;
-          onProgress?.(frac, `Downloading model\u2026 ${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`);
-        }
-      }
-
-      const buf = new Uint8Array(loaded);
-      let off = 0;
-      for (const c of chunks) { buf.set(c, off); off += c.length; }
-      this.#modelBuffer = buf.buffer;
+      this.#modelBuffer = await fetchWithProgress(cfg.url, onProgress);
     }
 
     onProgress?.(1, 'Loading model into runtime\u2026');

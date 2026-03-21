@@ -55,27 +55,32 @@
         import './features/video-upscaler/video-upscaler-app.js';
         import './features/bg-removal/bg-removal-app.js';
 
-        // Simple nav switching
+        function activateFeature(link) {
+            const feature = link.dataset.feature;
+            document.querySelectorAll('.nav-link').forEach(l => {
+                l.classList.toggle('active', l === link);
+                l.setAttribute('aria-current', l === link ? 'page' : '');
+            });
+            document.querySelectorAll('[id^="feature-"]').forEach(el => {
+                el.style.display = el.id === 'feature-' + feature ? '' : 'none';
+            });
+            localStorage.setItem('aitools_feature', feature);
+        }
+
         document.querySelectorAll('.nav-link').forEach(link => {
             link.addEventListener('click', (e) => {
                 e.preventDefault();
-                const feature = link.dataset.feature;
-
-                // Update active nav
-                document.querySelectorAll('.nav-link').forEach(l => {
-                    l.classList.toggle('active', l === link);
-                    l.setAttribute('aria-current', l === link ? 'page' : '');
-                });
-
-                // Toggle feature visibility
-                document.querySelectorAll('[id^="feature-"]').forEach(el => {
-                    el.style.display = el.id === 'feature-' + feature ? '' : 'none';
-                });
+                activateFeature(link);
             });
         });
 
-        // Set initial aria-current
-        document.querySelector('.nav-link.active')?.setAttribute('aria-current', 'page');
+        const savedFeature = localStorage.getItem('aitools_feature');
+        const savedLink = savedFeature && document.querySelector(`.nav-link[data-feature="${savedFeature}"]`);
+        if (savedLink) {
+            activateFeature(savedLink);
+        } else {
+            document.querySelector('.nav-link.active')?.setAttribute('aria-current', 'page');
+        }
     </script>
 </body>
 </html>

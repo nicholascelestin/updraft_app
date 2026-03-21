@@ -23,34 +23,32 @@ class UpscalePreview extends HTMLElement {
     this.classList.add('upscale-preview');
     this.#render();
 
-    // Full-size toggle delegation
     this.addEventListener('click', e => {
-      const btn = e.target.closest('.preview-expand-btn');
-      if (!btn) return;
+      const expandBtn = e.target.closest('.preview-expand-btn');
+      if (!expandBtn) return;
       this.#expanded = !this.#expanded;
       this.#applySize();
-      btn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
+      expandBtn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
     });
   }
 
   get engine() { return this.#engine; }
   get running() { return this.#abortController !== null; }
 
-  async upscale(image, tileSize, backend, callbacks = {}) {
+  async upscale(image, tileSize, backend, opts = {}) {
     this.#revokeBlobURLs();
     this.#abortController = new AbortController();
     const { signal } = this.#abortController;
 
-    const modelUrl = callbacks.modelUrl || 'models/4x-UltraMix_Balanced.onnx';
-    const scale = callbacks.scale || 4;
-    const inputRange = callbacks.inputRange || 1;
+    const { modelUrl = 'models/4x-UltraMix_Balanced.onnx', scale = 4, inputRange = 1, denoise = 0, onModelProgress } = opts;
 
-    if (!this.#engine || this.#currentModelUrl !== modelUrl) {
-      this.#engine = new UpscalerEngine({ modelUrl, scale, inputRange });
+    const backendChanged = this.#engine?.activeBackend && this.#engine.activeBackend !== backend;
+    if (!this.#engine || this.#currentModelUrl !== modelUrl || this.#engine.denoise !== denoise || backendChanged) {
+      this.#engine = new UpscalerEngine({ modelUrl, scale, inputRange, denoise });
       this.#currentModelUrl = modelUrl;
     }
 
-    await this.#engine.loadModel(backend, callbacks.onModelProgress);
+    await this.#engine.loadModel(backend, onModelProgress);
 
     const srcW = image.width;
     const srcH = image.height;
@@ -143,7 +141,7 @@ class UpscalePreview extends HTMLElement {
     ctx.fillRect(0, 0, outW, outH);
 
     try {
-      const resultCanvas = await engine.upscale(image, (msg) => {
+      const { canvas: resultCanvas, scale: actualScale } = await engine.upscale(image, (msg) => {
         this.dispatchEvent(new CustomEvent('runpod-status', { detail: { message: msg } }));
       }, signal);
 
@@ -163,7 +161,7 @@ class UpscalePreview extends HTMLElement {
       const beforeSrc = URL.createObjectURL(beforeBlob);
       this.#blobURLs = [afterSrc, beforeSrc];
 
-      return { beforeSrc, afterSrc, scale: engine.scale };
+      return { beforeSrc, afterSrc, scale: actualScale };
     } finally {
       this.#abortController = null;
     }

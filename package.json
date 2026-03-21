@@ -4,6 +4,6 @@
   "description": "AI Tools — Image Upscaler & Image-to-Video",
   "private": true,
   "scripts": {
-    "start": "npx http-server . -p 8081 -c-1"
+    "start": "npx serve -l 8081"
   }
 }
