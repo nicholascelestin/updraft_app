@@ -1,0 +1,9 @@
+{
+  "name": "aitools",
+  "version": "1.0.0",
+  "description": "AI Tools — Image Upscaler & Image-to-Video",
+  "private": true,
+  "scripts": {
+    "start": "npx http-server . -p 8081 -c-1"
+  }
+}

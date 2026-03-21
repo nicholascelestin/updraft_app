@@ -1,0 +1,28 @@
+/* === AI Tools — Global Overrides === */
+
+:root {
+    --pico-font-size: 100%;
+    scrollbar-width: thin;
+    scrollbar-color: var(--pico-secondary-border) var(--pico-background-color);
+}
+
+/* Nav active link styling */
+nav .nav-link.active {
+    font-weight: 600;
+}
+
+/* Compact form controls inside tool UIs */
+.controls select,
+.controls input {
+    margin-bottom: 0;
+}
+
+/* Feature sections */
+[id^="feature-"] {
+    animation: fadeIn 0.15s ease-in;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
