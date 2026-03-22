@@ -44,8 +44,14 @@ class UpscalerApp extends HTMLElement {
     const cropper       = this.#q('image-cropper');
     const preview       = this.#q('upscale-preview');
     const compareSlider = this.#q('compare-slider');
+    const perfMonitor   = this.#q('perf-monitor');
+    const perfToggle    = this.#q('.perf-toggle-btn');
 
     statusBar.message = 'Load an image to begin.';
+
+    perfToggle.addEventListener('click', () => {
+      perfMonitor.visible ? perfMonitor.hide() : perfMonitor.show();
+    });
 
     // Persist settings on change
     endpointEl.addEventListener('input', () => localStorage.setItem('upscaler_runpod_endpoint', endpointEl.value));
@@ -113,6 +119,12 @@ class UpscalerApp extends HTMLElement {
       const { index, total } = e.detail;
       statusBar.showProgress((index + 1) / total);
       statusBar.message = `Tile ${index + 1} / ${total}`;
+      if (perfMonitor.visible) perfMonitor.update(e.detail);
+    });
+
+    // Session summary
+    preview.addEventListener('upscale-complete', (e) => {
+      if (e.detail.perf) perfMonitor.showResults(e.detail.perf, e.detail.ortProfile);
     });
 
     // RunPod status
@@ -158,6 +170,8 @@ class UpscalerApp extends HTMLElement {
           const backend = selectedOption.dataset.backend || backendEl.value;
           const denoise = parseFloat(denoiseEl.value);
 
+          if (perfMonitor.visible) perfMonitor.start(backend);
+
           const result = await preview.upscale(
             inputImage,
             parseInt(tileSizeEl.value, 10),
@@ -197,6 +211,7 @@ class UpscalerApp extends HTMLElement {
           statusBar.message = 'Error: ' + e.message;
         }
         statusBar.hideProgress();
+        perfMonitor.stop();
       }
 
       this.#running = false;
@@ -344,6 +359,9 @@ class UpscalerApp extends HTMLElement {
         <button class="startover-btn secondary outline" style="display:none">
           <i class="fas fa-redo"></i> Start Over
         </button>
+        <button class="perf-toggle-btn secondary outline" title="Toggle performance monitor">
+          <i class="fas fa-gauge-high"></i>
+        </button>
       </div>
 
       <status-bar></status-bar>
@@ -351,6 +369,7 @@ class UpscalerApp extends HTMLElement {
       <image-cropper></image-cropper>
       <upscale-preview></upscale-preview>
       <compare-slider></compare-slider>
+      <perf-monitor></perf-monitor>
     `);
   }
 }

@@ -182,7 +182,7 @@ export class VideoUpscalerEngine {
 
       await seekTo(video, time);
       onFrameProgress?.(i, totalFrames, 'upscaling');
-      const upscaledCanvas = await this._upscaler.upscale(video, this.tileSize, { signal });
+      const { canvas: upscaledCanvas } = await this._upscaler.upscale(video, this.tileSize, { signal });
 
       // Downscale if needed (high-quality lanczos-like filter)
       let encodeCanvas = upscaledCanvas;

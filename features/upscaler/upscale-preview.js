@@ -2,8 +2,8 @@
  * <upscale-preview> — canvas that drives tiled inference and shows live progress.
  *
  * Events:
- *   tile-complete     — detail: { index, total, tileMs, tilePixels }
- *   upscale-complete  — detail: { beforeSrc, afterSrc, elapsed }
+ *   tile-complete     — detail: { index, total, tileMs, tilePixels, perf }
+ *   upscale-complete  — detail: { beforeSrc, afterSrc, elapsed, perf, ortProfile }
  *   runpod-status     — detail: { message }
  */
 
@@ -18,6 +18,7 @@ class UpscalePreview extends HTMLElement {
   #blobURLs = [];
   #expanded = false;
   #naturalW = 0;
+  #profiling = false;
 
   connectedCallback() {
     this.classList.add('upscale-preview');
@@ -35,15 +36,21 @@ class UpscalePreview extends HTMLElement {
   get engine() { return this.#engine; }
   get running() { return this.#abortController !== null; }
 
+  set profiling(v) {
+    this.#profiling = !!v;
+    if (this.#engine) this.#engine.profiling = this.#profiling;
+  }
+
   async upscale(image, tileSize, backend, opts = {}) {
     const signal = this.#beginUpscale();
     const { modelUrl = 'models/4x-UltraMix_Balanced.onnx', scale = 4, modelValueRange = 1, denoise = 0, onModelProgress } = opts;
 
     const backendChanged = this.#engine?.activeBackend && this.#engine.activeBackend !== backend;
     if (!this.#engine || this.#currentModelUrl !== modelUrl || this.#engine.denoise !== denoise || backendChanged) {
-      this.#engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, denoise });
+      this.#engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, denoise, profile: this.#profiling });
       this.#currentModelUrl = modelUrl;
     }
+    this.#engine.profiling = this.#profiling;
 
     await this.#engine.loadModel(backend, onModelProgress);
 
@@ -52,12 +59,12 @@ class UpscalePreview extends HTMLElement {
     const ctx = this.#showDimmedPreview(image, outW, outH, `Upscaling ${image.width}\u00d7${image.height} \u2192 ${outW}\u00d7${outH}\u2026`);
 
     try {
-      const resultCanvas = await this.#engine.upscale(image, tileSize, {
+      const { canvas: resultCanvas, perf, ortProfile } = await this.#engine.upscale(image, tileSize, {
         onTile: (info) => {
           const { outX, outY, outW: tw, outH: th } = info;
           ctx.drawImage(info.canvas, outX, outY, tw, th, outX, outY, tw, th);
           this.dispatchEvent(new CustomEvent('tile-complete', {
-            detail: { index: info.index, total: info.total, tileMs: info.tileMs, tilePixels: info.tilePixels },
+            detail: { index: info.index, total: info.total, tileMs: info.tileMs, tilePixels: info.tilePixels, perf: info.perf },
           }));
         },
         signal,
@@ -67,10 +74,10 @@ class UpscalePreview extends HTMLElement {
       const urls = await this.#createComparisonURLs(resultCanvas, image);
 
       this.dispatchEvent(new CustomEvent('upscale-complete', {
-        detail: { ...urls, elapsed },
+        detail: { ...urls, elapsed, perf, ortProfile },
       }));
 
-      return { ...urls, elapsed };
+      return { ...urls, elapsed, scale };
     } finally {
       this.#abortController = null;
     }

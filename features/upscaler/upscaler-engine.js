@@ -126,7 +126,7 @@ export class UpscalerEngine {
   #overlap;
   #modelValueRange;
   #denoise;
-  #profile;
+  #profiling = false;
   #activeBackend = null;
   #device = null;
   #gpuRenderer = null;
@@ -138,13 +138,15 @@ export class UpscalerEngine {
     this.#overlap = overlap;
     this.#modelValueRange = modelValueRange;
     this.#denoise = denoise;
-    this.#profile = profile;
+    this.#profiling = profile;
   }
 
   get scale() { return this.#scale; }
   get denoise() { return this.#denoise; }
   get activeBackend() { return this.#activeBackend; }
   get isLoaded() { return this.#session !== null; }
+  get profiling() { return this.#profiling; }
+  set profiling(v) { this.#profiling = !!v; }
 
   async loadModel(backend = 'wasm', onProgress) {
     if (this.#session && this.#activeBackend === backend) return;
@@ -169,7 +171,7 @@ export class UpscalerEngine {
     const sessionOpts = {
       executionProviders: [backend],
       graphOptimizationLevel: 'all',
-      ...(this.#profile && { enableProfiling: true }),
+      ...(this.#profiling && { enableProfiling: true }),
     };
 
     if (backend === 'webgpu') {
@@ -247,7 +249,7 @@ export class UpscalerEngine {
     const inputName = this.#session.inputNames[0];
     const outputName = this.#session.outputNames[0];
 
-    if (this.#profile) try { this.#session.startProfiling(); } catch {}
+    if (this.#profiling) try { this.#session.startProfiling(); } catch {}
 
     for (let i = 0; i < tiles.length; i++) {
       if (signal?.aborted) throw new DOMException('Upscale cancelled', 'AbortError');
@@ -259,15 +261,17 @@ export class UpscalerEngine {
 
       const tExtract = performance.now();
       const tensor = this.#createTileTensor(srcData, tx, ty, tw, th, useGpuInput);
-      perf.extract += performance.now() - tExtract;
+      const extractMs = performance.now() - tExtract;
+      perf.extract += extractMs;
 
       const tInfer = performance.now();
       const results = await this.#session.run({ [inputName]: tensor });
-      const tileMs = performance.now() - tInfer;
-      perf.inference += tileMs;
+      const inferenceMs = performance.now() - tInfer;
+      perf.inference += inferenceMs;
 
       const outTW = tw * scale;
       const outTH = th * scale;
+      let renderMs = 0, readbackMs = 0;
 
       if (useGpu) {
         const tGpu = performance.now();
@@ -276,26 +280,31 @@ export class UpscalerEngine {
           tx * scale, ty * scale, overlap * scale, 1 / this.#modelValueRange,
         );
         this.#gpuRenderer.presentToCanvas();
-        perf.gpuRender += performance.now() - tGpu;
+        renderMs = performance.now() - tGpu;
+        perf.gpuRender += renderMs;
       } else {
         const tReadback = performance.now();
         const outData = results[outputName].data;
-        perf.readback += performance.now() - tReadback;
+        readbackMs = performance.now() - tReadback;
+        perf.readback += readbackMs;
 
         const tWrite = performance.now();
         const imgData = chwToImageData(outData, outTW, outTH, 255 / this.#modelValueRange);
         pasteTileCropped(outCtx, imgData, tx * scale, ty * scale, outW, outH, overlap * scale);
-        perf.writeTile += performance.now() - tWrite;
+        renderMs = performance.now() - tWrite;
+        perf.writeTile += renderMs;
       }
 
       const tDispose = performance.now();
       tensor.dispose();
       results[outputName].dispose();
-      perf.dispose += performance.now() - tDispose;
+      const disposeMs = performance.now() - tDispose;
+      perf.dispose += disposeMs;
 
       onTile?.({
-        index: i, total: tiles.length, tileMs, tilePixels: tw * th, canvas: outCanvas,
-        outX: tx * scale, outY: ty * scale, outW: outTW, outH: outTH,
+        index: i, total: tiles.length, tileMs: inferenceMs, tilePixels: tw * th,
+        canvas: outCanvas, outX: tx * scale, outY: ty * scale, outW: outTW, outH: outTH,
+        perf: { extractMs, inferenceMs, readbackMs, renderMs, disposeMs },
       });
 
       await yieldToEventLoop();
@@ -303,13 +312,24 @@ export class UpscalerEngine {
 
     if (useGpu) this.#gpuRenderer.presentToCanvas();
 
-    if (this.#profile) {
-      perf.total = performance.now() - tTotal;
-      this.#logPerf(perf, tiles, tileSize, srcW, srcH, outW, outH, useGpu, useGpuInput);
-      this.#endProfiling();
+    perf.total = performance.now() - tTotal;
+
+    let ortProfile = null;
+    if (this.#profiling) {
+      ortProfile = this.#collectOrtProfile();
     }
 
-    return outCanvas;
+    const pipeline = useGpuInput ? 'gpu-gpu' : useGpu ? 'gpu' : 'cpu';
+    return {
+      canvas: outCanvas,
+      perf: { ...perf, tiles: tiles.length, tileSize, srcW, srcH, outW, outH, pipeline },
+      ortProfile,
+    };
+  }
+
+  destroy() {
+    this.#releaseSession();
+    this.#modelBuffer = null;
   }
 
   #releaseSession() {
@@ -361,24 +381,11 @@ export class UpscalerEngine {
     return new ort.Tensor('float32', input, [1, 3, th, tw]);
   }
 
-  #logPerf(perf, tiles, tileSize, srcW, srcH, outW, outH, useGpu, useGpuInput) {
-    const renderLabel = useGpu ? 'GPU render (shader)' : 'Write tiles (canvas)';
-    const renderMs = useGpu ? perf.gpuRender : perf.writeTile;
-    const pipelineLabel = useGpuInput ? ' [GPU\u2192GPU]' : useGpu ? ' [GPU]' : ' [CPU]';
-    console.log(
-      `[Upscaler Perf] ${srcW}\u00d7${srcH} \u2192 ${outW}\u00d7${outH} | ${tiles.length} tiles @ ${tileSize > 0 ? tileSize + 'px' : 'full image'}${pipelineLabel}\n` +
-      `  ${(useGpuInput ? 'GPU frame upload:' : 'Setup (canvas/getImageData):').padEnd(30)}${perf.setup.toFixed(1)}ms\n` +
-      `  Denoise:                     ${perf.denoise.toFixed(1)}ms\n` +
-      `  Tile extract (CHW\u2192tensor):   ${perf.extract.toFixed(1)}ms\n` +
-      `  Inference (session.run):     ${perf.inference.toFixed(1)}ms\n` +
-      `  Data readback (.data):       ${perf.readback.toFixed(1)}ms\n` +
-      `  ${renderLabel.padEnd(29)}${renderMs.toFixed(1)}ms\n` +
-      `  Dispose (tensor/result):     ${perf.dispose.toFixed(1)}ms\n` +
-      `  Total:                       ${perf.total.toFixed(1)}ms`,
-    );
-  }
-
-  #endProfiling() {
+  /**
+   * Capture ORT's profiling output (logged to console by endProfiling)
+   * and return it as structured data instead of formatted strings.
+   */
+  #collectOrtProfile() {
     const captured = [];
     const origLog = console.log;
     const origWarn = console.warn;
@@ -389,47 +396,40 @@ export class UpscalerEngine {
     console.log = origLog;
     console.warn = origWarn;
 
-    if (!captured.length) return;
+    if (!captured.length) return null;
     let events;
     try {
       const raw = captured.join('\n');
       events = JSON.parse(raw.substring(raw.indexOf('['), raw.lastIndexOf(']') + 1));
-    } catch { return; }
+    } catch { return null; }
 
     const nodes = events.filter(e => e.cat === 'Node');
     const runs = events.filter(e => e.name === 'model_run');
-    if (!nodes.length) return;
+    if (!nodes.length) return null;
 
-    const gpu = {}, cpu = {};
-    let toHost = 0, toHostN = 0, fromHost = 0, fromHostN = 0;
+    const gpuOps = {}, cpuOps = {};
+    let toHostUs = 0, toHostN = 0, fromHostUs = 0, fromHostN = 0;
 
     for (const n of nodes) {
       const op = n.args?.op_name ?? n.name;
       const us = n.dur ?? 0;
-      if (op === 'MemcpyToHost') { toHost += us; toHostN++; continue; }
-      if (op === 'MemcpyFromHost') { fromHost += us; fromHostN++; continue; }
-      const bucket = n.args?.provider === 'CPUExecutionProvider' ? cpu : gpu;
+      if (op === 'MemcpyToHost') { toHostUs += us; toHostN++; continue; }
+      if (op === 'MemcpyFromHost') { fromHostUs += us; fromHostN++; continue; }
+      const bucket = n.args?.provider === 'CPUExecutionProvider' ? cpuOps : gpuOps;
       bucket[op] ??= { us: 0, n: 0 };
       bucket[op].us += us;
       bucket[op].n++;
     }
 
-    const ms = us => (us / 1000).toFixed(1) + 'ms';
-    const sumUs = obj => Object.values(obj).reduce((s, e) => s + e.us, 0);
-    const fmtBucket = b => Object.entries(b)
-      .sort(([, a], [, b]) => b.us - a.us)
-      .map(([op, { us, n }]) => `${op}\u00d7${n} ${ms(us)}`)
-      .join(', ');
-
-    const runUs = runs.reduce((s, r) => s + (r.dur ?? 0), 0);
-    const gpuT = sumUs(gpu), cpuT = sumUs(cpu);
-
-    const lines = [`[ORT Profile] ${runs.length} run(s), model_run: ${ms(runUs)}`];
-    if (gpuT)     lines.push(`  GPU ops:  ${ms(gpuT).padStart(9)}  ${fmtBucket(gpu)}`);
-    if (cpuT)     lines.push(`  CPU ops:  ${ms(cpuT).padStart(9)}  ${fmtBucket(cpu)}`);
-    if (toHost)   lines.push(`  GPU\u2192CPU:  ${ms(toHost).padStart(9)}  \u00d7${toHostN}`);
-    if (fromHost) lines.push(`  CPU\u2192GPU:  ${ms(fromHost).padStart(9)}  \u00d7${fromHostN}`);
-
-    console.log(lines.join('\n'));
+    return {
+      runs: runs.length,
+      modelRunUs: runs.reduce((s, r) => s + (r.dur ?? 0), 0),
+      gpuOps,
+      cpuOps,
+      memcpy: {
+        toHost: { us: toHostUs, n: toHostN },
+        fromHost: { us: fromHostUs, n: fromHostN },
+      },
+    };
   }
 }
