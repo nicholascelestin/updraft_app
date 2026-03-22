@@ -154,7 +154,7 @@ class UpscalerApp extends HTMLElement {
           const selectedOption = modelEl.selectedOptions[0];
           const modelUrl = selectedOption.value;
           scale = parseInt(selectedOption.dataset.scale, 10);
-          const inputRange = parseInt(selectedOption.dataset.range, 10) || 1;
+          const modelValueRange = parseInt(selectedOption.dataset.range, 10) || 1;
           const backend = selectedOption.dataset.backend || backendEl.value;
           const denoise = parseFloat(denoiseEl.value);
 
@@ -165,7 +165,7 @@ class UpscalerApp extends HTMLElement {
             {
               modelUrl,
               scale,
-              inputRange,
+              modelValueRange,
               denoise,
               onModelProgress(frac, msg) {
                 statusBar.showProgress(frac);

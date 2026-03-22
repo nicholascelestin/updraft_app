@@ -60,7 +60,7 @@ export class VideoUpscalerEngine {
    * @param {object} opts
    * @param {string} opts.modelUrl   — path to the ONNX model
    * @param {number} opts.scale      — upscale factor (default 4)
-   * @param {number} opts.inputRange — 1 or 255 (model input range)
+   * @param {number} opts.modelValueRange — 1 or 255 (upper bound of the model's expected value range)
    * @param {number} opts.tileSize   — tile size for inference
    * @param {string} opts.backend    — 'webgpu' | 'webgl' | 'wasm'
    * @param {number} opts.fps        — output frame rate
@@ -69,15 +69,15 @@ export class VideoUpscalerEngine {
    * @param {number} opts.outputScale — final output multiplier relative to source (e.g. 2 = 2x source).
    *                                    Must be <= scale. Defaults to scale (no downscale).
    */
-  constructor({ modelUrl, scale = 4, inputRange = 1, tileSize = 192, backend = 'webgpu', fps = 30, outputScale }) {
+  constructor({ modelUrl, scale = 4, modelValueRange = 1, tileSize = 192, backend = 'webgpu', fps = 30, outputScale }) {
     this.modelUrl = modelUrl;
     this.scale = scale;
-    this.inputRange = inputRange;
+    this.modelValueRange = modelValueRange;
     this.tileSize = tileSize;
     this.backend = backend;
     this.fps = fps;
     this.outputScale = outputScale || scale;
-    this._upscaler = new UpscalerEngine({ modelUrl, scale, inputRange });
+    this._upscaler = new UpscalerEngine({ modelUrl, scale, modelValueRange });
   }
 
   /**
@@ -182,7 +182,7 @@ export class VideoUpscalerEngine {
 
       await seekTo(video, time);
       onFrameProgress?.(i, totalFrames, 'upscaling');
-      const upscaledCanvas = await this._upscaler.upscale(video, this.tileSize, null, signal);
+      const upscaledCanvas = await this._upscaler.upscale(video, this.tileSize, { signal });
 
       // Downscale if needed (high-quality lanczos-like filter)
       let encodeCanvas = upscaledCanvas;

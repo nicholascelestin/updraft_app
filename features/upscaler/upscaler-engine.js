@@ -1,18 +1,27 @@
 /**
- * UpscalerEngine — pure inference logic, zero DOM dependency.
- * Downloads an ONNX super-resolution model, creates a session,
- * and runs tiled inference on an image.
+ * UpscalerEngine — tiled ONNX super-resolution inference.
+ * Downloads a model, creates a session, runs tiled inference on images.
+ * Uses Canvas 2D for pixel I/O in the WASM/WebGL path; GPU paths avoid readback.
  */
 
 import { fetchWithProgress } from 'lib/fetch-progress';
 import { GpuTileRenderer } from './gpu-tile-renderer.js';
 import { GpuFrameExtractor } from './gpu-frame-extractor.js';
+import { buildTileGrid, pasteTileCropped } from './tiling.js';
 
 const DEFAULT_SCALE = 4;
 const DEFAULT_OVERLAP = 16;
 
-function clamp255(v) {
+function clampByte(v) {
   return v < 0 ? 0 : v > 255 ? 255 : (v + 0.5) | 0;
+}
+
+function yieldToEventLoop() {
+  return new Promise(resolve => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = resolve;
+    ch.port2.postMessage(undefined);
+  });
 }
 
 /**
@@ -28,11 +37,8 @@ function clamp255(v) {
 function denoiseImageData(imageData, strength) {
   const { data, width, height } = imageData;
   const out = new Uint8ClampedArray(data.length);
-  // σ_range controls color similarity gate.
-  // Lower = only very similar pixels contribute (subtle).
-  // 30 at full strength is moderate; scales down with strength.
   const sigmaR = 15 + strength * 15;
-  const inv2sr2 = -0.5 / (sigmaR * sigmaR);
+  const colorFalloff = -0.5 / (sigmaR * sigmaR);
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -49,7 +55,7 @@ function denoiseImageData(imageData, strength) {
           const ni = (ny * width + nx) * 4;
           const dr = data[ni] - cr, dg = data[ni + 1] - cg, db = data[ni + 2] - cb;
           const colorDist2 = dr * dr + dg * dg + db * db;
-          const w = Math.exp(colorDist2 * inv2sr2);
+          const w = Math.exp(colorDist2 * colorFalloff);
           sumR += data[ni]     * w;
           sumG += data[ni + 1] * w;
           sumB += data[ni + 2] * w;
@@ -68,10 +74,12 @@ function denoiseImageData(imageData, strength) {
 }
 
 /**
- * Extract a tile from ImageData as a Float32 CHW array.
- * @param {number} inputScale - divide pixel values by this (255 for 0-1 range, 1 for 0-255 range)
+ * Extract a tile from ImageData as Float32 in CHW layout
+ * (channels-first: [R plane, G plane, B plane]).
+ *
+ * @param {number} valueScale - multiply each pixel byte by this (e.g. 1/255 for [0,1] output)
  */
-function extractTileCHW(imageData, tx, ty, tw, th, inputScale = 255) {
+function extractTileCHW(imageData, tx, ty, tw, th, valueScale) {
   const { data, width } = imageData;
   const out = new Float32Array(3 * th * tw);
   const planeSize = th * tw;
@@ -79,53 +87,35 @@ function extractTileCHW(imageData, tx, ty, tw, th, inputScale = 255) {
     for (let col = 0; col < tw; col++) {
       const srcIdx = ((ty + row) * width + (tx + col)) * 4;
       const dstIdx = row * tw + col;
-      out[dstIdx]                 = data[srcIdx]     / inputScale;
-      out[planeSize + dstIdx]     = data[srcIdx + 1] / inputScale;
-      out[2 * planeSize + dstIdx] = data[srcIdx + 2] / inputScale;
+      out[dstIdx]                 = data[srcIdx]     * valueScale;
+      out[planeSize + dstIdx]     = data[srcIdx + 1] * valueScale;
+      out[2 * planeSize + dstIdx] = data[srcIdx + 2] * valueScale;
     }
   }
   return out;
 }
 
 /**
- * Write a CHW output tile onto the destination canvas, cropping overlap.
+ * Convert CHW float32 data (channels-first: [R plane, G plane, B plane])
+ * back into an RGBA ImageData. Inverse of extractTileCHW.
+ *
+ * @param {number} valueScale - multiply each CHW value by this to get [0,255] bytes
  */
-let _scratchCanvas = null;
-let _scratchCtx = null;
-
-function writeTileToCanvas(ctx, chwData, fullW, fullH, dx, dy, realW, realH, canvasW, canvasH, overlap, outputScale = 255) {
-  const imgData = ctx.createImageData(realW, realH);
+function chwToImageData(chwData, width, height, valueScale) {
+  const imgData = new ImageData(width, height);
   const px = imgData.data;
-  const planeSize = fullW * fullH;
-  for (let row = 0; row < realH; row++) {
-    for (let col = 0; col < realW; col++) {
-      const srcIdx = row * fullW + col;
-      const dstIdx = (row * realW + col) * 4;
-      px[dstIdx]     = clamp255(chwData[srcIdx] * outputScale);
-      px[dstIdx + 1] = clamp255(chwData[planeSize + srcIdx] * outputScale);
-      px[dstIdx + 2] = clamp255(chwData[2 * planeSize + srcIdx] * outputScale);
+  const planeSize = width * height;
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const srcIdx = row * width + col;
+      const dstIdx = srcIdx * 4;
+      px[dstIdx]     = clampByte(chwData[srcIdx] * valueScale);
+      px[dstIdx + 1] = clampByte(chwData[planeSize + srcIdx] * valueScale);
+      px[dstIdx + 2] = clampByte(chwData[2 * planeSize + srcIdx] * valueScale);
       px[dstIdx + 3] = 255;
     }
   }
-
-  const cropL = dx > 0 ? overlap / 2 : 0;
-  const cropT = dy > 0 ? overlap / 2 : 0;
-  const cropR = (dx + realW) < canvasW ? overlap / 2 : 0;
-  const cropB = (dy + realH) < canvasH ? overlap / 2 : 0;
-
-  if (!_scratchCanvas) {
-    _scratchCanvas = document.createElement('canvas');
-    _scratchCtx = _scratchCanvas.getContext('2d');
-  }
-  _scratchCanvas.width = realW;
-  _scratchCanvas.height = realH;
-  _scratchCtx.putImageData(imgData, 0, 0);
-
-  ctx.drawImage(
-    _scratchCanvas,
-    cropL, cropT, realW - cropL - cropR, realH - cropT - cropB,
-    dx + cropL, dy + cropT, realW - cropL - cropR, realH - cropT - cropB,
-  );
+  return imgData;
 }
 
 export class UpscalerEngine {
@@ -134,19 +124,21 @@ export class UpscalerEngine {
   #modelUrl;
   #scale;
   #overlap;
-  #inputRange;
+  #modelValueRange;
   #denoise;
+  #profile;
   #activeBackend = null;
   #device = null;
   #gpuRenderer = null;
   #gpuExtractor = null;
 
-  constructor({ modelUrl, scale = DEFAULT_SCALE, overlap = DEFAULT_OVERLAP, inputRange = 1, denoise = 0 }) {
+  constructor({ modelUrl, scale = DEFAULT_SCALE, overlap = DEFAULT_OVERLAP, modelValueRange = 1, denoise = 0, profile = false }) {
     this.#modelUrl = modelUrl;
     this.#scale = scale;
     this.#overlap = overlap;
-    this.#inputRange = inputRange; // 1 = model expects 0-1, 255 = model expects 0-255
-    this.#denoise = denoise;       // 0..1 artifact smoothing strength
+    this.#modelValueRange = modelValueRange;
+    this.#denoise = denoise;
+    this.#profile = profile;
   }
 
   get scale() { return this.#scale; }
@@ -156,17 +148,7 @@ export class UpscalerEngine {
 
   async loadModel(backend = 'wasm', onProgress) {
     if (this.#session && this.#activeBackend === backend) return;
-
-    if (this.#session) {
-      this.#gpuRenderer?.destroy();
-      this.#gpuRenderer = null;
-      this.#gpuExtractor?.destroy();
-      this.#gpuExtractor = null;
-      this.#device = null;
-      try { this.#session.release(); } catch {}
-      this.#session = null;
-      this.#activeBackend = null;
-    }
+    this.#releaseSession();
 
     const ort = globalThis.ort;
     if (!ort) throw new Error('ONNX Runtime not loaded — include ort.all.min.js before using UpscalerEngine');
@@ -187,7 +169,7 @@ export class UpscalerEngine {
     const sessionOpts = {
       executionProviders: [backend],
       graphOptimizationLevel: 'all',
-      enableProfiling: true,
+      ...(this.#profile && { enableProfiling: true }),
     };
 
     if (backend === 'webgpu') {
@@ -203,6 +185,7 @@ export class UpscalerEngine {
         onProgress?.(1, `${backend} failed, falling back to WASM\u2026`);
         sessionOpts.executionProviders = ['wasm'];
         delete sessionOpts.preferredOutputLocation;
+        delete sessionOpts.enableProfiling;
         actualBackend = 'wasm';
         this.#session = await ort.InferenceSession.create(this.#modelBuffer, sessionOpts);
       } else {
@@ -231,10 +214,10 @@ export class UpscalerEngine {
     onProgress?.(1, 'Model loaded.');
   }
 
-  async upscale(img, tileSize, onTile, signal) {
+  async upscale(img, tileSize, { onTile, signal } = {}) {
     if (!this.#session) throw new Error('Model not loaded — call loadModel() first');
 
-    const perf = { setup: 0, denoise: 0, extract: 0, inference: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, yieldCb: 0, total: 0 };
+    const perf = { setup: 0, denoise: 0, extract: 0, inference: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, total: 0 };
     const tTotal = performance.now();
 
     const scale = this.#scale;
@@ -246,6 +229,101 @@ export class UpscalerEngine {
     const useGpu = this.#gpuRenderer !== null;
     const useGpuInput = this.#gpuExtractor !== null && this.#denoise === 0;
 
+    const srcData = this.#prepareSource(img, srcW, srcH, useGpuInput, perf);
+
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = outW;
+    outCanvas.height = outH;
+
+    let outCtx = null;
+    if (useGpu) {
+      this.#gpuRenderer.configure(outCanvas, outW, outH);
+    } else {
+      outCtx = outCanvas.getContext('2d');
+    }
+
+    const tiles = buildTileGrid(srcW, srcH, tileSize, overlap);
+
+    const inputName = this.#session.inputNames[0];
+    const outputName = this.#session.outputNames[0];
+
+    if (this.#profile) try { this.#session.startProfiling(); } catch {}
+
+    for (let i = 0; i < tiles.length; i++) {
+      if (signal?.aborted) throw new DOMException('Upscale cancelled', 'AbortError');
+      if (useGpu && (this.#gpuRenderer?.lost || this.#gpuExtractor?.lost)) {
+        throw new Error('GPU device was lost (browser or OS interrupted). Please retry or switch to the WASM backend.');
+      }
+
+      const { x: tx, y: ty, w: tw, h: th } = tiles[i];
+
+      const tExtract = performance.now();
+      const tensor = this.#createTileTensor(srcData, tx, ty, tw, th, useGpuInput);
+      perf.extract += performance.now() - tExtract;
+
+      const tInfer = performance.now();
+      const results = await this.#session.run({ [inputName]: tensor });
+      const tileMs = performance.now() - tInfer;
+      perf.inference += tileMs;
+
+      const outTW = tw * scale;
+      const outTH = th * scale;
+
+      if (useGpu) {
+        const tGpu = performance.now();
+        this.#gpuRenderer.renderTile(
+          results[outputName].gpuBuffer, outTW, outTH,
+          tx * scale, ty * scale, overlap * scale, 1 / this.#modelValueRange,
+        );
+        this.#gpuRenderer.presentToCanvas();
+        perf.gpuRender += performance.now() - tGpu;
+      } else {
+        const tReadback = performance.now();
+        const outData = results[outputName].data;
+        perf.readback += performance.now() - tReadback;
+
+        const tWrite = performance.now();
+        const imgData = chwToImageData(outData, outTW, outTH, 255 / this.#modelValueRange);
+        pasteTileCropped(outCtx, imgData, tx * scale, ty * scale, outW, outH, overlap * scale);
+        perf.writeTile += performance.now() - tWrite;
+      }
+
+      const tDispose = performance.now();
+      tensor.dispose();
+      results[outputName].dispose();
+      perf.dispose += performance.now() - tDispose;
+
+      onTile?.({
+        index: i, total: tiles.length, tileMs, tilePixels: tw * th, canvas: outCanvas,
+        outX: tx * scale, outY: ty * scale, outW: outTW, outH: outTH,
+      });
+
+      await yieldToEventLoop();
+    }
+
+    if (useGpu) this.#gpuRenderer.presentToCanvas();
+
+    if (this.#profile) {
+      perf.total = performance.now() - tTotal;
+      this.#logPerf(perf, tiles, tileSize, srcW, srcH, outW, outH, useGpu, useGpuInput);
+      this.#endProfiling();
+    }
+
+    return outCanvas;
+  }
+
+  #releaseSession() {
+    this.#gpuRenderer?.destroy();
+    this.#gpuRenderer = null;
+    this.#gpuExtractor?.destroy();
+    this.#gpuExtractor = null;
+    this.#device = null;
+    try { this.#session?.release(); } catch {}
+    this.#session = null;
+    this.#activeBackend = null;
+  }
+
+  #prepareSource(img, srcW, srcH, useGpuInput, perf) {
     const tSetup = performance.now();
     let srcData = null;
     if (useGpuInput) {
@@ -266,121 +344,24 @@ export class UpscalerEngine {
       tmpC.height = 0;
     }
     perf.setup = performance.now() - tSetup;
+    return srcData;
+  }
 
-    const outCanvas = document.createElement('canvas');
-    outCanvas.width = outW;
-    outCanvas.height = outH;
-
-    let outCtx = null;
-    if (useGpu) {
-      this.#gpuRenderer.configure(outCanvas, outW, outH);
-    } else {
-      outCtx = outCanvas.getContext('2d');
-    }
-
-    // tileSize 0 means "full image, no tiling" — skip overlap since there are no seams
-    const noTiling = tileSize <= 0;
-    const effectiveTileSize = noTiling ? Math.max(srcW, srcH) : tileSize;
-    const step = noTiling ? effectiveTileSize : effectiveTileSize - overlap;
-    const tiles = [];
-    for (let ty = 0; ty < srcH; ty += step) {
-      for (let tx = 0; tx < srcW; tx += step) {
-        tiles.push({
-          x: tx, y: ty,
-          w: Math.min(effectiveTileSize, srcW - tx),
-          h: Math.min(effectiveTileSize, srcH - ty),
-        });
-      }
-    }
-
-    const inputName = this.#session.inputNames[0];
-    const outputName = this.#session.outputNames[0];
-
-    try { this.#session.startProfiling(); } catch {}
-
-    for (let i = 0; i < tiles.length; i++) {
-      if (signal?.aborted) throw new DOMException('Upscale cancelled', 'AbortError');
-      if (useGpu && (this.#gpuRenderer?.lost || this.#gpuExtractor?.lost)) {
-        throw new Error('GPU device was lost (browser or OS interrupted). Please retry or switch to the WASM backend.');
-      }
-
-      const { x: tx, y: ty, w: tw, h: th } = tiles[i];
-
-      const tExtract = performance.now();
-      let tensor;
-      if (useGpuInput) {
-        const gpuBuf = this.#gpuExtractor.extractTile(tx, ty, tw, th, this.#inputRange);
-        tensor = ort.Tensor.fromGpuBuffer(gpuBuf, {
-          dataType: 'float32',
-          dims: [1, 3, th, tw],
-          dispose: () => {},
-        });
-      } else {
-        const inputScale = this.#inputRange === 255 ? 1 : 255;
-        const input = extractTileCHW(srcData, tx, ty, tw, th, inputScale);
-        tensor = new ort.Tensor('float32', input, [1, 3, th, tw]);
-      }
-      perf.extract += performance.now() - tExtract;
-
-      const tInfer = performance.now();
-      const results = await this.#session.run({ [inputName]: tensor });
-      const tileMs = performance.now() - tInfer;
-      perf.inference += tileMs;
-
-      const outTW = tw * scale;
-      const outTH = th * scale;
-
-      if (useGpu) {
-        const tGpu = performance.now();
-        const gpuOutputScale = this.#inputRange === 255 ? (1 / 255) : 1.0;
-        this.#gpuRenderer.renderTile(
-          results[outputName].gpuBuffer, outTW, outTH,
-          tx * scale, ty * scale, overlap * scale, gpuOutputScale,
-        );
-        this.#gpuRenderer.presentToCanvas();
-        perf.gpuRender += performance.now() - tGpu;
-      } else {
-        const tReadback = performance.now();
-        const outData = results[outputName].data;
-        perf.readback += performance.now() - tReadback;
-
-        const tWrite = performance.now();
-        const outputScale = this.#inputRange === 255 ? 1 : 255;
-        writeTileToCanvas(
-          outCtx, outData, outTW, outTH,
-          tx * scale, ty * scale, outTW, outTH,
-          outW, outH, overlap * scale, outputScale,
-        );
-        perf.writeTile += performance.now() - tWrite;
-      }
-
-      const tDispose = performance.now();
-      tensor.dispose();
-      results[outputName].dispose();
-      perf.dispose += performance.now() - tDispose;
-
-      const tYield = performance.now();
-      onTile?.({
-        index: i, total: tiles.length, tileMs, tilePixels: tw * th, canvas: outCanvas,
-        outX: tx * scale, outY: ty * scale, outW: outTW, outH: outTH,
+  #createTileTensor(srcData, tx, ty, tw, th, useGpuInput) {
+    const ort = globalThis.ort;
+    if (useGpuInput) {
+      const gpuBuf = this.#gpuExtractor.extractTile(tx, ty, tw, th, this.#modelValueRange);
+      return ort.Tensor.fromGpuBuffer(gpuBuf, {
+        dataType: 'float32',
+        dims: [1, 3, th, tw],
+        dispose: () => {},
       });
-
-      await new Promise(resolve => {
-        const ch = new MessageChannel();
-        ch.port1.onmessage = resolve;
-        ch.port2.postMessage(undefined);
-      });
-      perf.yieldCb += performance.now() - tYield;
     }
+    const input = extractTileCHW(srcData, tx, ty, tw, th, this.#modelValueRange / 255);
+    return new ort.Tensor('float32', input, [1, 3, th, tw]);
+  }
 
-    if (!useGpu && _scratchCanvas) { _scratchCanvas.width = 0; _scratchCanvas.height = 0; }
-
-    // Ensure final frame is on canvas for toBlob after the last yield
-    if (useGpu) this.#gpuRenderer.presentToCanvas();
-
-    this.#endProfilingWithSummary();
-
-    perf.total = performance.now() - tTotal;
+  #logPerf(perf, tiles, tileSize, srcW, srcH, outW, outH, useGpu, useGpuInput) {
     const renderLabel = useGpu ? 'GPU render (shader)' : 'Write tiles (canvas)';
     const renderMs = useGpu ? perf.gpuRender : perf.writeTile;
     const pipelineLabel = useGpuInput ? ' [GPU\u2192GPU]' : useGpu ? ' [GPU]' : ' [CPU]';
@@ -393,14 +374,11 @@ export class UpscalerEngine {
       `  Data readback (.data):       ${perf.readback.toFixed(1)}ms\n` +
       `  ${renderLabel.padEnd(29)}${renderMs.toFixed(1)}ms\n` +
       `  Dispose (tensor/result):     ${perf.dispose.toFixed(1)}ms\n` +
-      `  Yield (callback/msgCh):      ${perf.yieldCb.toFixed(1)}ms\n` +
       `  Total:                       ${perf.total.toFixed(1)}ms`,
     );
-
-    return outCanvas;
   }
 
-  #endProfilingWithSummary() {
+  #endProfiling() {
     const captured = [];
     const origLog = console.log;
     const origWarn = console.warn;
@@ -440,7 +418,7 @@ export class UpscalerEngine {
     const sumUs = obj => Object.values(obj).reduce((s, e) => s + e.us, 0);
     const fmtBucket = b => Object.entries(b)
       .sort(([, a], [, b]) => b.us - a.us)
-      .map(([op, { us, n }]) => `${op}×${n} ${ms(us)}`)
+      .map(([op, { us, n }]) => `${op}\u00d7${n} ${ms(us)}`)
       .join(', ');
 
     const runUs = runs.reduce((s, r) => s + (r.dur ?? 0), 0);
@@ -449,8 +427,8 @@ export class UpscalerEngine {
     const lines = [`[ORT Profile] ${runs.length} run(s), model_run: ${ms(runUs)}`];
     if (gpuT)     lines.push(`  GPU ops:  ${ms(gpuT).padStart(9)}  ${fmtBucket(gpu)}`);
     if (cpuT)     lines.push(`  CPU ops:  ${ms(cpuT).padStart(9)}  ${fmtBucket(cpu)}`);
-    if (toHost)   lines.push(`  GPU→CPU:  ${ms(toHost).padStart(9)}  ×${toHostN}`);
-    if (fromHost) lines.push(`  CPU→GPU:  ${ms(fromHost).padStart(9)}  ×${fromHostN}`);
+    if (toHost)   lines.push(`  GPU\u2192CPU:  ${ms(toHost).padStart(9)}  \u00d7${toHostN}`);
+    if (fromHost) lines.push(`  CPU\u2192GPU:  ${ms(fromHost).padStart(9)}  \u00d7${fromHostN}`);
 
     console.log(lines.join('\n'));
   }

@@ -12,6 +12,8 @@
  *   renderer.destroy();
  */
 
+import { overlapCrop } from './tiling.js';
+
 const SHADER = /* wgsl */ `
 struct Params {
   tileW: u32,
@@ -121,17 +123,8 @@ export class GpuTileRenderer {
    * @param {number} outputScale - multiply CHW values by this (1.0 for 0-1 models, 1/255 for 0-255 models)
    */
   renderTile(gpuBuffer, tileW, tileH, destX, destY, overlap, outputScale) {
-    const cropL = destX > 0 ? (overlap / 2) | 0 : 0;
-    const cropT = destY > 0 ? (overlap / 2) | 0 : 0;
-    const cropR = (destX + tileW) < this.#width  ? (overlap / 2) | 0 : 0;
-    const cropB = (destY + tileH) < this.#height ? (overlap / 2) | 0 : 0;
-
-    const scissorX = destX + cropL;
-    const scissorY = destY + cropT;
-    const scissorW = tileW - cropL - cropR;
-    const scissorH = tileH - cropT - cropB;
-
-    if (scissorW <= 0 || scissorH <= 0) return;
+    const scissor = overlapCrop(destX, destY, tileW, tileH, this.#width, this.#height, overlap);
+    if (scissor.w <= 0 || scissor.h <= 0) return;
 
     // Write tile params to uniform buffer
     const paramsData = new ArrayBuffer(PARAMS_BUFFER_SIZE);
@@ -164,7 +157,7 @@ export class GpuTileRenderer {
     pass.setPipeline(this.#pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.setViewport(destX, destY, tileW, tileH, 0, 1);
-    pass.setScissorRect(scissorX, scissorY, scissorW, scissorH);
+    pass.setScissorRect(scissor.x, scissor.y, scissor.w, scissor.h);
     pass.draw(6);
     pass.end();
 

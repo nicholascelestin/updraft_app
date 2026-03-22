@@ -89,14 +89,14 @@ class VideoUpscalerApp extends HTMLElement {
       const selectedModel = modelEl.selectedOptions[0];
       const modelUrl = selectedModel.value;
       const scale = parseInt(selectedModel.dataset.scale, 10);
-      const inputRange = parseInt(selectedModel.dataset.range, 10) || 1;
+      const modelValueRange = parseInt(selectedModel.dataset.range, 10) || 1;
       const tileSize = parseInt(tileSizeEl.value, 10);
       const backend = backendEl.value;
       const fps = parseInt(fpsEl.value, 10);
       const outputScale = parseInt(outputEl.value, 10);
 
       const engine = new VideoUpscalerEngine({
-        modelUrl, scale, inputRange, tileSize, backend, fps, outputScale,
+        modelUrl, scale, modelValueRange, tileSize, backend, fps, outputScale,
       });
 
       const { width, height } = this.#videoInfo;

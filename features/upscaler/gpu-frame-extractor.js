@@ -6,7 +6,7 @@
  * Usage:
  *   const extractor = new GpuFrameExtractor(device);
  *   extractor.uploadFrame(videoElement, width, height);
- *   const gpuBuffer = extractor.extractTile(tx, ty, tw, th, inputRange);
+ *   const gpuBuffer = extractor.extractTile(tx, ty, tw, th, modelValueRange);
  *   // gpuBuffer contains CHW float32 data for the tile
  *   extractor.destroy();
  */
@@ -105,11 +105,11 @@ export class GpuFrameExtractor {
    * @param {number} ty - source tile Y
    * @param {number} tw - tile width
    * @param {number} th - tile height
-   * @param {number} inputRange - model input range (1 or 255);
+   * @param {number} modelValueRange - upper bound of the model's expected value range (1 or 255);
    *   texture values are [0,1] so this acts as a multiplier.
    * @returns {GPUBuffer} containing 3×tw×th float32 values in CHW order
    */
-  extractTile(tx, ty, tw, th, inputRange) {
+  extractTile(tx, ty, tw, th, modelValueRange) {
     const byteSize = 3 * tw * th * 4;
 
     if (this.#tileBufferSize < byteSize) {
@@ -131,7 +131,7 @@ export class GpuFrameExtractor {
     u32[1] = ty;
     u32[2] = tw;
     u32[3] = th;
-    f32[4] = inputRange;
+    f32[4] = modelValueRange;
     this.#device.queue.writeBuffer(this.#paramsBuffer, 0, paramsData);
 
     const bindGroup = this.#device.createBindGroup({
