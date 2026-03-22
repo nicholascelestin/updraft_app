@@ -5,6 +5,7 @@
  */
 
 import { fetchWithProgress } from '../../lib/fetch-progress.js';
+import { GpuTileRenderer } from './gpu-tile-renderer.js';
 
 const DEFAULT_SCALE = 4;
 const DEFAULT_OVERLAP = 16;
@@ -135,6 +136,8 @@ export class UpscalerEngine {
   #inputRange;
   #denoise;
   #activeBackend = null;
+  #device = null;
+  #gpuRenderer = null;
 
   constructor({ modelUrl, scale = DEFAULT_SCALE, overlap = DEFAULT_OVERLAP, inputRange = 1, denoise = 0 }) {
     this.#modelUrl = modelUrl;
@@ -153,6 +156,9 @@ export class UpscalerEngine {
     if (this.#session && this.#activeBackend === backend) return;
 
     if (this.#session) {
+      this.#gpuRenderer?.destroy();
+      this.#gpuRenderer = null;
+      this.#device = null;
       try { this.#session.release(); } catch {}
       this.#session = null;
       this.#activeBackend = null;
@@ -180,6 +186,10 @@ export class UpscalerEngine {
       enableProfiling: true,
     };
 
+    if (backend === 'webgpu') {
+      sessionOpts.preferredOutputLocation = 'gpu-buffer';
+    }
+
     let actualBackend = backend;
     try {
       this.#session = await ort.InferenceSession.create(this.#modelBuffer, sessionOpts);
@@ -188,6 +198,7 @@ export class UpscalerEngine {
         console.warn(`[UpscalerEngine] ${backend} backend failed, falling back to WASM. Reason:`, e);
         onProgress?.(1, `${backend} failed, falling back to WASM\u2026`);
         sessionOpts.executionProviders = ['wasm'];
+        delete sessionOpts.preferredOutputLocation;
         actualBackend = 'wasm';
         this.#session = await ort.InferenceSession.create(this.#modelBuffer, sessionOpts);
       } else {
@@ -196,6 +207,18 @@ export class UpscalerEngine {
     }
 
     this.#activeBackend = actualBackend;
+
+    if (actualBackend === 'webgpu') {
+      try {
+        this.#device = await ort.env.webgpu.device;
+        this.#gpuRenderer = new GpuTileRenderer(this.#device);
+      } catch (err) {
+        console.warn('[UpscalerEngine] GPU tile renderer init failed, using CPU readback:', err);
+        this.#device = null;
+        this.#gpuRenderer = null;
+      }
+    }
+
     this.#modelBuffer = null;
     onProgress?.(1, 'Model loaded.');
   }
@@ -203,7 +226,7 @@ export class UpscalerEngine {
   async upscale(img, tileSize, onTile, signal) {
     if (!this.#session) throw new Error('Model not loaded — call loadModel() first');
 
-    const perf = { setup: 0, denoise: 0, extract: 0, inference: 0, readback: 0, writeTile: 0, dispose: 0, yieldCb: 0, total: 0 };
+    const perf = { setup: 0, denoise: 0, extract: 0, inference: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, yieldCb: 0, total: 0 };
     const tTotal = performance.now();
 
     const scale = this.#scale;
@@ -212,6 +235,7 @@ export class UpscalerEngine {
     const srcH = img.height;
     const outW = srcW * scale;
     const outH = srcH * scale;
+    const useGpu = this.#gpuRenderer !== null;
 
     const tSetup = performance.now();
     const tmpC = document.createElement('canvas');
@@ -234,7 +258,13 @@ export class UpscalerEngine {
     const outCanvas = document.createElement('canvas');
     outCanvas.width = outW;
     outCanvas.height = outH;
-    const outCtx = outCanvas.getContext('2d');
+
+    let outCtx = null;
+    if (useGpu) {
+      this.#gpuRenderer.configure(outCanvas, outW, outH);
+    } else {
+      outCtx = outCanvas.getContext('2d');
+    }
 
     // tileSize 0 means "full image, no tiling" — skip overlap since there are no seams
     const noTiling = tileSize <= 0;
@@ -275,21 +305,32 @@ export class UpscalerEngine {
       const tileMs = performance.now() - tInfer;
       perf.inference += tileMs;
 
-      const tReadback = performance.now();
-      const outData = results[outputName].data;
-      perf.readback += performance.now() - tReadback;
-
       const outTW = tw * scale;
       const outTH = th * scale;
 
-      const tWrite = performance.now();
-      const outputScale = this.#inputRange === 255 ? 1 : 255; // inverse of inputScale
-      writeTileToCanvas(
-        outCtx, outData, outTW, outTH,
-        tx * scale, ty * scale, outTW, outTH,
-        outW, outH, overlap * scale, outputScale,
-      );
-      perf.writeTile += performance.now() - tWrite;
+      if (useGpu) {
+        const tGpu = performance.now();
+        const gpuOutputScale = this.#inputRange === 255 ? (1 / 255) : 1.0;
+        this.#gpuRenderer.renderTile(
+          results[outputName].gpuBuffer, outTW, outTH,
+          tx * scale, ty * scale, overlap * scale, gpuOutputScale,
+        );
+        this.#gpuRenderer.presentToCanvas();
+        perf.gpuRender += performance.now() - tGpu;
+      } else {
+        const tReadback = performance.now();
+        const outData = results[outputName].data;
+        perf.readback += performance.now() - tReadback;
+
+        const tWrite = performance.now();
+        const outputScale = this.#inputRange === 255 ? 1 : 255;
+        writeTileToCanvas(
+          outCtx, outData, outTW, outTH,
+          tx * scale, ty * scale, outTW, outTH,
+          outW, outH, overlap * scale, outputScale,
+        );
+        perf.writeTile += performance.now() - tWrite;
+      }
 
       const tDispose = performance.now();
       tensor.dispose();
@@ -310,19 +351,24 @@ export class UpscalerEngine {
       perf.yieldCb += performance.now() - tYield;
     }
 
-    if (_scratchCanvas) { _scratchCanvas.width = 0; _scratchCanvas.height = 0; }
+    if (!useGpu && _scratchCanvas) { _scratchCanvas.width = 0; _scratchCanvas.height = 0; }
+
+    // Ensure final frame is on canvas for toBlob after the last yield
+    if (useGpu) this.#gpuRenderer.presentToCanvas();
 
     this.#endProfilingWithSummary();
 
     perf.total = performance.now() - tTotal;
+    const renderLabel = useGpu ? 'GPU render (shader)' : 'Write tiles (canvas)';
+    const renderMs = useGpu ? perf.gpuRender : perf.writeTile;
     console.log(
-      `[Upscaler Perf] ${srcW}×${srcH} → ${outW}×${outH} | ${tiles.length} tiles @ ${tileSize > 0 ? tileSize + 'px' : 'full image'}\n` +
+      `[Upscaler Perf] ${srcW}\u00d7${srcH} \u2192 ${outW}\u00d7${outH} | ${tiles.length} tiles @ ${tileSize > 0 ? tileSize + 'px' : 'full image'}${useGpu ? ' [GPU]' : ' [CPU]'}\n` +
       `  Setup (canvas/getImageData): ${perf.setup.toFixed(1)}ms\n` +
       `  Denoise:                     ${perf.denoise.toFixed(1)}ms\n` +
-      `  Tile extract (CHW→tensor):   ${perf.extract.toFixed(1)}ms\n` +
+      `  Tile extract (CHW\u2192tensor):   ${perf.extract.toFixed(1)}ms\n` +
       `  Inference (session.run):     ${perf.inference.toFixed(1)}ms\n` +
       `  Data readback (.data):       ${perf.readback.toFixed(1)}ms\n` +
-      `  Write tiles (canvas):        ${perf.writeTile.toFixed(1)}ms\n` +
+      `  ${renderLabel.padEnd(29)}${renderMs.toFixed(1)}ms\n` +
       `  Dispose (tensor/result):     ${perf.dispose.toFixed(1)}ms\n` +
       `  Yield (callback/msgCh):      ${perf.yieldCb.toFixed(1)}ms\n` +
       `  Total:                       ${perf.total.toFixed(1)}ms`,
