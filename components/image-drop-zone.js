@@ -5,7 +5,7 @@
  *   image-loaded  — detail: { image: HTMLImageElement }
  */
 
-import { morph } from '../lib/morph.js';
+import { morph } from 'lib/morph';
 
 class ImageDropZone extends HTMLElement {
   connectedCallback() {

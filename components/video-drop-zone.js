@@ -5,7 +5,7 @@
  *   video-loaded  — detail: { file: File, video: HTMLVideoElement, duration, width, height }
  */
 
-import { morph } from '../lib/morph.js';
+import { morph } from 'lib/morph';
 
 class VideoDropZone extends HTMLElement {
   connectedCallback() {

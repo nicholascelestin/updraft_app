@@ -4,9 +4,9 @@
  * polling, and video playback into a single web component.
  */
 
-import { morph } from '../../lib/morph.js';
-import '../../components/image-drop-zone.js';
-import '../../components/status-bar.js';
+import { morph } from 'lib/morph';
+import 'components/image-drop-zone';
+import 'components/status-bar';
 
 /**
  * Submit a RunPod job and poll until completion.

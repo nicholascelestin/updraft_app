@@ -49,6 +49,20 @@
 
     <script src="https://cdn.jsdelivr.net/npm/idiomorph@0.3.0/dist/idiomorph.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.all.min.js"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "lib/morph":                    "./lib/morph.js",
+        "lib/escape":                   "./lib/escape.js",
+        "lib/fetch-progress":           "./lib/fetch-progress.js",
+        "components/image-drop-zone":   "./components/image-drop-zone.js",
+        "components/video-drop-zone":   "./components/video-drop-zone.js",
+        "components/status-bar":        "./components/status-bar.js",
+        "components/compare-slider":    "./components/compare-slider.js",
+        "components/image-cropper":     "./components/image-cropper.js"
+      }
+    }
+    </script>
     <script type="module">
         import './features/upscaler/upscaler-app.js';
         import './features/i2v/i2v-app.js';

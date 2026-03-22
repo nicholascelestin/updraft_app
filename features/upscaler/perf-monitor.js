@@ -2,7 +2,7 @@
  * <perf-monitor> — fixed-position performance overlay.
  */
 
-import { morph } from '../../lib/morph.js';
+import { morph } from 'lib/morph';
 
 function fmtTime(ms) {
   if (ms < 1000) return ms.toFixed(0) + ' ms';
@@ -30,6 +30,13 @@ class PerfMonitor extends HTMLElement {
   connectedCallback() {
     this.classList.add('perf-monitor');
     this.#render();
+  }
+
+  disconnectedCallback() {
+    if (this.#heapInterval) {
+      clearInterval(this.#heapInterval);
+      this.#heapInterval = null;
+    }
   }
 
   start(backend) {

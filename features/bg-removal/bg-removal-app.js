@@ -2,11 +2,11 @@
  * <bg-removal-app> — orchestrates the background removal feature.
  */
 
-import { morph } from '../../lib/morph.js';
-import '../../components/image-drop-zone.js';
-import '../../components/status-bar.js';
-import '../upscaler/compare-slider.js';
-import '../upscaler/image-cropper.js';
+import { morph } from 'lib/morph';
+import 'components/image-drop-zone';
+import 'components/status-bar';
+import 'components/compare-slider';
+import 'components/image-cropper';
 import { BgRemovalEngine, MODELS } from './bg-removal-engine.js';
 
 /**

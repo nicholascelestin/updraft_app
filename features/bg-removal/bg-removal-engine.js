@@ -4,7 +4,7 @@
  * and runs background removal on an image.
  */
 
-import { fetchWithProgress } from '../../lib/fetch-progress.js';
+import { fetchWithProgress } from 'lib/fetch-progress';
 
 const MODELS = {
   'isnet': {

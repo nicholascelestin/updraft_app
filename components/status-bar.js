@@ -2,11 +2,8 @@
  * <status-bar> — status message + progress bar.
  */
 
-import { morph } from '../lib/morph.js';
-
-function esc(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+import { morph } from 'lib/morph';
+import { esc } from 'lib/escape';
 
 class StatusBar extends HTMLElement {
   #msg = '';

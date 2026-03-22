@@ -5,7 +5,7 @@
  *   crop-changed  — detail: { crop: { x, y, w, h } | null }
  */
 
-import { morph } from '../../lib/morph.js';
+import { morph } from 'lib/morph';
 
 class ImageCropper extends HTMLElement {
   #image = null;
@@ -13,6 +13,11 @@ class ImageCropper extends HTMLElement {
   #dragging = false;
   #dragStart = null;
   #dragCurrent = null;
+
+  #onWindowMouseMove = (e) => { if (this.#dragging) { this.#dragCurrent = this.#eventToElement(e); this.#drawOverlay(); } };
+  #onWindowTouchMove = (e) => { if (this.#dragging) { this.#dragCurrent = this.#eventToElement(e); this.#drawOverlay(); } };
+  #onWindowMouseUp = () => { if (this.#dragging) this.#finishDrag(); };
+  #onWindowTouchEnd = () => { if (this.#dragging) this.#finishDrag(); };
 
   connectedCallback() {
     this.classList.add('image-cropper');
@@ -38,10 +43,17 @@ class ImageCropper extends HTMLElement {
       this.#drawOverlay();
     }, { passive: true });
 
-    window.addEventListener('mousemove', e => { if (this.#dragging) { this.#dragCurrent = this.#eventToElement(e); this.#drawOverlay(); } });
-    window.addEventListener('touchmove', e => { if (this.#dragging) { this.#dragCurrent = this.#eventToElement(e); this.#drawOverlay(); } }, { passive: true });
-    window.addEventListener('mouseup', () => { if (this.#dragging) this.#finishDrag(); });
-    window.addEventListener('touchend', () => { if (this.#dragging) this.#finishDrag(); });
+    window.addEventListener('mousemove', this.#onWindowMouseMove);
+    window.addEventListener('touchmove', this.#onWindowTouchMove, { passive: true });
+    window.addEventListener('mouseup', this.#onWindowMouseUp);
+    window.addEventListener('touchend', this.#onWindowTouchEnd);
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener('mousemove', this.#onWindowMouseMove);
+    window.removeEventListener('touchmove', this.#onWindowTouchMove);
+    window.removeEventListener('mouseup', this.#onWindowMouseUp);
+    window.removeEventListener('touchend', this.#onWindowTouchEnd);
   }
 
   show(image) {

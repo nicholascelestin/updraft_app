@@ -59,12 +59,19 @@ export class GpuTileRenderer {
   #canvasFormat;
   #width = 0;
   #height = 0;
+  #lost = false;
 
   constructor(device) {
     this.#device = device;
     this.#canvasFormat = navigator.gpu.getPreferredCanvasFormat();
     this.#initPipeline();
+    this.#device.lost.then((info) => {
+      this.#lost = true;
+      console.warn('[GpuTileRenderer] GPU device lost:', info.message);
+    });
   }
+
+  get lost() { return this.#lost; }
 
   configure(canvas, width, height) {
     this.#canvasCtx = canvas.getContext('webgpu');

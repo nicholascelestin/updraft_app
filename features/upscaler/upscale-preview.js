@@ -7,7 +7,7 @@
  *   runpod-status     — detail: { message }
  */
 
-import { morph } from '../../lib/morph.js';
+import { morph } from 'lib/morph';
 import { UpscalerEngine } from './upscaler-engine.js';
 
 class UpscalePreview extends HTMLElement {

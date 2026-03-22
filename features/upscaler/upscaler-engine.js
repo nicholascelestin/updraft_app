@@ -4,7 +4,7 @@
  * and runs tiled inference on an image.
  */
 
-import { fetchWithProgress } from '../../lib/fetch-progress.js';
+import { fetchWithProgress } from 'lib/fetch-progress';
 import { GpuTileRenderer } from './gpu-tile-renderer.js';
 import { GpuFrameExtractor } from './gpu-frame-extractor.js';
 
@@ -300,6 +300,9 @@ export class UpscalerEngine {
 
     for (let i = 0; i < tiles.length; i++) {
       if (signal?.aborted) throw new DOMException('Upscale cancelled', 'AbortError');
+      if (useGpu && (this.#gpuRenderer?.lost || this.#gpuExtractor?.lost)) {
+        throw new Error('GPU device was lost (browser or OS interrupted). Please retry or switch to the WASM backend.');
+      }
 
       const { x: tx, y: ty, w: tw, h: th } = tiles[i];
 

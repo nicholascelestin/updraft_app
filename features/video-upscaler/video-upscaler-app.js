@@ -3,9 +3,9 @@
  * Accepts an MP4 video, upscales every frame via ONNX, and outputs a new MP4.
  */
 
-import { morph } from '../../lib/morph.js';
-import '../../components/video-drop-zone.js';
-import '../../components/status-bar.js';
+import { morph } from 'lib/morph';
+import 'components/video-drop-zone';
+import 'components/status-bar';
 import { VideoUpscalerEngine } from './video-upscaler-engine.js';
 
 class VideoUpscalerApp extends HTMLElement {

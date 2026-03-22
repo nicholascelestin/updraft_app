@@ -53,11 +53,18 @@ export class GpuFrameExtractor {
   #frameTexture = null;
   #tileBuffer = null;
   #tileBufferSize = 0;
+  #lost = false;
 
   constructor(device) {
     this.#device = device;
     this.#initPipeline();
+    this.#device.lost.then((info) => {
+      this.#lost = true;
+      console.warn('[GpuFrameExtractor] GPU device lost:', info.message);
+    });
   }
+
+  get lost() { return this.#lost; }
 
   /**
    * Upload a frame source to the internal GPU texture.

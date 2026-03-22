@@ -3,12 +3,12 @@
  * Wraps all upscaler sub-components and control logic into a single web component.
  */
 
-import { morph } from '../../lib/morph.js';
-import '../../components/image-drop-zone.js';
-import '../../components/status-bar.js';
-import './image-cropper.js';
+import { morph } from 'lib/morph';
+import 'components/image-drop-zone';
+import 'components/status-bar';
+import 'components/image-cropper';
+import 'components/compare-slider';
 import './upscale-preview.js';
-import './compare-slider.js';
 import './perf-monitor.js';
 
 class UpscalerApp extends HTMLElement {

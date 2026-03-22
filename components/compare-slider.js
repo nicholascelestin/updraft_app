@@ -2,7 +2,8 @@
  * <compare-slider> — before/after image comparison slider.
  */
 
-import { morph } from '../../lib/morph.js';
+import { morph } from 'lib/morph';
+import { esc } from 'lib/escape';
 
 class CompareSlider extends HTMLElement {
   #dragging = false;
@@ -14,12 +15,16 @@ class CompareSlider extends HTMLElement {
   #downloadSrc = '';   // separate src for download (e.g. transparent PNG for bg-removal)
   #downloadName = '';
 
+  #onWindowMouseMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
+  #onWindowTouchMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
+  #onWindowMouseUp = () => { this.#dragging = false; };
+  #onWindowTouchEnd = () => { this.#dragging = false; };
+
   connectedCallback() {
     this.classList.add('compare');
     this.#render();
 
     this.addEventListener('mousedown', e => {
-      // Don't start drag if clicking toolbar buttons
       if (e.target.closest('.compare-toolbar')) return;
       e.preventDefault(); this.#dragging = true; this.#setPosition(this.#getFrac(e));
     });
@@ -28,12 +33,11 @@ class CompareSlider extends HTMLElement {
       this.#dragging = true; this.#setPosition(this.#getFrac(e));
     }, { passive: true });
 
-    window.addEventListener('mousemove', e => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); });
-    window.addEventListener('touchmove', e => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); }, { passive: true });
-    window.addEventListener('mouseup', () => { this.#dragging = false; });
-    window.addEventListener('touchend', () => { this.#dragging = false; });
+    window.addEventListener('mousemove', this.#onWindowMouseMove);
+    window.addEventListener('touchmove', this.#onWindowTouchMove, { passive: true });
+    window.addEventListener('mouseup', this.#onWindowMouseUp);
+    window.addEventListener('touchend', this.#onWindowTouchEnd);
 
-    // Toolbar button delegation
     this.addEventListener('click', e => {
       const openBtn = e.target.closest('.compare-open-btn');
       const expandBtn = e.target.closest('.compare-expand-btn');
@@ -65,6 +69,10 @@ class CompareSlider extends HTMLElement {
 
   disconnectedCallback() {
     this.#resizeObserver?.disconnect();
+    window.removeEventListener('mousemove', this.#onWindowMouseMove);
+    window.removeEventListener('touchmove', this.#onWindowTouchMove);
+    window.removeEventListener('mouseup', this.#onWindowMouseUp);
+    window.removeEventListener('touchend', this.#onWindowTouchEnd);
   }
 
   /**
@@ -143,6 +151,8 @@ class CompareSlider extends HTMLElement {
 
   #render() {
     const expandLabel = this.#expanded ? 'Fit to View' : 'Full Size';
+    const beforeLabel = esc(this.getAttribute('before-label') || 'Original');
+    const afterLabel = esc(this.getAttribute('after-label') || '4x Upscaled');
     morph(this, `
       <style>
         .compare {
@@ -199,8 +209,8 @@ class CompareSlider extends HTMLElement {
         <img src="${this.#beforeSrc}">
       </div>
       <div class="compare-handle"></div>
-      <span class="compare-label compare-label-before">${this.getAttribute('before-label') || 'Original'}</span>
-      <span class="compare-label compare-label-after">${this.getAttribute('after-label') || '4x Upscaled'}</span>
+      <span class="compare-label compare-label-before">${beforeLabel}</span>
+      <span class="compare-label compare-label-after">${afterLabel}</span>
       <div class="compare-toolbar">
         <button type="button" class="compare-open-btn">Open in Tab</button>
         <button type="button" class="compare-expand-btn">${expandLabel}</button>
