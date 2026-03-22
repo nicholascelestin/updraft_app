@@ -28,20 +28,6 @@ function seekTo(video, time) {
 }
 
 /**
- * Draw the current video frame onto a canvas and return the canvas.
- */
-function grabFrame(video) {
-  const w = video.videoWidth;
-  const h = video.videoHeight;
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, w, h);
-  return canvas;
-}
-
-/**
  * Pick an H.264 High-profile codec string with a level that supports
  * the given output resolution and frame rate.
  */
@@ -194,13 +180,9 @@ export class VideoUpscalerEngine {
       const time = i / fps;
       onFrameProgress?.(i, totalFrames, 'extracting');
 
-      // Seek and grab frame
       await seekTo(video, time);
-      const frameCanvas = grabFrame(video);
-
-      // Upscale the frame
       onFrameProgress?.(i, totalFrames, 'upscaling');
-      const upscaledCanvas = await this._upscaler.upscale(frameCanvas, this.tileSize, null, signal);
+      const upscaledCanvas = await this._upscaler.upscale(video, this.tileSize, null, signal);
 
       // Downscale if needed (high-quality lanczos-like filter)
       let encodeCanvas = upscaledCanvas;
@@ -228,9 +210,6 @@ export class VideoUpscalerEngine {
       encoder.encode(videoFrame, { keyFrame });
       videoFrame.close();
 
-      // Clean up canvases
-      frameCanvas.width = 0;
-      frameCanvas.height = 0;
       upscaledCanvas.width = 0;
       upscaledCanvas.height = 0;
       if (needsDownscale) { encodeCanvas.width = 0; encodeCanvas.height = 0; }

@@ -6,6 +6,7 @@
 
 import { fetchWithProgress } from '../../lib/fetch-progress.js';
 import { GpuTileRenderer } from './gpu-tile-renderer.js';
+import { GpuFrameExtractor } from './gpu-frame-extractor.js';
 
 const DEFAULT_SCALE = 4;
 const DEFAULT_OVERLAP = 16;
@@ -138,6 +139,7 @@ export class UpscalerEngine {
   #activeBackend = null;
   #device = null;
   #gpuRenderer = null;
+  #gpuExtractor = null;
 
   constructor({ modelUrl, scale = DEFAULT_SCALE, overlap = DEFAULT_OVERLAP, inputRange = 1, denoise = 0 }) {
     this.#modelUrl = modelUrl;
@@ -158,6 +160,8 @@ export class UpscalerEngine {
     if (this.#session) {
       this.#gpuRenderer?.destroy();
       this.#gpuRenderer = null;
+      this.#gpuExtractor?.destroy();
+      this.#gpuExtractor = null;
       this.#device = null;
       try { this.#session.release(); } catch {}
       this.#session = null;
@@ -212,10 +216,14 @@ export class UpscalerEngine {
       try {
         this.#device = await ort.env.webgpu.device;
         this.#gpuRenderer = new GpuTileRenderer(this.#device);
+        if (typeof ort.Tensor.fromGpuBuffer === 'function') {
+          this.#gpuExtractor = new GpuFrameExtractor(this.#device);
+        }
       } catch (err) {
-        console.warn('[UpscalerEngine] GPU tile renderer init failed, using CPU readback:', err);
+        console.warn('[UpscalerEngine] GPU pipeline init failed, using CPU fallback:', err);
         this.#device = null;
         this.#gpuRenderer = null;
+        this.#gpuExtractor = null;
       }
     }
 
@@ -231,29 +239,33 @@ export class UpscalerEngine {
 
     const scale = this.#scale;
     const overlap = this.#overlap;
-    const srcW = img.width;
-    const srcH = img.height;
+    const srcW = img.videoWidth ?? img.width;
+    const srcH = img.videoHeight ?? img.height;
     const outW = srcW * scale;
     const outH = srcH * scale;
     const useGpu = this.#gpuRenderer !== null;
+    const useGpuInput = this.#gpuExtractor !== null && this.#denoise === 0;
 
     const tSetup = performance.now();
-    const tmpC = document.createElement('canvas');
-    tmpC.width = srcW;
-    tmpC.height = srcH;
-    const tmpCtx = tmpC.getContext('2d');
-    tmpCtx.drawImage(img, 0, 0);
-
-    const srcData = tmpCtx.getImageData(0, 0, srcW, srcH);
-    perf.setup = performance.now() - tSetup;
-
-    if (this.#denoise > 0) {
-      const tDenoise = performance.now();
-      denoiseImageData(srcData, this.#denoise);
-      perf.denoise = performance.now() - tDenoise;
+    let srcData = null;
+    if (useGpuInput) {
+      this.#gpuExtractor.uploadFrame(img, srcW, srcH);
+    } else {
+      const tmpC = document.createElement('canvas');
+      tmpC.width = srcW;
+      tmpC.height = srcH;
+      const tmpCtx = tmpC.getContext('2d');
+      tmpCtx.drawImage(img, 0, 0);
+      srcData = tmpCtx.getImageData(0, 0, srcW, srcH);
+      if (this.#denoise > 0) {
+        const tDenoise = performance.now();
+        denoiseImageData(srcData, this.#denoise);
+        perf.denoise = performance.now() - tDenoise;
+      }
+      tmpC.width = 0;
+      tmpC.height = 0;
     }
-    tmpC.width = 0;
-    tmpC.height = 0;
+    perf.setup = performance.now() - tSetup;
 
     const outCanvas = document.createElement('canvas');
     outCanvas.width = outW;
@@ -291,13 +303,20 @@ export class UpscalerEngine {
 
       const { x: tx, y: ty, w: tw, h: th } = tiles[i];
 
-      // inputRange controls the model's expected pixel value range:
-      //   inputRange=1   → model expects [0,1]: divide by 255 to normalize
-      //   inputRange=255 → model expects [0,255]: divide by 1 (pass through)
       const tExtract = performance.now();
-      const inputScale = this.#inputRange === 255 ? 1 : 255;
-      const input = extractTileCHW(srcData, tx, ty, tw, th, inputScale);
-      const tensor = new ort.Tensor('float32', input, [1, 3, th, tw]);
+      let tensor;
+      if (useGpuInput) {
+        const gpuBuf = this.#gpuExtractor.extractTile(tx, ty, tw, th, this.#inputRange);
+        tensor = ort.Tensor.fromGpuBuffer(gpuBuf, {
+          dataType: 'float32',
+          dims: [1, 3, th, tw],
+          dispose: () => {},
+        });
+      } else {
+        const inputScale = this.#inputRange === 255 ? 1 : 255;
+        const input = extractTileCHW(srcData, tx, ty, tw, th, inputScale);
+        tensor = new ort.Tensor('float32', input, [1, 3, th, tw]);
+      }
       perf.extract += performance.now() - tExtract;
 
       const tInfer = performance.now();
@@ -361,9 +380,10 @@ export class UpscalerEngine {
     perf.total = performance.now() - tTotal;
     const renderLabel = useGpu ? 'GPU render (shader)' : 'Write tiles (canvas)';
     const renderMs = useGpu ? perf.gpuRender : perf.writeTile;
+    const pipelineLabel = useGpuInput ? ' [GPU\u2192GPU]' : useGpu ? ' [GPU]' : ' [CPU]';
     console.log(
-      `[Upscaler Perf] ${srcW}\u00d7${srcH} \u2192 ${outW}\u00d7${outH} | ${tiles.length} tiles @ ${tileSize > 0 ? tileSize + 'px' : 'full image'}${useGpu ? ' [GPU]' : ' [CPU]'}\n` +
-      `  Setup (canvas/getImageData): ${perf.setup.toFixed(1)}ms\n` +
+      `[Upscaler Perf] ${srcW}\u00d7${srcH} \u2192 ${outW}\u00d7${outH} | ${tiles.length} tiles @ ${tileSize > 0 ? tileSize + 'px' : 'full image'}${pipelineLabel}\n` +
+      `  ${(useGpuInput ? 'GPU frame upload:' : 'Setup (canvas/getImageData):').padEnd(30)}${perf.setup.toFixed(1)}ms\n` +
       `  Denoise:                     ${perf.denoise.toFixed(1)}ms\n` +
       `  Tile extract (CHW\u2192tensor):   ${perf.extract.toFixed(1)}ms\n` +
       `  Inference (session.run):     ${perf.inference.toFixed(1)}ms\n` +
