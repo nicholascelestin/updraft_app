@@ -11,6 +11,8 @@ class CompareSlider extends HTMLElement {
   #beforeSrc = '';
   #afterSrc = '';
   #expanded = false;
+  #upscaledOnly = false;
+  #positionFrac = 0.5;
   #naturalMaxWidth = 0;
   #downloadSrc = '';   // separate src for download (e.g. transparent PNG for bg-removal)
   #downloadName = '';
@@ -25,10 +27,12 @@ class CompareSlider extends HTMLElement {
     this.#render();
 
     this.addEventListener('mousedown', e => {
+      if (this.#upscaledOnly) return;
       if (e.target.closest('.compare-toolbar')) return;
       e.preventDefault(); this.#dragging = true; this.#setPosition(this.#getFrac(e));
     });
     this.addEventListener('touchstart', e => {
+      if (this.#upscaledOnly) return;
       if (e.target.closest('.compare-toolbar')) return;
       this.#dragging = true; this.#setPosition(this.#getFrac(e));
     }, { passive: true });
@@ -41,6 +45,7 @@ class CompareSlider extends HTMLElement {
     this.addEventListener('click', e => {
       const openBtn = e.target.closest('.compare-open-btn');
       const expandBtn = e.target.closest('.compare-expand-btn');
+      const toggleBtn = e.target.closest('.compare-toggle-upscaled-btn');
       const downloadBtn = e.target.closest('.compare-download-btn');
       if (openBtn && this.#downloadSrc) {
         window.open(this.#downloadSrc, '_blank');
@@ -49,6 +54,10 @@ class CompareSlider extends HTMLElement {
       if (expandBtn) {
         this.toggleExpand();
         expandBtn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
+      }
+      if (toggleBtn) {
+        this.toggleUpscaledView();
+        toggleBtn.textContent = this.#upscaledOnly ? 'Show Compare' : 'Show Upscaled';
       }
       if (downloadBtn) {
         const a = document.createElement('a');
@@ -95,13 +104,16 @@ class CompareSlider extends HTMLElement {
     this.#naturalMaxWidth = parseInt(this.style.maxWidth, 10) || 0;
     this.style.display = 'block';
     this.#applySize();
+    this.#upscaledOnly = false;
     this.#setPosition(0.5);
+    this.#syncModeClass();
   }
 
   hide() {
     this.style.display = 'none';
     this.style.maxWidth = '';
     this.#expanded = false;
+    this.#upscaledOnly = false;
   }
 
   get afterSrc() { return this.#afterSrc; }
@@ -112,6 +124,12 @@ class CompareSlider extends HTMLElement {
   }
 
   get expanded() { return this.#expanded; }
+
+  toggleUpscaledView() {
+    this.#upscaledOnly = !this.#upscaledOnly;
+    this.#syncModeClass();
+    if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
+  }
 
   #applySize() {
     const afterImg = this.querySelector('.compare-after');
@@ -140,7 +158,9 @@ class CompareSlider extends HTMLElement {
   }
 
   #setPosition(frac) {
-    const pct = (frac * 100).toFixed(2) + '%';
+    const clamped = Math.max(0, Math.min(1, frac));
+    this.#positionFrac = clamped;
+    const pct = (clamped * 100).toFixed(2) + '%';
     const wrap = this.querySelector('.compare-before-wrap');
     const handle = this.querySelector('.compare-handle');
     const img = this.querySelector('.compare-before-wrap img');
@@ -149,8 +169,13 @@ class CompareSlider extends HTMLElement {
     if (img) img.style.width = this.offsetWidth + 'px';
   }
 
+  #syncModeClass() {
+    this.classList.toggle('upscaled-only', this.#upscaledOnly);
+  }
+
   #render() {
     const expandLabel = this.#expanded ? 'Fit to View' : 'Full Size';
+    const toggleLabel = this.#upscaledOnly ? 'Show Compare' : 'Show Upscaled';
     const beforeLabel = esc(this.getAttribute('before-label') || 'Original');
     const afterLabel = esc(this.getAttribute('after-label') || '4x Upscaled');
     morph(this, `
@@ -203,6 +228,12 @@ class CompareSlider extends HTMLElement {
         .compare .compare-toolbar button:hover {
           background: rgba(0,0,0,0.85); border-color: rgba(255,255,255,0.5);
         }
+        .compare.upscaled-only { cursor: default; }
+        .compare.upscaled-only .compare-before-wrap,
+        .compare.upscaled-only .compare-handle,
+        .compare.upscaled-only .compare-label-before {
+          display: none;
+        }
       </style>
       <img class="compare-after" src="${this.#afterSrc}">
       <div class="compare-before-wrap">
@@ -212,6 +243,7 @@ class CompareSlider extends HTMLElement {
       <span class="compare-label compare-label-before">${beforeLabel}</span>
       <span class="compare-label compare-label-after">${afterLabel}</span>
       <div class="compare-toolbar">
+        <button type="button" class="compare-toggle-upscaled-btn">${toggleLabel}</button>
         <button type="button" class="compare-open-btn">Open in Tab</button>
         <button type="button" class="compare-expand-btn">${expandLabel}</button>
         <button type="button" class="compare-download-btn"><i class="fas fa-download"></i> Download</button>
