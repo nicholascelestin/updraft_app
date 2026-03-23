@@ -32,6 +32,7 @@ class UpscalerApp extends HTMLElement {
     const modelEl      = this.#q('.model-select');
     const tileSizeEl   = this.#q('.tilesize-select');
     const backendEl    = this.#q('.backend-select');
+    const outputEl     = this.#q('.output-select');
     const denoiseEl    = this.#q('.denoise-range');
     const denoiseValEl = this.#q('.denoise-val');
     const upscaleBtn   = this.#q('.upscale-btn');
@@ -68,6 +69,7 @@ class UpscalerApp extends HTMLElement {
     modelEl.addEventListener('change', () => localStorage.setItem('upscaler_model', modelEl.value));
     tileSizeEl.addEventListener('change', () => localStorage.setItem('upscaler_tilesize', tileSizeEl.value));
     backendEl.addEventListener('change', () => localStorage.setItem('upscaler_backend', backendEl.value));
+    outputEl.addEventListener('change', () => localStorage.setItem('upscaler_output', outputEl.value));
     denoiseEl.addEventListener('input', () => localStorage.setItem('upscaler_denoise', denoiseEl.value));
     const persistViewState = () => {
       localStorage.setItem(VIEW_STATE_KEYS.expanded, this.#viewState.expanded ? '1' : '0');
@@ -177,6 +179,8 @@ class UpscalerApp extends HTMLElement {
         cropper.style.display = 'none';
 
         let beforeSrc, afterSrc, scale;
+        const parsedOutputScale = parseInt(outputEl.value, 10);
+        const requestedOutputScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : 4;
 
         if (modeEl.value === 'runpod') {
           if (!endpointEl.value || !apikeyEl.value) {
@@ -187,6 +191,7 @@ class UpscalerApp extends HTMLElement {
             endpointId: endpointEl.value.trim(),
             apiKey: apikeyEl.value.trim(),
             scale: 4,
+            outputScale: requestedOutputScale,
           });
           beforeSrc = result.beforeSrc;
           afterSrc = result.afterSrc;
@@ -194,7 +199,9 @@ class UpscalerApp extends HTMLElement {
         } else {
           const selectedOption = modelEl.selectedOptions[0];
           const modelUrl = selectedOption.value;
-          scale = parseInt(selectedOption.dataset.scale, 10);
+          const parsedModelScale = parseInt(selectedOption.dataset.scale, 10);
+          const modelScale = Number.isFinite(parsedModelScale) ? parsedModelScale : 4;
+          scale = Math.max(1, Math.min(requestedOutputScale, modelScale));
           const modelValueRange = parseInt(selectedOption.dataset.range, 10) || 1;
           const backend = selectedOption.dataset.backend || backendEl.value;
           const denoise = parseFloat(denoiseEl.value);
@@ -207,7 +214,8 @@ class UpscalerApp extends HTMLElement {
             backend,
             {
               modelUrl,
-              scale,
+              scale: modelScale,
+              outputScale: scale,
               modelValueRange,
               denoise,
               onModelProgress(frac, msg) {
@@ -227,6 +235,7 @@ class UpscalerApp extends HTMLElement {
         statusBar.message = `Done \u2014 ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}. Drag the slider to compare.`;
 
         compareSlider.style.maxWidth = outW + 'px';
+        compareSlider.setAttribute('after-label', `${scale}x Upscaled`);
         await compareSlider.show(beforeSrc, afterSrc, {
           downloadName: `upscaled_${scale}x.png`,
         });
@@ -280,6 +289,7 @@ class UpscalerApp extends HTMLElement {
       ['.model-select', 'upscaler_model'],
       ['.tilesize-select', 'upscaler_tilesize'],
       ['.backend-select', 'upscaler_backend'],
+      ['.output-select', 'upscaler_output'],
       ['.denoise-range', 'upscaler_denoise'],
     ];
     for (const [sel, key] of controls) {
@@ -368,6 +378,14 @@ class UpscalerApp extends HTMLElement {
               <option value="webgpu">WebGPU</option>
               <option value="webgl">WebGL</option>
               <option value="wasm">WASM</option>
+            </select>
+          </label>
+          <label>Final Output:
+            <select class="output-select">
+              <option value="1">1x</option>
+              <option value="2">2x</option>
+              <option value="3">3x</option>
+              <option value="4" selected>4x (no downscale)</option>
             </select>
           </label>
           <label title="3×3 bilateral denoise — smooths compression noise while preserving edges">Smooth artifacts:

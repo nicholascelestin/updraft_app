@@ -41,7 +41,14 @@ class UpscalePreview extends HTMLElement {
 
   async upscale(image, tileSize, backend, opts = {}) {
     const signal = this.#beginUpscale();
-    const { modelUrl = 'models/4x-UltraMix_Balanced.onnx', scale = 4, modelValueRange = 1, denoise = 0, onModelProgress } = opts;
+    const {
+      modelUrl = 'models/4x-UltraMix_Balanced.onnx',
+      scale = 4,
+      outputScale,
+      modelValueRange = 1,
+      denoise = 0,
+      onModelProgress,
+    } = opts;
 
     const backendChanged = this.#engine?.activeBackend && this.#engine.activeBackend !== backend;
     if (!this.#engine || this.#currentModelUrl !== modelUrl || this.#engine.denoise !== denoise || backendChanged) {
@@ -51,6 +58,9 @@ class UpscalePreview extends HTMLElement {
     this.#engine.profiling = this.#profiling;
 
     await this.#engine.loadModel(backend, onModelProgress);
+    const parsedOutputScale = parseInt(outputScale ?? this.#engine.scale, 10);
+    const requestedScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : this.#engine.scale;
+    const finalScale = Math.max(1, Math.min(requestedScale, this.#engine.scale));
 
     const outW = image.width * this.#engine.scale;
     const outH = image.height * this.#engine.scale;
@@ -69,23 +79,26 @@ class UpscalePreview extends HTMLElement {
       });
 
       const elapsed = performance.now();
-      const urls = await this.#createComparisonURLs(resultCanvas, image);
+      const urls = await this.#createComparisonURLs(resultCanvas, image, finalScale);
 
       this.dispatchEvent(new CustomEvent('upscale-complete', {
         detail: { ...urls, elapsed, perf, ortProfile },
       }));
 
-      return { ...urls, elapsed, scale };
+      return { ...urls, elapsed, scale: finalScale };
     } finally {
       this.#abortController = null;
     }
   }
 
-  async upscaleRunPod(image, { endpointId, apiKey, scale = 4 }) {
+  async upscaleRunPod(image, { endpointId, apiKey, scale = 4, outputScale }) {
     const signal = this.#beginUpscale();
 
     const { RunPodEngine } = await import('./runpod-engine.js');
     const engine = new RunPodEngine({ endpointId, apiKey, scale });
+    const parsedOutputScale = parseInt(outputScale ?? scale, 10);
+    const requestedScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : scale;
+    const finalScale = Math.max(1, Math.min(requestedScale, scale));
 
     const outW = image.width * scale;
     const outH = image.height * scale;
@@ -96,8 +109,8 @@ class UpscalePreview extends HTMLElement {
         this.dispatchEvent(new CustomEvent('runpod-status', { detail: { message: msg } }));
       }, signal);
 
-      const urls = await this.#createComparisonURLs(resultCanvas, image);
-      return { ...urls, scale: actualScale };
+      const urls = await this.#createComparisonURLs(resultCanvas, image, Math.min(finalScale, actualScale));
+      return { ...urls, scale: Math.min(finalScale, actualScale) };
     } finally {
       this.#abortController = null;
     }
@@ -155,9 +168,22 @@ class UpscalePreview extends HTMLElement {
     return ctx;
   }
 
-  async #createComparisonURLs(resultCanvas, image) {
-    const w = resultCanvas.width;
-    const h = resultCanvas.height;
+  async #createComparisonURLs(resultCanvas, image, outputScale) {
+    const targetScale = Math.max(1, outputScale || Math.round(resultCanvas.width / image.width) || 1);
+    const w = image.width * targetScale;
+    const h = image.height * targetScale;
+    const needsDownscale = resultCanvas.width !== w || resultCanvas.height !== h;
+
+    let afterCanvas = resultCanvas;
+    if (needsDownscale) {
+      afterCanvas = document.createElement('canvas');
+      afterCanvas.width = w;
+      afterCanvas.height = h;
+      const afterCtx = afterCanvas.getContext('2d');
+      afterCtx.imageSmoothingEnabled = true;
+      afterCtx.imageSmoothingQuality = 'high';
+      afterCtx.drawImage(resultCanvas, 0, 0, w, h);
+    }
 
     const beforeCanvas = document.createElement('canvas');
     beforeCanvas.width = w;
@@ -167,7 +193,7 @@ class UpscalePreview extends HTMLElement {
     bCtx.drawImage(image, 0, 0, w, h);
 
     const [afterBlob, beforeBlob] = await Promise.all([
-      new Promise(r => resultCanvas.toBlob(r, 'image/png')),
+      new Promise(r => afterCanvas.toBlob(r, 'image/png')),
       new Promise(r => beforeCanvas.toBlob(r, 'image/png')),
     ]);
 
