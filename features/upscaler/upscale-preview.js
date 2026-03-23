@@ -27,9 +27,7 @@ class UpscalePreview extends HTMLElement {
     this.addEventListener('click', e => {
       const expandBtn = e.target.closest('.preview-expand-btn');
       if (!expandBtn) return;
-      this.#expanded = !this.#expanded;
-      this.#applySize();
-      expandBtn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
+      this.setExpanded(!this.#expanded);
     });
   }
 
@@ -119,8 +117,18 @@ class UpscalePreview extends HTMLElement {
   hide() {
     this.style.display = 'none';
     this.style.maxWidth = '';
-    this.#expanded = false;
     this.#clearCanvas();
+  }
+
+  get expanded() { return this.#expanded; }
+
+  setExpanded(expanded) {
+    const next = !!expanded;
+    if (this.#expanded === next) return;
+    this.#expanded = next;
+    this.#render();
+    if (this.style.display !== 'none') this.#applySize();
+    this.#emitViewState();
   }
 
   #beginUpscale() {
@@ -132,7 +140,6 @@ class UpscalePreview extends HTMLElement {
   #showDimmedPreview(image, outW, outH, label) {
     this.#labelText = label;
     this.#naturalW = outW;
-    this.#expanded = false;
     this.#render();
     this.style.display = 'block';
 
@@ -229,6 +236,12 @@ class UpscalePreview extends HTMLElement {
         <button class="preview-expand-btn">${expandLabel}</button>
       </div>
     `);
+  }
+
+  #emitViewState() {
+    this.dispatchEvent(new CustomEvent('view-state-change', {
+      detail: { expanded: this.#expanded },
+    }));
   }
 }
 

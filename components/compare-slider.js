@@ -104,16 +104,13 @@ class CompareSlider extends HTMLElement {
     this.#naturalMaxWidth = parseInt(this.style.maxWidth, 10) || 0;
     this.style.display = 'block';
     this.#applySize();
-    this.#upscaledOnly = false;
-    this.#setPosition(0.5);
+    this.#setPosition(this.#positionFrac);
     this.#syncModeClass();
   }
 
   hide() {
     this.style.display = 'none';
     this.style.maxWidth = '';
-    this.#expanded = false;
-    this.#upscaledOnly = false;
   }
 
   get afterSrc() { return this.#afterSrc; }
@@ -121,14 +118,37 @@ class CompareSlider extends HTMLElement {
   toggleExpand() {
     this.#expanded = !this.#expanded;
     this.#applySize();
+    this.#emitViewState();
   }
 
   get expanded() { return this.#expanded; }
+  get upscaledOnly() { return this.#upscaledOnly; }
 
   toggleUpscaledView() {
     this.#upscaledOnly = !this.#upscaledOnly;
     this.#syncModeClass();
     if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
+    this.#emitViewState();
+  }
+
+  setExpanded(expanded) {
+    const next = !!expanded;
+    if (this.#expanded === next) return;
+    this.#expanded = next;
+    if (this.style.display !== 'none') this.#applySize();
+    this.#render();
+    this.#syncModeClass();
+  }
+
+  setViewState({ expanded, upscaledOnly } = {}) {
+    if (typeof expanded === 'boolean') this.#expanded = expanded;
+    if (typeof upscaledOnly === 'boolean') this.#upscaledOnly = upscaledOnly;
+    this.#render();
+    if (this.style.display !== 'none') {
+      this.#applySize();
+      this.#setPosition(this.#positionFrac);
+    }
+    this.#syncModeClass();
   }
 
   #applySize() {
@@ -171,6 +191,15 @@ class CompareSlider extends HTMLElement {
 
   #syncModeClass() {
     this.classList.toggle('upscaled-only', this.#upscaledOnly);
+  }
+
+  #emitViewState() {
+    this.dispatchEvent(new CustomEvent('view-state-change', {
+      detail: {
+        expanded: this.#expanded,
+        upscaledOnly: this.#upscaledOnly,
+      },
+    }));
   }
 
   #render() {

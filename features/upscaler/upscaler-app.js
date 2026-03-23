@@ -14,6 +14,10 @@ import './perf-monitor.js';
 class UpscalerApp extends HTMLElement {
   #loadedImage = null;
   #running = false;
+  #viewState = {
+    expanded: false,
+    upscaledOnly: false,
+  };
 
   connectedCallback() {
     this.#render();
@@ -46,6 +50,10 @@ class UpscalerApp extends HTMLElement {
     const compareSlider = this.#q('compare-slider');
     const perfMonitor   = this.#q('perf-monitor');
     const perfToggle    = this.#q('.perf-toggle-btn');
+    const VIEW_STATE_KEYS = {
+      expanded: 'upscaler_view_expanded',
+      upscaledOnly: 'upscaler_view_upscaled_only',
+    };
 
     statusBar.message = 'Load an image to begin.';
 
@@ -61,6 +69,10 @@ class UpscalerApp extends HTMLElement {
     tileSizeEl.addEventListener('change', () => localStorage.setItem('upscaler_tilesize', tileSizeEl.value));
     backendEl.addEventListener('change', () => localStorage.setItem('upscaler_backend', backendEl.value));
     denoiseEl.addEventListener('input', () => localStorage.setItem('upscaler_denoise', denoiseEl.value));
+    const persistViewState = () => {
+      localStorage.setItem(VIEW_STATE_KEYS.expanded, this.#viewState.expanded ? '1' : '0');
+      localStorage.setItem(VIEW_STATE_KEYS.upscaledOnly, this.#viewState.upscaledOnly ? '1' : '0');
+    };
 
     // Mode switching
     modeEl.addEventListener('change', () => {
@@ -120,6 +132,23 @@ class UpscalerApp extends HTMLElement {
       statusBar.showProgress((index + 1) / total);
       statusBar.message = `Tile ${index + 1} / ${total}`;
       if (perfMonitor.visible) perfMonitor.update(e.detail);
+    });
+
+    // Keep preview/compare view mode in sync.
+    preview.addEventListener('view-state-change', (e) => {
+      this.#viewState.expanded = !!e.detail.expanded;
+      compareSlider.setExpanded(this.#viewState.expanded);
+      persistViewState();
+    });
+    compareSlider.addEventListener('view-state-change', (e) => {
+      if (typeof e.detail.expanded === 'boolean') {
+        this.#viewState.expanded = e.detail.expanded;
+      }
+      if (typeof e.detail.upscaledOnly === 'boolean') {
+        this.#viewState.upscaledOnly = e.detail.upscaledOnly;
+      }
+      preview.setExpanded(this.#viewState.expanded);
+      persistViewState();
     });
 
     // Session summary
@@ -201,6 +230,7 @@ class UpscalerApp extends HTMLElement {
         await compareSlider.show(beforeSrc, afterSrc, {
           downloadName: `upscaled_${scale}x.png`,
         });
+        compareSlider.setViewState(this.#viewState);
         preview.hide();
 
       } catch (e) {
@@ -256,6 +286,13 @@ class UpscalerApp extends HTMLElement {
       const saved = localStorage.getItem(key);
       if (saved !== null) this.#q(sel).value = saved;
     }
+    this.#viewState.expanded = localStorage.getItem('upscaler_view_expanded') === '1';
+    this.#viewState.upscaledOnly = localStorage.getItem('upscaler_view_upscaled_only') === '1';
+
+    this.#q('upscale-preview').setExpanded(this.#viewState.expanded);
+    this.#q('compare-slider').setViewState(this.#viewState);
+    const modelEl = this.#q('.model-select');
+    if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
 
     this.#q('.mode-select').dispatchEvent(new Event('change'));
     this.#q('.model-select').dispatchEvent(new Event('change'));
@@ -309,10 +346,10 @@ class UpscalerApp extends HTMLElement {
         <span class="local-controls">
           <label>Model:
             <select class="model-select">
-              <option value="models/4x-UltraMix_Balanced.onnx" data-scale="4">4x UltraMix Balanced (ESRGAN)</option>
-              <option value="models/4x-UltraSharpV2_Lite.onnx" data-scale="4">4x UltraSharp V2 Lite (RealPLKSR)</option>
-              <option value="models/RMBN_M4C8_x4.onnx" data-scale="4" data-range="255">4x RMBN-M4C8 (Lightweight)</option>
+              <option value="models/RMBN_M4C8_x4.onnx" data-scale="4" data-range="255">4x Lightweight M8C16 (RMBN)</option>
               <option value="models/4x-ClearRealityV1.onnx" data-scale="4" data-backend="wasm">4x ClearReality V1 (SPAN)</option>
+              <option value="models/4x-UltraSharpV2_Lite.onnx" data-scale="4">4x UltraSharp V2 Lite (RealPLKSR)</option>
+              <option value="models/4x-UltraMix_Balanced.onnx" data-scale="4">4x UltraMix Balanced (ESRGAN)</option>
             </select>
           </label>
           <label>Tile size:
