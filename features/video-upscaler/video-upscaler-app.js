@@ -17,6 +17,7 @@ class VideoUpscalerApp extends HTMLElement {
   connectedCallback() {
     this.#render();
     this.#setupEvents();
+    this.#restoreSettings();
   }
 
   #q(sel) { return this.querySelector(sel); }
@@ -32,6 +33,13 @@ class VideoUpscalerApp extends HTMLElement {
     const startOverBtn = this.#q('.startover-btn');
     const statusBar  = this.#q('status-bar');
     const dropZone   = this.#q('video-drop-zone');
+    // Persist settings on change
+    modelEl.addEventListener('change', () => localStorage.setItem('video_upscaler_model', modelEl.value));
+    tileSizeEl.addEventListener('change', () => localStorage.setItem('video_upscaler_tilesize', tileSizeEl.value));
+    backendEl.addEventListener('change', () => localStorage.setItem('video_upscaler_backend', backendEl.value));
+    fpsEl.addEventListener('change', () => localStorage.setItem('video_upscaler_fps', fpsEl.value));
+    outputEl.addEventListener('change', () => localStorage.setItem('video_upscaler_output', outputEl.value));
+
 
     statusBar.message = 'Load a video to begin.';
 
@@ -167,6 +175,20 @@ class VideoUpscalerApp extends HTMLElement {
     });
   }
 
+  #restoreSettings() {
+    const controls = [
+      ['.model-select', 'video_upscaler_model'],
+      ['.tilesize-select', 'video_upscaler_tilesize'],
+      ['.backend-select', 'video_upscaler_backend'],
+      ['.fps-select', 'video_upscaler_fps'],
+      ['.output-select', 'video_upscaler_output'],
+    ];
+    for (const [sel, key] of controls) {
+      const saved = localStorage.getItem(key);
+      if (saved !== null) this.#q(sel).value = saved;
+    }
+  }
+
   #render() {
     morph(this, `
       <style>
@@ -229,6 +251,7 @@ class VideoUpscalerApp extends HTMLElement {
             <option value="512">512</option>
             <option value="768">768</option>
             <option value="1024">1024</option>
+            <option value="0">Full frame (no tiling)</option>
           </select>
         </label>
         <label>Backend:

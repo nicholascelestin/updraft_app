@@ -155,7 +155,9 @@ export class UpscalerEngine {
     const ort = globalThis.ort;
     if (!ort) throw new Error('ONNX Runtime not loaded — include ort.all.min.js before using UpscalerEngine');
 
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
+    ort.env.wasm.wasmPaths =
+      globalThis.__ORT_WASM_PATHS__ ||
+      'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
     ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
 
     if (backend === 'webgpu' && ort.env.webgpu) {
@@ -310,7 +312,10 @@ export class UpscalerEngine {
       await yieldToEventLoop();
     }
 
-    if (useGpu) this.#gpuRenderer.presentToCanvas();
+    if (useGpu) {
+      this.#gpuRenderer.presentToCanvas();
+      await this.#waitForGpuWork();
+    }
 
     perf.total = performance.now() - tTotal;
 
@@ -379,6 +384,16 @@ export class UpscalerEngine {
     }
     const input = extractTileCHW(srcData, tx, ty, tw, th, this.#modelValueRange / 255);
     return new ort.Tensor('float32', input, [1, 3, th, tw]);
+  }
+
+  async #waitForGpuWork() {
+    try {
+      if (this.#device?.queue?.onSubmittedWorkDone) {
+        await this.#device.queue.onSubmittedWorkDone();
+      }
+    } catch {
+      // Ignore sync failures and let the caller continue.
+    }
   }
 
   /**

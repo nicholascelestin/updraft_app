@@ -16,3 +16,16 @@ node_modules/
 # Environment
 .env
 .env.*
+
+# Chrome extension build artifacts (generated/copied)
+chrome-extension/src/
+chrome-extension/models/
+chrome-extension/vendor/onnxruntime/
+chrome-extension/manifest.json
+chrome-extension/service-worker.js
+chrome-extension/upscale.html
+chrome-extension/upscale.css
+chrome-extension/upscale.js
+
+# Model backup artifacts
+models/bak/

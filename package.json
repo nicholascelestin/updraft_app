@@ -4,6 +4,10 @@
   "description": "AI Tools — Image Upscaler & Image-to-Video",
   "private": true,
   "scripts": {
-    "start": "npx serve -l 8081"
+    "start": "npx serve -l 8081",
+    "build:chrome-extension": "node build-chrome-extension.mjs"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.24.3"
   }
 }

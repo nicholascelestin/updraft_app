@@ -28,6 +28,27 @@ function seekTo(video, time) {
 }
 
 /**
+ * Wait for the video element to present the currently-decoded frame.
+ * Helps avoid occasional stale/under-decoded frame reads after seeking.
+ */
+function waitForPresentedFrame(video, timeoutMs = 150) {
+  if (typeof video.requestVideoFrameCallback !== 'function') {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(settle, timeoutMs);
+    video.requestVideoFrameCallback(() => settle());
+  });
+}
+
+/**
  * Pick an H.264 High-profile codec string with a level that supports
  * the given output resolution and frame rate.
  */
@@ -181,6 +202,7 @@ export class VideoUpscalerEngine {
       onFrameProgress?.(i, totalFrames, 'extracting');
 
       await seekTo(video, time);
+      await waitForPresentedFrame(video);
       onFrameProgress?.(i, totalFrames, 'upscaling');
       const { canvas: upscaledCanvas } = await this._upscaler.upscale(video, this.tileSize, { signal });
 
