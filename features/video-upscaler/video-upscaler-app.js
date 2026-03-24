@@ -4,6 +4,7 @@
  */
 
 import { morph } from 'lib/morph';
+import { modelOptionsHTML } from '../upscaler/model-registry.js';
 import 'components/video-drop-zone';
 import 'components/status-bar';
 import { VideoUpscalerEngine } from './video-upscaler-engine.js';
@@ -99,7 +100,7 @@ class VideoUpscalerApp extends HTMLElement {
       const scale = parseInt(selectedModel.dataset.scale, 10);
       const modelValueRange = parseInt(selectedModel.dataset.range, 10) || 1;
       const tileSize = parseInt(tileSizeEl.value, 10);
-      const backend = backendEl.value;
+      const backend = selectedModel.dataset.backend || backendEl.value;
       const fps = parseInt(fpsEl.value, 10);
       const outputScale = parseInt(outputEl.value, 10);
 
@@ -237,8 +238,7 @@ class VideoUpscalerApp extends HTMLElement {
       <div class="controls">
         <label>Model:
           <select class="model-select">
-            <option value="models/RMBN_M4C8_x4.onnx" data-scale="4" data-range="255">4x RMBN-M4C8 (Lightweight)</option>
-            <option value="models/4x-UltraSharpV2_Lite.onnx" data-scale="4">4x UltraSharp V2 Lite (RealPLKSR)</option>
+              ${modelOptionsHTML()}
           </select>
         </label>
         <label>Tile size:

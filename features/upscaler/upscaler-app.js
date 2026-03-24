@@ -1,9 +1,14 @@
 /**
  * <upscaler-app> — orchestrates the image upscaler feature.
- * Wraps all upscaler sub-components and control logic into a single web component.
+ * Owns engine lifecycle, abort control, and the upscale pipeline.
+ * Sub-components handle presentation only.
  */
 
 import { morph } from 'lib/morph';
+import { UpscalerEngine } from './upscaler-engine.js';
+import { FaceDetectorEngine } from './face-detector-engine.js';
+import { applyFacePass } from './face-enhance.js';
+import { modelOptionsHTML } from './model-registry.js';
 import 'components/image-drop-zone';
 import 'components/status-bar';
 import 'components/image-cropper';
@@ -14,129 +19,148 @@ import './perf-monitor.js';
 class UpscalerApp extends HTMLElement {
   #loadedImage = null;
   #running = false;
-  #viewState = {
-    expanded: false,
-    upscaledOnly: false,
-  };
+  #generation = 0;
+  #viewState = { expanded: false, upscaledOnly: false };
+
+  #engine = null;
+  #engineModelUrl = null;
+  #faceEngine = null;
+  #faceEngineModelUrl = null;
+  #faceEngineDenoise = 0;
+  #detectorEngine = null;
+  #abortController = null;
+  #blobURLs = [];
 
   connectedCallback() {
     this.#render();
-    this.#setupEvents();
+    this.#setupPersistence();
+    this.#setupModeSwitch();
+    this.#setupViewStateSync();
+    this.#setupUpscaleActions();
     this.#restoreSettings();
   }
 
   #q(sel) { return this.querySelector(sel); }
 
-  #setupEvents() {
-    const modeEl       = this.#q('.mode-select');
-    const modelEl      = this.#q('.model-select');
-    const tileSizeEl   = this.#q('.tilesize-select');
-    const backendEl    = this.#q('.backend-select');
-    const outputEl     = this.#q('.output-select');
-    const denoiseEl    = this.#q('.denoise-range');
-    const denoiseValEl = this.#q('.denoise-val');
-    const upscaleBtn   = this.#q('.upscale-btn');
-    const stopBtn      = this.#q('.stop-btn');
-    const startOverBtn = this.#q('.startover-btn');
-    const modeLabel    = this.#q('.mode-label');
-    const localCtrl    = this.#q('.local-controls');
-    const runpodCtrl   = this.#q('.runpod-controls');
-    const endpointEl   = this.#q('.runpod-endpoint');
-    const apikeyEl     = this.#q('.runpod-apikey');
+  // --- Engine lifecycle ---
 
-    const statusBar     = this.#q('status-bar');
-    const dropZone      = this.#q('image-drop-zone');
-    const cropper       = this.#q('image-cropper');
-    const preview       = this.#q('upscale-preview');
+  #getOrCreateEngine(modelUrl, scale, modelValueRange, denoise, backend, profiling = false) {
+    const backendChanged = this.#engine?.activeBackend && this.#engine.activeBackend !== backend;
+    if (!this.#engine || this.#engineModelUrl !== modelUrl || this.#engine.denoise !== denoise || backendChanged) {
+      this.#engine?.destroy();
+      this.#engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, denoise, profile: profiling });
+      this.#engineModelUrl = modelUrl;
+    }
+    this.#engine.profiling = profiling;
+    return this.#engine;
+  }
+
+  #getOrCreateFaceEngine(modelUrl, scale, range, denoise, backend) {
+    const backendChanged = this.#faceEngine?.activeBackend && this.#faceEngine.activeBackend !== backend;
+    if (!this.#faceEngine || this.#faceEngineModelUrl !== modelUrl || this.#faceEngineDenoise !== denoise || backendChanged) {
+      this.#faceEngine?.destroy();
+      this.#faceEngine = new UpscalerEngine({ modelUrl, scale, modelValueRange: range, denoise, profile: false });
+      this.#faceEngineModelUrl = modelUrl;
+      this.#faceEngineDenoise = denoise;
+    }
+    return this.#faceEngine;
+  }
+
+  #getOrCreateDetector(backend) {
+    if (!this.#detectorEngine || this.#detectorEngine.activeBackend !== backend) {
+      this.#detectorEngine?.release();
+      this.#detectorEngine = new FaceDetectorEngine();
+    }
+    return this.#detectorEngine;
+  }
+
+  // --- Pipeline helpers ---
+
+  async #createComparisonURLs(resultCanvas, image, outputScale) {
+    const targetScale = Math.max(1, outputScale || Math.round(resultCanvas.width / image.width) || 1);
+    const w = image.width * targetScale;
+    const h = image.height * targetScale;
+    const needsDownscale = resultCanvas.width !== w || resultCanvas.height !== h;
+
+    let afterCanvas = resultCanvas;
+    if (needsDownscale) {
+      afterCanvas = document.createElement('canvas');
+      afterCanvas.width = w;
+      afterCanvas.height = h;
+      const afterCtx = afterCanvas.getContext('2d');
+      afterCtx.imageSmoothingEnabled = true;
+      afterCtx.imageSmoothingQuality = 'high';
+      afterCtx.drawImage(resultCanvas, 0, 0, w, h);
+    }
+
+    const beforeCanvas = document.createElement('canvas');
+    beforeCanvas.width = w;
+    beforeCanvas.height = h;
+    const bCtx = beforeCanvas.getContext('2d');
+    bCtx.imageSmoothingEnabled = false;
+    bCtx.drawImage(image, 0, 0, w, h);
+
+    const [afterBlob, beforeBlob] = await Promise.all([
+      new Promise(r => afterCanvas.toBlob(r, 'image/png')),
+      new Promise(r => beforeCanvas.toBlob(r, 'image/png')),
+    ]);
+
+    const afterSrc = URL.createObjectURL(afterBlob);
+    const beforeSrc = URL.createObjectURL(beforeBlob);
+    this.#blobURLs = [afterSrc, beforeSrc];
+    return { beforeSrc, afterSrc };
+  }
+
+  #revokeBlobURLs() {
+    for (const url of this.#blobURLs) URL.revokeObjectURL(url);
+    this.#blobURLs = [];
+  }
+
+  // --- Event setup ---
+
+  #setupPersistence() {
+    const persist = (selector, key, event = 'change') => {
+      const el = this.#q(selector);
+      el.addEventListener(event, () => localStorage.setItem(key, el.value));
+    };
+    const persistChecked = (selector, key) => {
+      const el = this.#q(selector);
+      el.addEventListener('change', () => localStorage.setItem(key, el.checked ? '1' : '0'));
+    };
+
+    persist('.runpod-endpoint', 'upscaler_runpod_endpoint', 'input');
+    persist('.runpod-apikey', 'upscaler_runpod_apikey', 'input');
+    persist('.mode-select', 'upscaler_mode');
+    persist('.model-select', 'upscaler_model');
+    persist('.tilesize-select', 'upscaler_tilesize');
+    persist('.backend-select', 'upscaler_backend');
+    persist('.output-select', 'upscaler_output');
+    persist('.denoise-range', 'upscaler_denoise', 'input');
+    persistChecked('.detector-face-enabled', 'upscaler_detector_face_enabled');
+    persist('.detector-face-padding', 'upscaler_detector_face_padding_px', 'input');
+    persist('.detector-face-score', 'upscaler_detector_face_score', 'input');
+    persist('.detector-face-blend', 'upscaler_detector_face_blend', 'input');
+    persist('.detector-face-model', 'upscaler_detector_face_model');
+  }
+
+  #setupModeSwitch() {
+    this.#q('.mode-select').addEventListener('change', () => {
+      const isRunPod = this.#q('.mode-select').value === 'runpod';
+      this.#q('.local-controls').style.display = isRunPod ? 'none' : '';
+      this.#q('.runpod-controls').style.display = isRunPod ? '' : 'none';
+      this.#q('.detectors-panel').style.display = isRunPod ? 'none' : '';
+      this.#q('.mode-label').textContent = isRunPod ? '(RunPod Serverless)' : '(in-browser, ONNX Runtime)';
+    });
+  }
+
+  #setupViewStateSync() {
+    const preview = this.#q('upscale-preview');
     const compareSlider = this.#q('compare-slider');
-    const perfMonitor   = this.#q('perf-monitor');
-    const perfToggle    = this.#q('.perf-toggle-btn');
-    const VIEW_STATE_KEYS = {
-      expanded: 'upscaler_view_expanded',
-      upscaledOnly: 'upscaler_view_upscaled_only',
-    };
-
-    statusBar.message = 'Load an image to begin.';
-
-    perfToggle.addEventListener('click', () => {
-      perfMonitor.visible ? perfMonitor.hide() : perfMonitor.show();
-    });
-
-    // Persist settings on change
-    endpointEl.addEventListener('input', () => localStorage.setItem('upscaler_runpod_endpoint', endpointEl.value));
-    apikeyEl.addEventListener('input', () => localStorage.setItem('upscaler_runpod_apikey', apikeyEl.value));
-    modeEl.addEventListener('change', () => localStorage.setItem('upscaler_mode', modeEl.value));
-    modelEl.addEventListener('change', () => localStorage.setItem('upscaler_model', modelEl.value));
-    tileSizeEl.addEventListener('change', () => localStorage.setItem('upscaler_tilesize', tileSizeEl.value));
-    backendEl.addEventListener('change', () => localStorage.setItem('upscaler_backend', backendEl.value));
-    outputEl.addEventListener('change', () => localStorage.setItem('upscaler_output', outputEl.value));
-    denoiseEl.addEventListener('input', () => localStorage.setItem('upscaler_denoise', denoiseEl.value));
     const persistViewState = () => {
-      localStorage.setItem(VIEW_STATE_KEYS.expanded, this.#viewState.expanded ? '1' : '0');
-      localStorage.setItem(VIEW_STATE_KEYS.upscaledOnly, this.#viewState.upscaledOnly ? '1' : '0');
+      localStorage.setItem('upscaler_view_expanded', this.#viewState.expanded ? '1' : '0');
+      localStorage.setItem('upscaler_view_upscaled_only', this.#viewState.upscaledOnly ? '1' : '0');
     };
 
-    // Mode switching
-    modeEl.addEventListener('change', () => {
-      const isRunPod = modeEl.value === 'runpod';
-      localCtrl.style.display = isRunPod ? 'none' : '';
-      runpodCtrl.style.display = isRunPod ? '' : 'none';
-      modeLabel.textContent = isRunPod ? '(RunPod Serverless)' : '(in-browser, ONNX Runtime)';
-    });
-
-    // Reset helper
-    const resetToStart = () => {
-      this.#loadedImage = null;
-      this.#running = false;
-      upscaleBtn.disabled = true;
-      stopBtn.style.display = 'none';
-      startOverBtn.style.display = 'none';
-      cropper.hide();
-      preview.cleanup();
-      preview.hide();
-      compareSlider.hide();
-      dropZone.show();
-      statusBar.message = 'Load an image to begin.';
-      statusBar.hideProgress();
-    };
-
-    // Image loaded — transition to ready state
-    const showReady = () => {
-      upscaleBtn.disabled = false;
-      startOverBtn.style.display = 'inline-block';
-      compareSlider.hide();
-      preview.hide();
-      preview.cleanup();
-      dropZone.hide();
-      cropper.show(this.#loadedImage);
-      statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 ready to upscale.`;
-      statusBar.hideProgress();
-    };
-
-    dropZone.addEventListener('image-loaded', (e) => {
-      this.#loadedImage = e.detail.image;
-      showReady();
-    });
-
-    // Crop changed
-    cropper.addEventListener('crop-changed', (e) => {
-      const crop = e.detail.crop;
-      if (crop) {
-        statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${crop.w}\u00d7${crop.h} selected \u2014 ready to upscale.`;
-      } else {
-        statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 ready to upscale.`;
-      }
-    });
-
-    // Tile progress
-    preview.addEventListener('tile-complete', (e) => {
-      const { index, total } = e.detail;
-      statusBar.showProgress((index + 1) / total);
-      statusBar.message = `Tile ${index + 1} / ${total}`;
-      if (perfMonitor.visible) perfMonitor.update(e.detail);
-    });
-
-    // Keep preview/compare view mode in sync.
     preview.addEventListener('view-state-change', (e) => {
       this.#viewState.expanded = !!e.detail.expanded;
       compareSlider.setExpanded(this.#viewState.expanded);
@@ -152,21 +176,96 @@ class UpscalerApp extends HTMLElement {
       preview.setExpanded(this.#viewState.expanded);
       persistViewState();
     });
+  }
 
-    // Session summary
-    preview.addEventListener('upscale-complete', (e) => {
-      if (e.detail.perf) perfMonitor.showResults(e.detail.perf, e.detail.ortProfile);
+  #setupUpscaleActions() {
+    const statusBar     = this.#q('status-bar');
+    const dropZone      = this.#q('image-drop-zone');
+    const cropper       = this.#q('image-cropper');
+    const preview       = this.#q('upscale-preview');
+    const compareSlider = this.#q('compare-slider');
+    const perfMonitor   = this.#q('perf-monitor');
+    const upscaleBtn    = this.#q('.upscale-btn');
+    const stopBtn       = this.#q('.stop-btn');
+    const startOverBtn  = this.#q('.startover-btn');
+    const modelEl       = this.#q('.model-select');
+    const denoiseEl     = this.#q('.denoise-range');
+
+    statusBar.message = 'Load an image to begin.';
+
+    this.#q('.perf-toggle-btn').addEventListener('click', () => {
+      perfMonitor.visible ? perfMonitor.hide() : perfMonitor.show();
     });
 
-    // RunPod status
-    preview.addEventListener('runpod-status', (e) => {
-      statusBar.message = e.detail.message;
+    const resetToStart = () => {
+      this.#loadedImage = null;
+      this.#running = false;
+      this.#generation++;
+      this.#abortController = null;
+      this.#revokeBlobURLs();
+      upscaleBtn.disabled = true;
+      stopBtn.style.display = 'none';
+      startOverBtn.style.display = 'none';
+      cropper.hide();
+      preview.cleanup();
+      preview.hide();
+      compareSlider.hide();
+      dropZone.show();
+      statusBar.message = 'Load an image to begin.';
+      statusBar.hideProgress();
+    };
+
+    const showReady = () => {
+      upscaleBtn.disabled = false;
+      startOverBtn.style.display = 'inline-block';
+      compareSlider.hide();
+      preview.hide();
+      preview.cleanup();
+      this.#revokeBlobURLs();
+      dropZone.hide();
+      cropper.show(this.#loadedImage);
+      statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 ready to upscale.`;
+      statusBar.hideProgress();
+    };
+
+    dropZone.addEventListener('image-loaded', (e) => {
+      this.#loadedImage = e.detail.image;
+      showReady();
     });
 
-    // Upscale button
+    cropper.addEventListener('crop-changed', (e) => {
+      const crop = e.detail.crop;
+      if (crop) {
+        statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${crop.w}\u00d7${crop.h} selected \u2014 ready to upscale.`;
+      } else {
+        statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 ready to upscale.`;
+      }
+    });
+
+    modelEl.addEventListener('change', () => {
+      const scale = modelEl.selectedOptions[0].dataset.scale;
+      upscaleBtn.textContent = `Upscale ${scale}x`;
+    });
+
+    denoiseEl.addEventListener('input', () => {
+      this.#q('.denoise-val').textContent = denoiseEl.value;
+    });
+    this.#q('.detector-face-score').addEventListener('input', (e) => {
+      this.#q('.detector-face-score-val').textContent = e.target.value;
+    });
+    this.#q('.detector-face-blend').addEventListener('input', (e) => {
+      this.#q('.detector-face-blend-val').textContent = e.target.value;
+    });
+
+    // --- Upscale pipeline ---
+
     upscaleBtn.addEventListener('click', async () => {
       if (this.#running || !this.#loadedImage) return;
       this.#running = true;
+      const gen = ++this.#generation;
+      this.#abortController = new AbortController();
+      this.#revokeBlobURLs();
+
       upscaleBtn.disabled = true;
       stopBtn.style.display = 'inline-block';
       startOverBtn.style.display = 'none';
@@ -178,58 +277,23 @@ class UpscalerApp extends HTMLElement {
         const inputImage = cropper.extractImage();
         cropper.style.display = 'none';
 
-        let beforeSrc, afterSrc, scale;
-        const parsedOutputScale = parseInt(outputEl.value, 10);
+        const signal = this.#abortController.signal;
+        const parsedOutputScale = parseInt(this.#q('.output-select').value, 10);
         const requestedOutputScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : 4;
 
-        if (modeEl.value === 'runpod') {
-          if (!endpointEl.value || !apikeyEl.value) {
-            throw new Error('Enter your RunPod Endpoint ID and API Key.');
-          }
-          statusBar.showIndeterminate();
-          const result = await preview.upscaleRunPod(inputImage, {
-            endpointId: endpointEl.value.trim(),
-            apiKey: apikeyEl.value.trim(),
-            scale: 4,
-            outputScale: requestedOutputScale,
-          });
-          beforeSrc = result.beforeSrc;
-          afterSrc = result.afterSrc;
-          scale = result.scale;
+        let beforeSrc, afterSrc, scale;
+
+        if (this.#q('.mode-select').value === 'runpod') {
+          ({ beforeSrc, afterSrc, scale } = await this.#runRunPodUpscale(
+            inputImage, signal, statusBar, preview,
+          ));
         } else {
-          const selectedOption = modelEl.selectedOptions[0];
-          const modelUrl = selectedOption.value;
-          const parsedModelScale = parseInt(selectedOption.dataset.scale, 10);
-          const modelScale = Number.isFinite(parsedModelScale) ? parsedModelScale : 4;
-          scale = Math.max(1, Math.min(requestedOutputScale, modelScale));
-          const modelValueRange = parseInt(selectedOption.dataset.range, 10) || 1;
-          const backend = selectedOption.dataset.backend || backendEl.value;
-          const denoise = parseFloat(denoiseEl.value);
-
-          if (perfMonitor.visible) perfMonitor.start(backend);
-
-          const result = await preview.upscale(
-            inputImage,
-            parseInt(tileSizeEl.value, 10),
-            backend,
-            {
-              modelUrl,
-              scale: modelScale,
-              outputScale: scale,
-              modelValueRange,
-              denoise,
-              onModelProgress(frac, msg) {
-                statusBar.showProgress(frac);
-                statusBar.message = msg;
-              },
-            },
-          );
-          beforeSrc = result.beforeSrc;
-          afterSrc = result.afterSrc;
+          ({ beforeSrc, afterSrc, scale } = await this.#runLocalUpscale(
+            inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor,
+          ));
         }
 
         statusBar.hideProgress();
-
         const outW = inputImage.width * scale;
         const outH = inputImage.height * scale;
         statusBar.message = `Done \u2014 ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}. Drag the slider to compare.`;
@@ -253,32 +317,157 @@ class UpscalerApp extends HTMLElement {
         perfMonitor.stop();
       }
 
-      this.#running = false;
-      stopBtn.style.display = 'none';
-      startOverBtn.style.display = 'inline-block';
-      upscaleBtn.disabled = false;
+      if (this.#generation === gen) {
+        this.#running = false;
+        this.#abortController = null;
+        stopBtn.style.display = 'none';
+        startOverBtn.style.display = 'inline-block';
+        upscaleBtn.disabled = false;
+      }
     });
 
-    // Stop
-    stopBtn.addEventListener('click', () => preview.stop());
+    stopBtn.addEventListener('click', () => {
+      this.#abortController?.abort();
+    });
 
-    // Start over
     startOverBtn.addEventListener('click', () => {
-      if (this.#running) preview.stop();
+      if (this.#running) this.#abortController?.abort();
       resetToStart();
     });
-
-    // Model selector updates button text
-    modelEl.addEventListener('change', () => {
-      const scale = modelEl.selectedOptions[0].dataset.scale;
-      upscaleBtn.textContent = `Upscale ${scale}x`;
-    });
-
-    // Denoise slider live value
-    denoiseEl.addEventListener('input', () => {
-      denoiseValEl.textContent = denoiseEl.value;
-    });
   }
+
+  // --- Pipeline branches ---
+
+  async #runLocalUpscale(inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor) {
+    const modelEl = this.#q('.model-select');
+    const selectedOption = modelEl.selectedOptions[0];
+    const modelUrl = selectedOption.value;
+    const parsedModelScale = parseInt(selectedOption.dataset.scale, 10);
+    const modelScale = Number.isFinite(parsedModelScale) ? parsedModelScale : 4;
+    const modelValueRange = parseInt(selectedOption.dataset.range, 10) || 1;
+    const backend = selectedOption.dataset.backend || this.#q('.backend-select').value;
+    const denoise = parseFloat(this.#q('.denoise-range').value);
+    const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
+    const outputScale = Math.max(1, Math.min(requestedOutputScale, modelScale));
+
+    // 1. Engine
+    const engine = this.#getOrCreateEngine(modelUrl, modelScale, modelValueRange, denoise, backend, perfMonitor.visible);
+    if (perfMonitor.visible) perfMonitor.start(backend);
+
+    await engine.loadModel(backend, (frac, msg) => {
+      statusBar.showProgress(frac);
+      statusBar.message = msg;
+    });
+
+    // 2. Dimmed preview
+    const outW = inputImage.width * engine.scale;
+    const outH = inputImage.height * engine.scale;
+    preview.showDimmedPreview(
+      inputImage, outW, outH,
+      `Upscaling ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}\u2026`,
+    );
+
+    // 3. Tiled upscale with live preview
+    const { canvas: resultCanvas, perf, ortProfile } = await engine.upscale(inputImage, tileSize, {
+      onTile: (info) => {
+        preview.drawTile(info);
+        statusBar.showProgress((info.index + 1) / info.total);
+        statusBar.message = `Tile ${info.index + 1} / ${info.total}`;
+        if (perfMonitor.visible) perfMonitor.update({
+          index: info.index, total: info.total,
+          tileMs: info.tileMs, tilePixels: info.tilePixels, perf: info.perf,
+        });
+      },
+      signal,
+    });
+
+    // 4. Face enhancement
+    let outputCanvas = resultCanvas;
+    if (this.#q('.detector-face-enabled').checked) {
+      console.info('[UpscalerApp] Face enhancement enabled; running face pass.');
+
+      const has2d = typeof outputCanvas.getContext === 'function' && outputCanvas.getContext('2d');
+      if (!has2d) {
+        const composited = document.createElement('canvas');
+        composited.width = outputCanvas.width;
+        composited.height = outputCanvas.height;
+        const cctx = composited.getContext('2d');
+        if (!cctx) throw new Error('Unable to create 2D canvas for face compositing.');
+        cctx.drawImage(outputCanvas, 0, 0);
+        outputCanvas = composited;
+        console.info('[UpscalerApp] Copied GPU-only output to 2D canvas for face compositing.');
+      }
+
+      const faceModelOpt = this.#q('.detector-face-model').selectedOptions[0];
+      const faceModelUrl = faceModelOpt?.value || modelUrl;
+      const parsedFaceScale = parseInt(faceModelOpt?.dataset.scale, 10);
+      const parsedFaceRange = parseInt(faceModelOpt?.dataset.range, 10);
+      const faceScale = Number.isFinite(parsedFaceScale) ? parsedFaceScale : modelScale;
+      const faceRange = Number.isFinite(parsedFaceRange) ? parsedFaceRange : modelValueRange;
+
+      const detectorEngine = this.#getOrCreateDetector(backend);
+      await detectorEngine.loadModel('face-yunet', backend);
+
+      const faceEngine = this.#getOrCreateFaceEngine(faceModelUrl, faceScale, faceRange, denoise, backend);
+      await faceEngine.loadModel(backend);
+
+      await applyFacePass(inputImage, outputCanvas, {
+        detectorEngine,
+        faceEngine,
+        baseScale: engine.scale,
+        detectorKey: 'face-yunet',
+        paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
+        featherPx: 16,
+        blendOpacity: parseFloat(this.#q('.detector-face-blend').value),
+        scoreThreshold: parseFloat(this.#q('.detector-face-score').value),
+        signal,
+      });
+    }
+
+    // 5. Perf results
+    if (perf) perfMonitor.showResults(perf, ortProfile);
+
+    // 6. Comparison output
+    const urls = await this.#createComparisonURLs(outputCanvas, inputImage, outputScale);
+    return { ...urls, scale: outputScale };
+  }
+
+  async #runRunPodUpscale(inputImage, signal, statusBar, preview) {
+    const endpointEl = this.#q('.runpod-endpoint');
+    const apikeyEl = this.#q('.runpod-apikey');
+    if (!endpointEl.value || !apikeyEl.value) {
+      throw new Error('Enter your RunPod Endpoint ID and API Key.');
+    }
+
+    const { RunPodEngine } = await import('./runpod-engine.js');
+    const engine = new RunPodEngine({
+      endpointId: endpointEl.value.trim(),
+      apiKey: apikeyEl.value.trim(),
+      scale: 4,
+    });
+
+    const parsedOutputScale = parseInt(this.#q('.output-select').value, 10);
+    const requestedScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : 4;
+    const finalScale = Math.max(1, Math.min(requestedScale, 4));
+
+    const outW = inputImage.width * 4;
+    const outH = inputImage.height * 4;
+    preview.showDimmedPreview(inputImage, outW, outH, `Upscaling ${inputImage.width}\u00d7${inputImage.height} via RunPod\u2026`);
+
+    statusBar.showIndeterminate();
+
+    const { canvas: resultCanvas, scale: actualScale } = await engine.upscale(
+      inputImage,
+      (msg) => { statusBar.message = msg; },
+      signal,
+    );
+
+    const scale = Math.min(finalScale, actualScale);
+    const urls = await this.#createComparisonURLs(resultCanvas, inputImage, scale);
+    return { ...urls, scale };
+  }
+
+  // --- Settings ---
 
   #restoreSettings() {
     this.#q('.runpod-endpoint').value = localStorage.getItem('upscaler_runpod_endpoint') || '';
@@ -291,6 +480,10 @@ class UpscalerApp extends HTMLElement {
       ['.backend-select', 'upscaler_backend'],
       ['.output-select', 'upscaler_output'],
       ['.denoise-range', 'upscaler_denoise'],
+      ['.detector-face-padding', 'upscaler_detector_face_padding_px'],
+      ['.detector-face-score', 'upscaler_detector_face_score'],
+      ['.detector-face-blend', 'upscaler_detector_face_blend'],
+      ['.detector-face-model', 'upscaler_detector_face_model'],
     ];
     for (const [sel, key] of controls) {
       const saved = localStorage.getItem(key);
@@ -298,6 +491,7 @@ class UpscalerApp extends HTMLElement {
     }
     this.#viewState.expanded = localStorage.getItem('upscaler_view_expanded') === '1';
     this.#viewState.upscaledOnly = localStorage.getItem('upscaler_view_upscaled_only') === '1';
+    this.#q('.detector-face-enabled').checked = localStorage.getItem('upscaler_detector_face_enabled') !== '0';
 
     this.#q('upscale-preview').setExpanded(this.#viewState.expanded);
     this.#q('compare-slider').setViewState(this.#viewState);
@@ -307,7 +501,11 @@ class UpscalerApp extends HTMLElement {
     this.#q('.mode-select').dispatchEvent(new Event('change'));
     this.#q('.model-select').dispatchEvent(new Event('change'));
     this.#q('.denoise-range').dispatchEvent(new Event('input'));
+    this.#q('.detector-face-score').dispatchEvent(new Event('input'));
+    this.#q('.detector-face-blend').dispatchEvent(new Event('input'));
   }
+
+  // --- Template ---
 
   #render() {
     morph(this, `
@@ -338,6 +536,39 @@ class UpscalerApp extends HTMLElement {
           font-size: 0.7rem;
           color: var(--pico-muted-color);
         }
+        upscaler-app .detectors-panel {
+          margin-bottom: 1rem;
+          padding: 0.6rem 0.7rem;
+          border: 1px solid var(--pico-muted-border-color);
+          border-radius: var(--pico-border-radius);
+        }
+        upscaler-app .detectors-panel > summary {
+          cursor: pointer;
+          font-size: 0.9rem;
+          user-select: none;
+          margin-bottom: 0.6rem;
+        }
+        upscaler-app .detector-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.4rem 0.75rem;
+          align-items: center;
+          margin-top: 0;
+        }
+        upscaler-app .detector-row label {
+          margin-bottom: 0;
+          display: inline-flex;
+          align-items: center;
+          gap: 0.35rem;
+          font-size: 0.85rem;
+        }
+        upscaler-app .detector-row input,
+        upscaler-app .detector-row select {
+          margin-bottom: 0;
+        }
+        upscaler-app .detector-row input[type="checkbox"] {
+          margin-top: 0;
+        }
       </style>
 
       <h2>
@@ -356,10 +587,7 @@ class UpscalerApp extends HTMLElement {
         <span class="local-controls">
           <label>Model:
             <select class="model-select">
-              <option value="models/RMBN_M4C8_x4.onnx" data-scale="4" data-range="255">4x Lightweight M8C16 (RMBN)</option>
-              <option value="models/4x-ClearRealityV1.onnx" data-scale="4" data-backend="wasm">4x ClearReality V1 (SPAN)</option>
-              <option value="models/4x-UltraSharpV2_Lite.onnx" data-scale="4">4x UltraSharp V2 Lite (RealPLKSR)</option>
-              <option value="models/4x-UltraMix_Balanced.onnx" data-scale="4">4x UltraMix Balanced (ESRGAN)</option>
+              ${modelOptionsHTML()}
             </select>
           </label>
           <label>Tile size:
@@ -388,7 +616,7 @@ class UpscalerApp extends HTMLElement {
               <option value="4" selected>4x (no downscale)</option>
             </select>
           </label>
-          <label title="3×3 bilateral denoise — smooths compression noise while preserving edges">Smooth artifacts:
+          <label title="3\u00d73 bilateral denoise \u2014 smooths compression noise while preserving edges">Smooth artifacts:
             <span style="display:inline-flex;align-items:center;gap:0.3rem">
               <input class="denoise-range" type="range" min="0" max="1" step="0.05" value="0" style="width:7rem;vertical-align:middle">
               <span class="denoise-val" style="min-width:2.2ch;font-variant-numeric:tabular-nums">0</span>
@@ -418,6 +646,39 @@ class UpscalerApp extends HTMLElement {
           <i class="fas fa-gauge-high"></i>
         </button>
       </div>
+
+      <details class="detectors-panel">
+        <summary><i class="fas fa-user-check"></i> Detectors</summary>
+        <div class="detector-row">
+          <label>
+            <input class="detector-face-enabled" type="checkbox" checked>
+            Face (YuNet)
+          </label>
+          <label>Padding:
+            <input class="detector-face-padding" type="number" min="0" max="512" step="1" value="24" style="width:7ch">
+            px
+          </label>
+          <label title="Minimum face detection confidence">
+            Score:
+            <span style="display:inline-flex;align-items:center;gap:0.3rem">
+              <input class="detector-face-score" type="range" min="0.3" max="0.95" step="0.01" value="0.70" style="width:7rem;vertical-align:middle">
+              <span class="detector-face-score-val" style="min-width:4ch;font-variant-numeric:tabular-nums">0.70</span>
+            </span>
+          </label>
+          <label title="Blend opacity of the face patch over the base upscale (1 = full replace, lower = transparent blend)">
+            Blend:
+            <span style="display:inline-flex;align-items:center;gap:0.3rem">
+              <input class="detector-face-blend" type="range" min="0" max="1" step="0.05" value="0.65" style="width:7rem;vertical-align:middle">
+              <span class="detector-face-blend-val" style="min-width:4ch;font-variant-numeric:tabular-nums">0.65</span>
+            </span>
+          </label>
+          <label>Face model:
+            <select class="detector-face-model">
+              ${modelOptionsHTML(undefined, { selected: 'models/RMBN_M4C8_FACES_x4.onnx' })}
+            </select>
+          </label>
+        </div>
+      </details>
 
       <status-bar></status-bar>
       <image-drop-zone></image-drop-zone>

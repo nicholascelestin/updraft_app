@@ -23,6 +23,7 @@ const copyPairs = [
 
   // Models exposed via context-menu model submenu.
   ['models/RMBN_M4C8_x4.onnx', 'chrome-extension/models/RMBN_M4C8_x4.onnx'],
+  ['models/RMBN_M4C8_FACES_x4.onnx', 'chrome-extension/models/RMBN_M4C8_FACES_x4.onnx'],
   ['models/4x-UltraMix_Balanced.onnx', 'chrome-extension/models/4x-UltraMix_Balanced.onnx'],
   ['models/4x-UltraSharpV2_Lite.onnx', 'chrome-extension/models/4x-UltraSharpV2_Lite.onnx'],
   ['models/4x-ClearRealityV1.onnx', 'chrome-extension/models/4x-ClearRealityV1.onnx'],

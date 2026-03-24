@@ -1,24 +1,20 @@
 /**
- * <upscale-preview> — canvas that drives tiled inference and shows live progress.
+ * <upscale-preview> — canvas that shows live tile-by-tile upscale progress.
  *
- * Events:
- *   tile-complete     — detail: { index, total, tileMs, tilePixels, perf }
- *   upscale-complete  — detail: { beforeSrc, afterSrc, elapsed, perf, ortProfile }
- *   runpod-status     — detail: { message }
+ * Pure presentation component. The parent orchestrates engines and the
+ * upscale pipeline; this element just renders tiles as they arrive.
+ *
+ * Events emitted:
+ *   view-state-change — detail: { expanded }
  */
 
 import { morph } from 'lib/morph';
-import { UpscalerEngine } from './upscaler-engine.js';
 
 class UpscalePreview extends HTMLElement {
-  #engine = null;
-  #currentModelUrl = null;
   #labelText = '';
-  #abortController = null;
-  #blobURLs = [];
   #expanded = false;
   #naturalW = 0;
-  #profiling = false;
+  #ctx = null;
 
   connectedCallback() {
     this.classList.add('upscale-preview');
@@ -31,126 +27,13 @@ class UpscalePreview extends HTMLElement {
     });
   }
 
-  get engine() { return this.#engine; }
-  get running() { return this.#abortController !== null; }
-
-  set profiling(v) {
-    this.#profiling = !!v;
-    if (this.#engine) this.#engine.profiling = this.#profiling;
-  }
-
-  async upscale(image, tileSize, backend, opts = {}) {
-    const signal = this.#beginUpscale();
-    const {
-      modelUrl = 'models/4x-UltraMix_Balanced.onnx',
-      scale = 4,
-      outputScale,
-      modelValueRange = 1,
-      denoise = 0,
-      onModelProgress,
-    } = opts;
-
-    const backendChanged = this.#engine?.activeBackend && this.#engine.activeBackend !== backend;
-    if (!this.#engine || this.#currentModelUrl !== modelUrl || this.#engine.denoise !== denoise || backendChanged) {
-      this.#engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, denoise, profile: this.#profiling });
-      this.#currentModelUrl = modelUrl;
-    }
-    this.#engine.profiling = this.#profiling;
-
-    await this.#engine.loadModel(backend, onModelProgress);
-    const parsedOutputScale = parseInt(outputScale ?? this.#engine.scale, 10);
-    const requestedScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : this.#engine.scale;
-    const finalScale = Math.max(1, Math.min(requestedScale, this.#engine.scale));
-
-    const outW = image.width * this.#engine.scale;
-    const outH = image.height * this.#engine.scale;
-    const ctx = this.#showDimmedPreview(image, outW, outH, `Upscaling ${image.width}\u00d7${image.height} \u2192 ${outW}\u00d7${outH}\u2026`);
-
-    try {
-      const { canvas: resultCanvas, perf, ortProfile } = await this.#engine.upscale(image, tileSize, {
-        onTile: (info) => {
-          const { outX, outY, outW: tw, outH: th } = info;
-          ctx.drawImage(info.canvas, outX, outY, tw, th, outX, outY, tw, th);
-          this.dispatchEvent(new CustomEvent('tile-complete', {
-            detail: { index: info.index, total: info.total, tileMs: info.tileMs, tilePixels: info.tilePixels, perf: info.perf },
-          }));
-        },
-        signal,
-      });
-
-      const elapsed = performance.now();
-      const urls = await this.#createComparisonURLs(resultCanvas, image, finalScale);
-
-      this.dispatchEvent(new CustomEvent('upscale-complete', {
-        detail: { ...urls, elapsed, perf, ortProfile },
-      }));
-
-      return { ...urls, elapsed, scale: finalScale };
-    } finally {
-      this.#abortController = null;
-    }
-  }
-
-  async upscaleRunPod(image, { endpointId, apiKey, scale = 4, outputScale }) {
-    const signal = this.#beginUpscale();
-
-    const { RunPodEngine } = await import('./runpod-engine.js');
-    const engine = new RunPodEngine({ endpointId, apiKey, scale });
-    const parsedOutputScale = parseInt(outputScale ?? scale, 10);
-    const requestedScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : scale;
-    const finalScale = Math.max(1, Math.min(requestedScale, scale));
-
-    const outW = image.width * scale;
-    const outH = image.height * scale;
-    this.#showDimmedPreview(image, outW, outH, `Upscaling ${image.width}\u00d7${image.height} via RunPod\u2026`);
-
-    try {
-      const { canvas: resultCanvas, scale: actualScale } = await engine.upscale(image, (msg) => {
-        this.dispatchEvent(new CustomEvent('runpod-status', { detail: { message: msg } }));
-      }, signal);
-
-      const urls = await this.#createComparisonURLs(resultCanvas, image, Math.min(finalScale, actualScale));
-      return { ...urls, scale: Math.min(finalScale, actualScale) };
-    } finally {
-      this.#abortController = null;
-    }
-  }
-
-  stop() {
-    this.#abortController?.abort();
-  }
-
-  cleanup() {
-    this.#revokeBlobURLs();
-    this.#clearCanvas();
-  }
-
-  show() { this.style.display = 'block'; }
-
-  hide() {
-    this.style.display = 'none';
-    this.style.maxWidth = '';
-    this.#clearCanvas();
-  }
-
   get expanded() { return this.#expanded; }
 
-  setExpanded(expanded) {
-    const next = !!expanded;
-    if (this.#expanded === next) return;
-    this.#expanded = next;
-    this.#render();
-    if (this.style.display !== 'none') this.#applySize();
-    this.#emitViewState();
-  }
-
-  #beginUpscale() {
-    this.#revokeBlobURLs();
-    this.#abortController = new AbortController();
-    return this.#abortController.signal;
-  }
-
-  #showDimmedPreview(image, outW, outH, label) {
+  /**
+   * Set up the canvas with a dimmed version of the source image,
+   * indicating that upscaling is about to begin.
+   */
+  showDimmedPreview(image, outW, outH, label) {
     this.#labelText = label;
     this.#naturalW = outW;
     this.#render();
@@ -165,60 +48,56 @@ class UpscalePreview extends HTMLElement {
     ctx.drawImage(image, 0, 0, outW, outH);
     ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.fillRect(0, 0, outW, outH);
-    return ctx;
+    this.#ctx = ctx;
   }
 
-  async #createComparisonURLs(resultCanvas, image, outputScale) {
-    const targetScale = Math.max(1, outputScale || Math.round(resultCanvas.width / image.width) || 1);
-    const w = image.width * targetScale;
-    const h = image.height * targetScale;
-    const needsDownscale = resultCanvas.width !== w || resultCanvas.height !== h;
+  /**
+   * Draw a completed tile onto the preview canvas.
+   * @param {{ canvas: HTMLCanvasElement, outX: number, outY: number, outW: number, outH: number }} tileInfo
+   */
+  drawTile(tileInfo) {
+    if (!this.#ctx) return;
+    const { outX, outY, outW: tw, outH: th } = tileInfo;
+    this.#ctx.drawImage(tileInfo.canvas, outX, outY, tw, th, outX, outY, tw, th);
+  }
 
-    let afterCanvas = resultCanvas;
-    if (needsDownscale) {
-      afterCanvas = document.createElement('canvas');
-      afterCanvas.width = w;
-      afterCanvas.height = h;
-      const afterCtx = afterCanvas.getContext('2d');
-      afterCtx.imageSmoothingEnabled = true;
-      afterCtx.imageSmoothingQuality = 'high';
-      afterCtx.drawImage(resultCanvas, 0, 0, w, h);
-    }
+  cleanup() {
+    this.#clearCanvas();
+    this.#ctx = null;
+  }
 
-    const beforeCanvas = document.createElement('canvas');
-    beforeCanvas.width = w;
-    beforeCanvas.height = h;
-    const bCtx = beforeCanvas.getContext('2d');
-    bCtx.imageSmoothingEnabled = false;
-    bCtx.drawImage(image, 0, 0, w, h);
+  show() { this.style.display = 'block'; }
 
-    const [afterBlob, beforeBlob] = await Promise.all([
-      new Promise(r => afterCanvas.toBlob(r, 'image/png')),
-      new Promise(r => beforeCanvas.toBlob(r, 'image/png')),
-    ]);
+  hide() {
+    this.style.display = 'none';
+    this.style.maxWidth = '';
+    this.#clearCanvas();
+    this.#ctx = null;
+  }
 
-    const afterSrc = URL.createObjectURL(afterBlob);
-    const beforeSrc = URL.createObjectURL(beforeBlob);
-    this.#blobURLs = [afterSrc, beforeSrc];
-    return { beforeSrc, afterSrc };
+  setExpanded(expanded) {
+    const next = !!expanded;
+    if (this.#expanded === next) return;
+    this.#expanded = next;
+    this.#render();
+    if (this.style.display !== 'none') this.#applySize();
+    this.#emitViewState();
   }
 
   #applySize() {
+    const canvas = this.querySelector('canvas');
+    if (!canvas || !canvas.height) { this.style.maxWidth = ''; return; }
+    const maxH = window.innerHeight - 160;
+    const aspect = canvas.width / canvas.height;
+    const fittedW = Math.round(maxH * aspect);
+
     if (this.#expanded) {
-      this.style.maxWidth = this.#naturalW ? this.#naturalW + 'px' : '';
+      const naturalW = this.#naturalW || canvas.width || 0;
+      const minExpandedW = Math.max(naturalW, fittedW);
+      this.style.maxWidth = minExpandedW ? minExpandedW + 'px' : '';
     } else {
-      const canvas = this.querySelector('canvas');
-      if (!canvas || !canvas.height) { this.style.maxWidth = ''; return; }
-      const maxH = window.innerHeight - 160;
-      const aspect = canvas.width / canvas.height;
-      const fittedW = Math.round(maxH * aspect);
       this.style.maxWidth = Math.min(fittedW, this.#naturalW || Infinity) + 'px';
     }
-  }
-
-  #revokeBlobURLs() {
-    for (const url of this.#blobURLs) URL.revokeObjectURL(url);
-    this.#blobURLs = [];
   }
 
   #clearCanvas() {
@@ -232,7 +111,7 @@ class UpscalePreview extends HTMLElement {
       <style>
         .upscale-preview { display: none; position: relative; }
         .upscale-preview canvas {
-          display: block; max-width: 100%; height: auto;
+          display: block; width: 100%; max-width: 100%; height: auto;
           border: 1px solid var(--pico-muted-border-color, #333);
           border-radius: var(--pico-border-radius, 4px);
           background: #000;

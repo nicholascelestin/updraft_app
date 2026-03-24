@@ -154,13 +154,15 @@ class CompareSlider extends HTMLElement {
   #applySize() {
     const afterImg = this.querySelector('.compare-after');
     if (!afterImg) return;
+    const maxH = window.innerHeight - 160;
+    const aspect = afterImg.naturalWidth / afterImg.naturalHeight;
+    const fittedW = Math.round(maxH * aspect);
 
     if (this.#expanded) {
-      this.style.maxWidth = this.#naturalMaxWidth ? this.#naturalMaxWidth + 'px' : '';
+      const naturalW = this.#naturalMaxWidth || afterImg.naturalWidth || 0;
+      const minExpandedW = Math.max(naturalW, fittedW);
+      this.style.maxWidth = minExpandedW ? minExpandedW + 'px' : '';
     } else {
-      const maxH = window.innerHeight - 160;
-      const aspect = afterImg.naturalWidth / afterImg.naturalHeight;
-      const fittedW = Math.round(maxH * aspect);
       const callerMax = this.#naturalMaxWidth || Infinity;
       this.style.maxWidth = Math.min(fittedW, callerMax) + 'px';
     }
