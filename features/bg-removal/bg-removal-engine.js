@@ -34,6 +34,15 @@ export class BgRemovalEngine {
   get currentModel() { return this.#currentModelKey; }
 
   async loadModel(modelKey, backend = 'wasm', onProgress) {
+    if (onProgress != null && typeof onProgress !== 'function') {
+      console.warn('[BgRemovalEngine] Ignoring non-function onProgress callback.', {
+        type: typeof onProgress,
+        value: onProgress,
+        modelKey,
+        backend,
+      });
+    }
+    const report = typeof onProgress === 'function' ? onProgress : null;
     if (this.#session && this.#currentModelKey === modelKey) return;
 
     const cfg = MODELS[modelKey];
@@ -55,10 +64,10 @@ export class BgRemovalEngine {
     }
 
     if (!this.#modelBuffer) {
-      this.#modelBuffer = await fetchWithProgress(cfg.url, onProgress);
+      this.#modelBuffer = await fetchWithProgress(cfg.url, report);
     }
 
-    onProgress?.(1, 'Loading model into runtime\u2026');
+    report?.(1, 'Loading model into runtime\u2026');
 
     try {
       this.#session = await ort.InferenceSession.create(this.#modelBuffer, {
@@ -67,7 +76,7 @@ export class BgRemovalEngine {
       });
     } catch (e) {
       if (backend !== 'wasm') {
-        onProgress?.(1, `${backend} failed, falling back to WASM\u2026`);
+        report?.(1, `${backend} failed, falling back to WASM\u2026`);
         this.#session = await ort.InferenceSession.create(this.#modelBuffer, {
           executionProviders: ['wasm'],
           graphOptimizationLevel: 'all',
@@ -78,7 +87,7 @@ export class BgRemovalEngine {
     }
 
     this.#currentModelKey = modelKey;
-    onProgress?.(1, 'Model loaded.');
+    report?.(1, 'Model loaded.');
   }
 
   async removeBackground(image, signal) {

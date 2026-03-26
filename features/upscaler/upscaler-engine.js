@@ -34,7 +34,7 @@ function yieldToEventLoop() {
  * @param {ImageData} imageData - modified in-place
  * @param {number} strength - 0..1 blend toward filtered result
  */
-function denoiseImageData(imageData, strength) {
+export function denoiseImageData(imageData, strength) {
   const { data, width, height } = imageData;
   const out = new Uint8ClampedArray(data.length);
   const sigmaR = 15 + strength * 15;
@@ -149,6 +149,14 @@ export class UpscalerEngine {
   set profiling(v) { this.#profiling = !!v; }
 
   async loadModel(backend = 'wasm', onProgress) {
+    if (onProgress != null && typeof onProgress !== 'function') {
+      console.warn('[UpscalerEngine] Ignoring non-function onProgress callback.', {
+        type: typeof onProgress,
+        value: onProgress,
+        backend,
+      });
+    }
+    const report = typeof onProgress === 'function' ? onProgress : null;
     if (this.#session && this.#activeBackend === backend) return;
     this.#releaseSession();
 
@@ -165,10 +173,10 @@ export class UpscalerEngine {
     }
 
     if (!this.#modelBuffer) {
-      this.#modelBuffer = await fetchWithProgress(this.#modelUrl, onProgress);
+      this.#modelBuffer = await fetchWithProgress(this.#modelUrl, report);
     }
 
-    onProgress?.(1, 'Loading model into runtime\u2026');
+    report?.(1, 'Loading model into runtime\u2026');
 
     const sessionOpts = {
       executionProviders: [backend],
@@ -186,7 +194,7 @@ export class UpscalerEngine {
     } catch (e) {
       if (backend !== 'wasm') {
         console.warn(`[UpscalerEngine] ${backend} backend failed, falling back to WASM. Reason:`, e);
-        onProgress?.(1, `${backend} failed, falling back to WASM\u2026`);
+        report?.(1, `${backend} failed, falling back to WASM\u2026`);
         sessionOpts.executionProviders = ['wasm'];
         delete sessionOpts.preferredOutputLocation;
         delete sessionOpts.enableProfiling;
@@ -215,7 +223,7 @@ export class UpscalerEngine {
     }
 
     this.#modelBuffer = null;
-    onProgress?.(1, 'Model loaded.');
+    report?.(1, 'Model loaded.');
   }
 
   async upscale(img, tileSize, { onTile, signal } = {}) {

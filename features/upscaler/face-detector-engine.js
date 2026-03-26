@@ -200,6 +200,15 @@ export class FaceDetectorEngine {
   get currentDetector() { return this.#currentDetectorKey; }
 
   async loadModel(detectorKey = 'face-yunet', backend = 'wasm', onProgress) {
+    if (onProgress != null && typeof onProgress !== 'function') {
+      console.warn('[FaceDetectorEngine] Ignoring non-function onProgress callback.', {
+        type: typeof onProgress,
+        value: onProgress,
+        detectorKey,
+        backend,
+      });
+    }
+    const report = typeof onProgress === 'function' ? onProgress : null;
     if (this.#session && this.#currentDetectorKey === detectorKey && this.#activeBackend === backend) return;
 
     const cfg = DETECTORS[detectorKey];
@@ -222,10 +231,10 @@ export class FaceDetectorEngine {
     }
 
     if (!this.#modelBuffer) {
-      this.#modelBuffer = await fetchWithProgress(cfg.url, onProgress);
+      this.#modelBuffer = await fetchWithProgress(cfg.url, report);
     }
 
-    onProgress?.(1, 'Loading detector into runtime...');
+    report?.(1, 'Loading detector into runtime...');
     console.info(`[FaceDetectorEngine] Loading detector "${detectorKey}" with backend "${backend}"`);
     let actualBackend = backend;
     try {
@@ -248,7 +257,7 @@ export class FaceDetectorEngine {
     this.#currentDetectorKey = detectorKey;
     this.#activeBackend = actualBackend;
     console.info(`[FaceDetectorEngine] Detector ready. Active backend: "${actualBackend}"`);
-    onProgress?.(1, 'Detector loaded.');
+    report?.(1, 'Detector loaded.');
   }
 
   async detectFaces(image, {

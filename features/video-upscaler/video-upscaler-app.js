@@ -5,6 +5,7 @@
 
 import { morph } from 'lib/morph';
 import { modelOptionsHTML } from '../upscaler/model-registry.js';
+import { Pipeline } from '../upscaler/upscale-pipeline.js';
 import 'components/video-drop-zone';
 import 'components/status-bar';
 import { VideoUpscalerEngine } from './video-upscaler-engine.js';
@@ -14,6 +15,7 @@ class VideoUpscalerApp extends HTMLElement {
   #running = false;
   #abortController = null;
   #resultBlobUrl = null;
+  #pipeline = new Pipeline();
 
   connectedCallback() {
     this.#render();
@@ -105,7 +107,10 @@ class VideoUpscalerApp extends HTMLElement {
       const outputScale = parseInt(outputEl.value, 10);
 
       const engine = new VideoUpscalerEngine({
-        modelUrl, scale, modelValueRange, tileSize, backend, fps, outputScale,
+        pipeline: this.#pipeline,
+        config: { modelUrl, scale, modelValueRange, tileSize, backend },
+        fps,
+        outputScale,
       });
 
       const { width, height } = this.#videoInfo;

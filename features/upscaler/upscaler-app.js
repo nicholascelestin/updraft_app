@@ -1,13 +1,10 @@
 /**
  * <upscaler-app> — orchestrates the image upscaler feature.
- * Owns engine lifecycle, abort control, and the upscale pipeline.
- * Sub-components handle presentation only.
+ * Delegates inference to Pipeline; owns abort control and presentation.
  */
 
 import { morph } from 'lib/morph';
-import { UpscalerEngine } from './upscaler-engine.js';
-import { FaceDetectorEngine } from './face-detector-engine.js';
-import { applyFacePass } from './face-enhance.js';
+import { Pipeline } from './upscale-pipeline.js';
 import { modelOptionsHTML } from './model-registry.js';
 import 'components/image-drop-zone';
 import 'components/status-bar';
@@ -22,12 +19,7 @@ class UpscalerApp extends HTMLElement {
   #generation = 0;
   #viewState = { expanded: false, upscaledOnly: false };
 
-  #engine = null;
-  #engineModelUrl = null;
-  #faceEngine = null;
-  #faceEngineModelUrl = null;
-  #faceEngineDenoise = 0;
-  #detectorEngine = null;
+  #pipeline = new Pipeline();
   #abortController = null;
   #blobURLs = [];
 
@@ -41,38 +33,6 @@ class UpscalerApp extends HTMLElement {
   }
 
   #q(sel) { return this.querySelector(sel); }
-
-  // --- Engine lifecycle ---
-
-  #getOrCreateEngine(modelUrl, scale, modelValueRange, denoise, backend, profiling = false) {
-    const backendChanged = this.#engine?.activeBackend && this.#engine.activeBackend !== backend;
-    if (!this.#engine || this.#engineModelUrl !== modelUrl || this.#engine.denoise !== denoise || backendChanged) {
-      this.#engine?.destroy();
-      this.#engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, denoise, profile: profiling });
-      this.#engineModelUrl = modelUrl;
-    }
-    this.#engine.profiling = profiling;
-    return this.#engine;
-  }
-
-  #getOrCreateFaceEngine(modelUrl, scale, range, denoise, backend) {
-    const backendChanged = this.#faceEngine?.activeBackend && this.#faceEngine.activeBackend !== backend;
-    if (!this.#faceEngine || this.#faceEngineModelUrl !== modelUrl || this.#faceEngineDenoise !== denoise || backendChanged) {
-      this.#faceEngine?.destroy();
-      this.#faceEngine = new UpscalerEngine({ modelUrl, scale, modelValueRange: range, denoise, profile: false });
-      this.#faceEngineModelUrl = modelUrl;
-      this.#faceEngineDenoise = denoise;
-    }
-    return this.#faceEngine;
-  }
-
-  #getOrCreateDetector(backend) {
-    if (!this.#detectorEngine || this.#detectorEngine.activeBackend !== backend) {
-      this.#detectorEngine?.release();
-      this.#detectorEngine = new FaceDetectorEngine();
-    }
-    return this.#detectorEngine;
-  }
 
   // --- Pipeline helpers ---
 
@@ -336,40 +296,56 @@ class UpscalerApp extends HTMLElement {
     });
   }
 
+  // --- Config extraction ---
+
+  #extractConfig() {
+    const opt = this.#q('.model-select').selectedOptions[0];
+    const modelUrl = opt.value;
+    const scale = parseInt(opt.dataset.scale, 10) || 4;
+    const modelValueRange = parseInt(opt.dataset.range, 10) || 1;
+    const backend = opt.dataset.backend || this.#q('.backend-select').value;
+    const denoise = parseFloat(this.#q('.denoise-range').value) || 0;
+    const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
+    const profile = this.#q('perf-monitor').visible;
+
+    const config = { modelUrl, scale, modelValueRange, backend, tileSize, denoise, profile };
+
+    if (this.#q('.detector-face-enabled').checked) {
+      const fopt = this.#q('.detector-face-model').selectedOptions[0];
+      config.face = {
+        modelUrl: fopt?.value || modelUrl,
+        scale: parseInt(fopt?.dataset.scale, 10) || scale,
+        modelValueRange: parseInt(fopt?.dataset.range, 10) || modelValueRange,
+        backend: fopt?.dataset.backend || backend,
+        paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
+        featherPx: 16,
+        blendOpacity: parseFloat(this.#q('.detector-face-blend').value),
+        scoreThreshold: parseFloat(this.#q('.detector-face-score').value),
+      };
+    }
+
+    return config;
+  }
+
   // --- Pipeline branches ---
 
   async #runLocalUpscale(inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor) {
-    const modelEl = this.#q('.model-select');
-    const selectedOption = modelEl.selectedOptions[0];
-    const modelUrl = selectedOption.value;
-    const parsedModelScale = parseInt(selectedOption.dataset.scale, 10);
-    const modelScale = Number.isFinite(parsedModelScale) ? parsedModelScale : 4;
-    const modelValueRange = parseInt(selectedOption.dataset.range, 10) || 1;
-    const backend = selectedOption.dataset.backend || this.#q('.backend-select').value;
-    const denoise = parseFloat(this.#q('.denoise-range').value);
-    const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
-    const outputScale = Math.max(1, Math.min(requestedOutputScale, modelScale));
+    const config = this.#extractConfig();
+    if (perfMonitor.visible) perfMonitor.start(config.backend);
 
-    // 1. Engine
-    const engine = this.#getOrCreateEngine(modelUrl, modelScale, modelValueRange, denoise, backend, perfMonitor.visible);
-    if (perfMonitor.visible) perfMonitor.start(backend);
-
-    await engine.loadModel(backend, (frac, msg) => {
-      statusBar.showProgress(frac);
-      statusBar.message = msg;
-    });
-
-    // 2. Dimmed preview
-    const outW = inputImage.width * engine.scale;
-    const outH = inputImage.height * engine.scale;
+    const outW = inputImage.width * config.scale;
+    const outH = inputImage.height * config.scale;
     preview.showDimmedPreview(
       inputImage, outW, outH,
       `Upscaling ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}\u2026`,
     );
 
-    // 3. Tiled upscale with live preview
-    const { canvas: resultCanvas, perf, ortProfile } = await engine.upscale(inputImage, tileSize, {
-      onTile: (info) => {
+    const result = await this.#pipeline.run(inputImage, config, {
+      onProgress(frac, msg) {
+        statusBar.showProgress(frac);
+        statusBar.message = msg;
+      },
+      onTile(info) {
         preview.drawTile(info);
         statusBar.showProgress((info.index + 1) / info.total);
         statusBar.message = `Tile ${info.index + 1} / ${info.total}`;
@@ -381,54 +357,10 @@ class UpscalerApp extends HTMLElement {
       signal,
     });
 
-    // 4. Face enhancement
-    let outputCanvas = resultCanvas;
-    if (this.#q('.detector-face-enabled').checked) {
-      console.info('[UpscalerApp] Face enhancement enabled; running face pass.');
+    if (result.perf) perfMonitor.showResults(result.perf, result.ortProfile);
 
-      const has2d = typeof outputCanvas.getContext === 'function' && outputCanvas.getContext('2d');
-      if (!has2d) {
-        const composited = document.createElement('canvas');
-        composited.width = outputCanvas.width;
-        composited.height = outputCanvas.height;
-        const cctx = composited.getContext('2d');
-        if (!cctx) throw new Error('Unable to create 2D canvas for face compositing.');
-        cctx.drawImage(outputCanvas, 0, 0);
-        outputCanvas = composited;
-        console.info('[UpscalerApp] Copied GPU-only output to 2D canvas for face compositing.');
-      }
-
-      const faceModelOpt = this.#q('.detector-face-model').selectedOptions[0];
-      const faceModelUrl = faceModelOpt?.value || modelUrl;
-      const parsedFaceScale = parseInt(faceModelOpt?.dataset.scale, 10);
-      const parsedFaceRange = parseInt(faceModelOpt?.dataset.range, 10);
-      const faceScale = Number.isFinite(parsedFaceScale) ? parsedFaceScale : modelScale;
-      const faceRange = Number.isFinite(parsedFaceRange) ? parsedFaceRange : modelValueRange;
-
-      const detectorEngine = this.#getOrCreateDetector(backend);
-      await detectorEngine.loadModel('face-yunet', backend);
-
-      const faceEngine = this.#getOrCreateFaceEngine(faceModelUrl, faceScale, faceRange, denoise, backend);
-      await faceEngine.loadModel(backend);
-
-      await applyFacePass(inputImage, outputCanvas, {
-        detectorEngine,
-        faceEngine,
-        baseScale: engine.scale,
-        detectorKey: 'face-yunet',
-        paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
-        featherPx: 16,
-        blendOpacity: parseFloat(this.#q('.detector-face-blend').value),
-        scoreThreshold: parseFloat(this.#q('.detector-face-score').value),
-        signal,
-      });
-    }
-
-    // 5. Perf results
-    if (perf) perfMonitor.showResults(perf, ortProfile);
-
-    // 6. Comparison output
-    const urls = await this.#createComparisonURLs(outputCanvas, inputImage, outputScale);
+    const outputScale = Math.max(1, Math.min(requestedOutputScale, result.scale));
+    const urls = await this.#createComparisonURLs(result.image, inputImage, outputScale);
     return { ...urls, scale: outputScale };
   }
 

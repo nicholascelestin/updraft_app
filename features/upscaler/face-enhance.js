@@ -10,7 +10,7 @@ function clamp(v, min, max) {
   return v < min ? min : v > max ? max : v;
 }
 
-function expandRect(rect, paddingPx, maxW, maxH) {
+export function expandRect(rect, paddingPx, maxW, maxH) {
   const x1 = clamp(rect.x - paddingPx, 0, maxW);
   const y1 = clamp(rect.y - paddingPx, 0, maxH);
   const x2 = clamp(rect.x + rect.w + paddingPx, 0, maxW);
@@ -23,7 +23,7 @@ function expandRect(rect, paddingPx, maxW, maxH) {
   };
 }
 
-function cropToCanvas(image, rect) {
+export function cropToCanvas(image, rect) {
   const c = document.createElement('canvas');
   c.width = rect.w;
   c.height = rect.h;
@@ -43,7 +43,7 @@ function smoothstep(edge0, edge1, x) {
   return t * t * (3 - 2 * t);
 }
 
-function computeFaceFeatherPx({
+export function computeFaceFeatherPx({
   configuredFeatherPx,
   faceW,
   faceH,
@@ -75,7 +75,7 @@ function computeFaceFeatherPx({
   return Math.max(2, Math.min(Math.round(feather), patchLimit));
 }
 
-function compositeFeathered(destCanvas, patchCanvas, x, y, {
+export function compositeFeathered(destCanvas, patchCanvas, x, y, {
   featherPx = 8,
   innerRect = null,
   blendOpacity = 1,
