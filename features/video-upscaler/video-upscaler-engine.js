@@ -69,6 +69,7 @@ export class VideoUpscalerEngine {
   #config;
   #fps;
   #outputScale;
+  #maxFrames;
 
   /**
    * @param {object} opts
@@ -76,12 +77,14 @@ export class VideoUpscalerEngine {
    * @param {object} opts.config — { modelUrl, scale, modelValueRange, tileSize, backend }
    * @param {number} [opts.fps=30]
    * @param {number} [opts.outputScale] — defaults to config.scale (no downscale)
+   * @param {number|null} [opts.maxFrames] — when set, cap processing to first N frames
    */
-  constructor({ pipeline, config, fps = 30, outputScale }) {
+  constructor({ pipeline, config, fps = 30, outputScale, maxFrames = null }) {
     this.#pipeline = pipeline;
     this.#config = config;
     this.#fps = fps;
     this.#outputScale = outputScale ?? config.scale;
+    this.#maxFrames = Number.isFinite(maxFrames) && maxFrames > 0 ? Math.floor(maxFrames) : null;
   }
 
   /**
@@ -111,7 +114,8 @@ export class VideoUpscalerEngine {
     const needsDownscale = this.#outputScale < scale;
     const duration = video.duration;
     const fps = this.#fps;
-    const totalFrames = Math.floor(duration * fps);
+    const sourceFrames = Math.floor(duration * fps);
+    const totalFrames = this.#maxFrames ? Math.min(sourceFrames, this.#maxFrames) : sourceFrames;
 
     if (totalFrames === 0) throw new Error('Video has no frames (duration may be zero).');
 

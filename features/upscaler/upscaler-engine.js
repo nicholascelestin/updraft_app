@@ -74,6 +74,47 @@ export function denoiseImageData(imageData, strength) {
 }
 
 /**
+ * 3x3 sharpen filter on ImageData in-place.
+ *
+ * Uses a basic edge-emphasis kernel and blends the result back into
+ * the original image by `amount` so the UI slider behaves smoothly.
+ *
+ * @param {ImageData} imageData - modified in-place
+ * @param {number} amount - 0..1 blend toward sharpened result
+ */
+export function sharpenImageData(imageData, amount) {
+  const strength = Math.max(0, Math.min(1, amount || 0));
+  if (strength <= 0) return;
+
+  const { data, width, height } = imageData;
+  const src = new Uint8ClampedArray(data);
+  const out = new Uint8ClampedArray(data.length);
+
+  for (let y = 0; y < height; y++) {
+    const yUp = y > 0 ? y - 1 : 0;
+    const yDn = y < height - 1 ? y + 1 : height - 1;
+    for (let x = 0; x < width; x++) {
+      const xLt = x > 0 ? x - 1 : 0;
+      const xRt = x < width - 1 ? x + 1 : width - 1;
+      const c = (y * width + x) * 4;
+      const l = (y * width + xLt) * 4;
+      const r = (y * width + xRt) * 4;
+      const u = (yUp * width + x) * 4;
+      const d = (yDn * width + x) * 4;
+
+      for (let ch = 0; ch < 3; ch++) {
+        const base = src[c + ch];
+        const sharpened = clampByte(5 * base - src[l + ch] - src[r + ch] - src[u + ch] - src[d + ch]);
+        out[c + ch] = clampByte(base + (sharpened - base) * strength);
+      }
+      out[c + 3] = src[c + 3];
+    }
+  }
+
+  data.set(out);
+}
+
+/**
  * Extract a tile from ImageData as Float32 in CHW layout
  * (channels-first: [R plane, G plane, B plane]).
  *

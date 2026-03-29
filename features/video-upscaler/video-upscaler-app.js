@@ -31,6 +31,7 @@ class VideoUpscalerApp extends HTMLElement {
     const backendEl  = this.#q('.backend-select');
     const fpsEl      = this.#q('.fps-select');
     const outputEl   = this.#q('.output-select');
+    const maxFramesEl = this.#q('.max-frames-input');
     const upscaleBtn = this.#q('.upscale-btn');
     const stopBtn    = this.#q('.stop-btn');
     const startOverBtn = this.#q('.startover-btn');
@@ -42,6 +43,7 @@ class VideoUpscalerApp extends HTMLElement {
     backendEl.addEventListener('change', () => localStorage.setItem('video_upscaler_backend', backendEl.value));
     fpsEl.addEventListener('change', () => localStorage.setItem('video_upscaler_fps', fpsEl.value));
     outputEl.addEventListener('change', () => localStorage.setItem('video_upscaler_output', outputEl.value));
+    maxFramesEl.addEventListener('change', () => localStorage.setItem('video_upscaler_max_frames', maxFramesEl.value));
 
 
     statusBar.message = 'Load a video to begin.';
@@ -105,12 +107,15 @@ class VideoUpscalerApp extends HTMLElement {
       const backend = selectedModel.dataset.backend || backendEl.value;
       const fps = parseInt(fpsEl.value, 10);
       const outputScale = parseInt(outputEl.value, 10);
+      const parsedMaxFrames = parseInt(maxFramesEl.value, 10);
+      const maxFrames = Number.isFinite(parsedMaxFrames) && parsedMaxFrames > 0 ? parsedMaxFrames : null;
 
       const engine = new VideoUpscalerEngine({
         pipeline: this.#pipeline,
         config: { modelUrl, scale, modelValueRange, tileSize, backend },
         fps,
         outputScale,
+        maxFrames,
       });
 
       const { width, height } = this.#videoInfo;
@@ -188,6 +193,7 @@ class VideoUpscalerApp extends HTMLElement {
       ['.backend-select', 'video_upscaler_backend'],
       ['.fps-select', 'video_upscaler_fps'],
       ['.output-select', 'video_upscaler_output'],
+      ['.max-frames-input', 'video_upscaler_max_frames'],
     ];
     for (const [sel, key] of controls) {
       const saved = localStorage.getItem(key);
@@ -206,7 +212,8 @@ class VideoUpscalerApp extends HTMLElement {
           display: inline-flex; align-items: center; gap: 0.35rem;
           font-size: 0.85rem; margin-bottom: 0; white-space: nowrap;
         }
-        video-upscaler-app .controls select {
+        video-upscaler-app .controls select,
+        video-upscaler-app .controls input {
           margin-bottom: 0; padding: 0.3rem 0.5rem;
           font-size: 0.85rem; width: auto;
         }
@@ -273,6 +280,10 @@ class VideoUpscalerApp extends HTMLElement {
             <option value="30" selected>30</option>
             <option value="60">60</option>
           </select>
+        </label>
+        <label title="Limit processed frames (0 = full video)">
+          Max frames:
+          <input class="max-frames-input" type="number" min="0" step="1" value="0" style="width:9ch">
         </label>
         <label>Final Output:
           <select class="output-select">

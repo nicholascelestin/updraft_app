@@ -3,7 +3,7 @@
  * Only the Pipeline class is exported; everything else is module-private.
  */
 
-import { UpscalerEngine, denoiseImageData } from './upscaler-engine.js';
+import { UpscalerEngine, denoiseImageData, sharpenImageData } from './upscaler-engine.js';
 import { FaceDetectorEngine } from './face-detector-engine.js';
 import {
   expandRect,
@@ -189,11 +189,43 @@ const enhanceFacesStep = {
   },
 };
 
+const sharpenStep = {
+  name: 'sharpen',
+  shouldRun: (ctx) => (ctx.config.sharpness ?? 0) > 0,
+  async run(ctx) {
+    let canvas = ctx.image;
+    let c = canvas.getContext?.('2d');
+    if (!c) {
+      const copy = document.createElement('canvas');
+      copy.width = canvas.width;
+      copy.height = canvas.height;
+      copy.getContext('2d').drawImage(canvas, 0, 0);
+      canvas = copy;
+      c = canvas.getContext('2d');
+    }
+    const imageData = c.getImageData(0, 0, canvas.width, canvas.height);
+    sharpenImageData(imageData, ctx.config.sharpness);
+    c.putImageData(imageData, 0, 0);
+    return { ...ctx, image: canvas };
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Step runner
 // ---------------------------------------------------------------------------
 
-const STEPS = [denoiseStep, tiledUpscaleStep, detectFacesStep, enhanceFacesStep];
+const STEPS = [denoiseStep, tiledUpscaleStep, detectFacesStep, enhanceFacesStep, sharpenStep];
+
+function getImageSize(image) {
+  if (!image) return null;
+  const width = image.naturalWidth ?? image.videoWidth ?? image.width ?? 0;
+  const height = image.naturalHeight ?? image.videoHeight ?? image.height ?? 0;
+  return width > 0 && height > 0 ? `${width}x${height}` : null;
+}
+
+function logStep(event, stepName, details = {}) {
+  console.debug(`[UpscalePipeline] ${event} ${stepName}`, details);
+}
 
 async function runSteps(steps, pool, input, config, cb = {}) {
   let ctx = {
@@ -206,11 +238,36 @@ async function runSteps(steps, pool, input, config, cb = {}) {
     config,
     pool,
   };
+  const tPipeline = performance.now();
+  logStep('start', 'pipeline', {
+    steps: steps.length,
+    input: getImageSize(input),
+    backend: config.backend,
+    tileSize: config.tileSize,
+  });
   for (const step of steps) {
     if (cb.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
-    if (step.shouldRun && !step.shouldRun(ctx)) continue;
-    ctx = await step.run(ctx, cb);
+    if (step.shouldRun && !step.shouldRun(ctx)) {
+      logStep('skip', step.name);
+      continue;
+    }
+    const tStep = performance.now();
+    logStep('start', step.name);
+    try {
+      ctx = await step.run(ctx, cb);
+      logStep('done', step.name, {
+        durationMs: Number((performance.now() - tStep).toFixed(1)),
+        output: getImageSize(ctx.image),
+      });
+    } catch (error) {
+      console.warn(`[UpscalePipeline] failed ${step.name}`, error);
+      throw error;
+    }
   }
+  logStep('done', 'pipeline', {
+    durationMs: Number((performance.now() - tPipeline).toFixed(1)),
+    output: getImageSize(ctx.image),
+  });
   return ctx;
 }
 

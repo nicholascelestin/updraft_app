@@ -96,6 +96,7 @@ class UpscalerApp extends HTMLElement {
     persist('.backend-select', 'upscaler_backend');
     persist('.output-select', 'upscaler_output');
     persist('.denoise-range', 'upscaler_denoise', 'input');
+    persist('.sharpness-range', 'upscaler_sharpness', 'input');
     persistChecked('.detector-face-enabled', 'upscaler_detector_face_enabled');
     persist('.detector-face-padding', 'upscaler_detector_face_padding_px', 'input');
     persist('.detector-face-score', 'upscaler_detector_face_score', 'input');
@@ -150,6 +151,7 @@ class UpscalerApp extends HTMLElement {
     const startOverBtn  = this.#q('.startover-btn');
     const modelEl       = this.#q('.model-select');
     const denoiseEl     = this.#q('.denoise-range');
+    const sharpnessEl   = this.#q('.sharpness-range');
 
     statusBar.message = 'Load an image to begin.';
 
@@ -209,6 +211,9 @@ class UpscalerApp extends HTMLElement {
 
     denoiseEl.addEventListener('input', () => {
       this.#q('.denoise-val').textContent = denoiseEl.value;
+    });
+    sharpnessEl.addEventListener('input', () => {
+      this.#q('.sharpness-val').textContent = sharpnessEl.value;
     });
     this.#q('.detector-face-score').addEventListener('input', (e) => {
       this.#q('.detector-face-score-val').textContent = e.target.value;
@@ -305,10 +310,11 @@ class UpscalerApp extends HTMLElement {
     const modelValueRange = parseInt(opt.dataset.range, 10) || 1;
     const backend = opt.dataset.backend || this.#q('.backend-select').value;
     const denoise = parseFloat(this.#q('.denoise-range').value) || 0;
+    const sharpness = parseFloat(this.#q('.sharpness-range').value) || 0;
     const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const profile = this.#q('perf-monitor').visible;
 
-    const config = { modelUrl, scale, modelValueRange, backend, tileSize, denoise, profile };
+    const config = { modelUrl, scale, modelValueRange, backend, tileSize, denoise, sharpness, profile };
 
     if (this.#q('.detector-face-enabled').checked) {
       const fopt = this.#q('.detector-face-model').selectedOptions[0];
@@ -412,6 +418,7 @@ class UpscalerApp extends HTMLElement {
       ['.backend-select', 'upscaler_backend'],
       ['.output-select', 'upscaler_output'],
       ['.denoise-range', 'upscaler_denoise'],
+      ['.sharpness-range', 'upscaler_sharpness'],
       ['.detector-face-padding', 'upscaler_detector_face_padding_px'],
       ['.detector-face-score', 'upscaler_detector_face_score'],
       ['.detector-face-blend', 'upscaler_detector_face_blend'],
@@ -433,6 +440,7 @@ class UpscalerApp extends HTMLElement {
     this.#q('.mode-select').dispatchEvent(new Event('change'));
     this.#q('.model-select').dispatchEvent(new Event('change'));
     this.#q('.denoise-range').dispatchEvent(new Event('input'));
+    this.#q('.sharpness-range').dispatchEvent(new Event('input'));
     this.#q('.detector-face-score').dispatchEvent(new Event('input'));
     this.#q('.detector-face-blend').dispatchEvent(new Event('input'));
   }
@@ -552,6 +560,12 @@ class UpscalerApp extends HTMLElement {
             <span style="display:inline-flex;align-items:center;gap:0.3rem">
               <input class="denoise-range" type="range" min="0" max="1" step="0.05" value="0" style="width:7rem;vertical-align:middle">
               <span class="denoise-val" style="min-width:2.2ch;font-variant-numeric:tabular-nums">0</span>
+            </span>
+          </label>
+          <label title="Final 3\u00d73 sharpen pass after upscaling (can introduce halos at high values)">Sharpness:
+            <span style="display:inline-flex;align-items:center;gap:0.3rem">
+              <input class="sharpness-range" type="range" min="0" max="0.6" step="0.05" value="0" style="width:7rem;vertical-align:middle">
+              <span class="sharpness-val" style="min-width:3.5ch;font-variant-numeric:tabular-nums">0</span>
             </span>
           </label>
         </span>
