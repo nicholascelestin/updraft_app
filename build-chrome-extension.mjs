@@ -19,11 +19,13 @@ const copyPairs = [
   ['features/upscaler/gpu-tile-renderer.js', 'chrome-extension/src/gpu-tile-renderer.js'],
   ['features/upscaler/gpu-frame-extractor.js', 'chrome-extension/src/gpu-frame-extractor.js'],
   ['features/upscaler/tiling.js', 'chrome-extension/src/tiling.js'],
+  ['features/upscaler/model-registry.js', 'chrome-extension/src/model-registry.js'],
   ['lib/fetch-progress.js', 'chrome-extension/src/fetch-progress.js'],
 
-  // Models exposed via context-menu model submenu.
+  // Models — should match UPSCALER_MODELS in features/upscaler/model-registry.js.
   ['models/RMBN_M4C8_x4.onnx', 'chrome-extension/models/RMBN_M4C8_x4.onnx'],
   ['models/RMBN_M4C8_FACES_x4.onnx', 'chrome-extension/models/RMBN_M4C8_FACES_x4.onnx'],
+  ['models/RMBN_M8C16_OTF_x4_FACES.onnx', 'chrome-extension/models/RMBN_M8C16_OTF_x4_FACES.onnx'],
   ['models/4x-UltraMix_Balanced.onnx', 'chrome-extension/models/4x-UltraMix_Balanced.onnx'],
   ['models/4x-UltraSharpV2_Lite.onnx', 'chrome-extension/models/4x-UltraSharpV2_Lite.onnx'],
   ['models/4x-ClearRealityV1.onnx', 'chrome-extension/models/4x-ClearRealityV1.onnx'],

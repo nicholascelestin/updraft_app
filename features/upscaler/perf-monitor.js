@@ -168,7 +168,6 @@ class PerfMonitor extends HTMLElement {
         <div class="perf-row"><span class="perf-label">Tiles</span><span class="perf-value">${p.tiles} @ ${tileSizeLabel}</span></div>
         <div class="perf-row"><span class="perf-label">Total</span><span class="perf-value em">${fmtMs(p.total)}</span></div>
         <div class="perf-row sub"><span class="perf-label">Setup</span><span class="perf-value">${fmtMs(p.setup)}</span></div>
-        ${p.denoise > 0 ? `<div class="perf-row sub"><span class="perf-label">Denoise</span><span class="perf-value">${fmtMs(p.denoise)}</span></div>` : ''}
         <div class="perf-row sub"><span class="perf-label">Extract</span><span class="perf-value">${fmtMs(p.extract)}</span></div>
         <div class="perf-row sub"><span class="perf-label">Inference</span><span class="perf-value">${fmtMs(p.inference)}</span></div>
         ${p.readback > 0 ? `<div class="perf-row sub"><span class="perf-label">Readback</span><span class="perf-value">${fmtMs(p.readback)}</span></div>` : ''}

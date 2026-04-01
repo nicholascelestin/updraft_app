@@ -3,7 +3,7 @@
  * Only the Pipeline class is exported; everything else is module-private.
  */
 
-import { UpscalerEngine, denoiseImageData, sharpenImageData } from './upscaler-engine.js';
+import { UpscalerEngine } from './upscaler-engine.js';
 import { FaceDetectorEngine } from './face-detector-engine.js';
 import {
   expandRect,
@@ -36,7 +36,7 @@ class EnginePool {
       }
     }
     this.#evict(tag);
-    const engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, denoise: 0, profile });
+    const engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, profile });
     this.#slots.set(tag, { engine, modelUrl });
     return engine;
   }
@@ -64,24 +64,6 @@ class EnginePool {
 // ---------------------------------------------------------------------------
 // Steps — { name, shouldRun?(ctx), run(ctx, cb) → ctx }
 // ---------------------------------------------------------------------------
-
-const denoiseStep = {
-  name: 'denoise',
-  shouldRun: (ctx) => ctx.config.denoise > 0,
-  async run(ctx) {
-    const w = ctx.image.naturalWidth ?? ctx.image.width;
-    const h = ctx.image.naturalHeight ?? ctx.image.height;
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const c = canvas.getContext('2d');
-    c.drawImage(ctx.image, 0, 0);
-    const imageData = c.getImageData(0, 0, w, h);
-    denoiseImageData(imageData, ctx.config.denoise);
-    c.putImageData(imageData, 0, 0);
-    return { ...ctx, image: canvas };
-  },
-};
 
 const tiledUpscaleStep = {
   name: 'tiledUpscale',
@@ -189,32 +171,11 @@ const enhanceFacesStep = {
   },
 };
 
-const sharpenStep = {
-  name: 'sharpen',
-  shouldRun: (ctx) => (ctx.config.sharpness ?? 0) > 0,
-  async run(ctx) {
-    let canvas = ctx.image;
-    let c = canvas.getContext?.('2d');
-    if (!c) {
-      const copy = document.createElement('canvas');
-      copy.width = canvas.width;
-      copy.height = canvas.height;
-      copy.getContext('2d').drawImage(canvas, 0, 0);
-      canvas = copy;
-      c = canvas.getContext('2d');
-    }
-    const imageData = c.getImageData(0, 0, canvas.width, canvas.height);
-    sharpenImageData(imageData, ctx.config.sharpness);
-    c.putImageData(imageData, 0, 0);
-    return { ...ctx, image: canvas };
-  },
-};
-
 // ---------------------------------------------------------------------------
 // Step runner
 // ---------------------------------------------------------------------------
 
-const STEPS = [denoiseStep, tiledUpscaleStep, detectFacesStep, enhanceFacesStep, sharpenStep];
+const STEPS = [tiledUpscaleStep, detectFacesStep, enhanceFacesStep];
 
 function getImageSize(image) {
   if (!image) return null;

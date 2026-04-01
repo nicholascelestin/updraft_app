@@ -25,96 +25,6 @@ function yieldToEventLoop() {
 }
 
 /**
- * 3×3 bilateral denoise on ImageData in-place.
- *
- * Weights each neighbor by color similarity to the center pixel,
- * so edges are preserved while flat noisy regions get smoothed.
- * Small kernel keeps it proportionate for low-res sources.
- *
- * @param {ImageData} imageData - modified in-place
- * @param {number} strength - 0..1 blend toward filtered result
- */
-export function denoiseImageData(imageData, strength) {
-  const { data, width, height } = imageData;
-  const out = new Uint8ClampedArray(data.length);
-  const sigmaR = 15 + strength * 15;
-  const colorFalloff = -0.5 / (sigmaR * sigmaR);
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const ci = (y * width + x) * 4;
-      const cr = data[ci], cg = data[ci + 1], cb = data[ci + 2];
-      let sumR = 0, sumG = 0, sumB = 0, wSum = 0;
-
-      for (let dy = -1; dy <= 1; dy++) {
-        const ny = y + dy;
-        if (ny < 0 || ny >= height) continue;
-        for (let dx = -1; dx <= 1; dx++) {
-          const nx = x + dx;
-          if (nx < 0 || nx >= width) continue;
-          const ni = (ny * width + nx) * 4;
-          const dr = data[ni] - cr, dg = data[ni + 1] - cg, db = data[ni + 2] - cb;
-          const colorDist2 = dr * dr + dg * dg + db * db;
-          const w = Math.exp(colorDist2 * colorFalloff);
-          sumR += data[ni]     * w;
-          sumG += data[ni + 1] * w;
-          sumB += data[ni + 2] * w;
-          wSum += w;
-        }
-      }
-
-      out[ci]     = cr + ((sumR / wSum) - cr) * strength;
-      out[ci + 1] = cg + ((sumG / wSum) - cg) * strength;
-      out[ci + 2] = cb + ((sumB / wSum) - cb) * strength;
-      out[ci + 3] = data[ci + 3];
-    }
-  }
-
-  data.set(out);
-}
-
-/**
- * 3x3 sharpen filter on ImageData in-place.
- *
- * Uses a basic edge-emphasis kernel and blends the result back into
- * the original image by `amount` so the UI slider behaves smoothly.
- *
- * @param {ImageData} imageData - modified in-place
- * @param {number} amount - 0..1 blend toward sharpened result
- */
-export function sharpenImageData(imageData, amount) {
-  const strength = Math.max(0, Math.min(1, amount || 0));
-  if (strength <= 0) return;
-
-  const { data, width, height } = imageData;
-  const src = new Uint8ClampedArray(data);
-  const out = new Uint8ClampedArray(data.length);
-
-  for (let y = 0; y < height; y++) {
-    const yUp = y > 0 ? y - 1 : 0;
-    const yDn = y < height - 1 ? y + 1 : height - 1;
-    for (let x = 0; x < width; x++) {
-      const xLt = x > 0 ? x - 1 : 0;
-      const xRt = x < width - 1 ? x + 1 : width - 1;
-      const c = (y * width + x) * 4;
-      const l = (y * width + xLt) * 4;
-      const r = (y * width + xRt) * 4;
-      const u = (yUp * width + x) * 4;
-      const d = (yDn * width + x) * 4;
-
-      for (let ch = 0; ch < 3; ch++) {
-        const base = src[c + ch];
-        const sharpened = clampByte(5 * base - src[l + ch] - src[r + ch] - src[u + ch] - src[d + ch]);
-        out[c + ch] = clampByte(base + (sharpened - base) * strength);
-      }
-      out[c + 3] = src[c + 3];
-    }
-  }
-
-  data.set(out);
-}
-
-/**
  * Extract a tile from ImageData as Float32 in CHW layout
  * (channels-first: [R plane, G plane, B plane]).
  *
@@ -166,24 +76,21 @@ export class UpscalerEngine {
   #scale;
   #overlap;
   #modelValueRange;
-  #denoise;
   #profiling = false;
   #activeBackend = null;
   #device = null;
   #gpuRenderer = null;
   #gpuExtractor = null;
 
-  constructor({ modelUrl, scale = DEFAULT_SCALE, overlap = DEFAULT_OVERLAP, modelValueRange = 1, denoise = 0, profile = false }) {
+  constructor({ modelUrl, scale = DEFAULT_SCALE, overlap = DEFAULT_OVERLAP, modelValueRange = 1, profile = false }) {
     this.#modelUrl = modelUrl;
     this.#scale = scale;
     this.#overlap = overlap;
     this.#modelValueRange = modelValueRange;
-    this.#denoise = denoise;
     this.#profiling = profile;
   }
 
   get scale() { return this.#scale; }
-  get denoise() { return this.#denoise; }
   get activeBackend() { return this.#activeBackend; }
   get isLoaded() { return this.#session !== null; }
   get profiling() { return this.#profiling; }
@@ -270,7 +177,7 @@ export class UpscalerEngine {
   async upscale(img, tileSize, { onTile, signal } = {}) {
     if (!this.#session) throw new Error('Model not loaded — call loadModel() first');
 
-    const perf = { setup: 0, denoise: 0, extract: 0, inference: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, total: 0 };
+    const perf = { setup: 0, extract: 0, inference: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, total: 0 };
     const tTotal = performance.now();
 
     const scale = this.#scale;
@@ -280,7 +187,7 @@ export class UpscalerEngine {
     const outW = srcW * scale;
     const outH = srcH * scale;
     const useGpu = this.#gpuRenderer !== null;
-    const useGpuInput = this.#gpuExtractor !== null && this.#denoise === 0;
+    const useGpuInput = this.#gpuExtractor !== null;
 
     const srcData = this.#prepareSource(img, srcW, srcH, useGpuInput, perf);
 
@@ -409,11 +316,6 @@ export class UpscalerEngine {
       const tmpCtx = tmpC.getContext('2d');
       tmpCtx.drawImage(img, 0, 0);
       srcData = tmpCtx.getImageData(0, 0, srcW, srcH);
-      if (this.#denoise > 0) {
-        const tDenoise = performance.now();
-        denoiseImageData(srcData, this.#denoise);
-        perf.denoise = performance.now() - tDenoise;
-      }
       tmpC.width = 0;
       tmpC.height = 0;
     }
