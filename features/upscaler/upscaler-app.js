@@ -95,6 +95,9 @@ class UpscalerApp extends HTMLElement {
     persist('.tilesize-select', 'upscaler_tilesize');
     persist('.backend-select', 'upscaler_backend');
     persist('.output-select', 'upscaler_output');
+    persistChecked('.pass-all-enabled', 'upscaler_pass_all_enabled');
+    persist('.pass-all-blend', 'upscaler_pass_all_blend', 'input');
+    persist('.pass-all-model', 'upscaler_pass_all_model');
     persistChecked('.detector-face-enabled', 'upscaler_detector_face_enabled');
     persist('.detector-face-padding', 'upscaler_detector_face_padding_px', 'input');
     persist('.detector-face-score', 'upscaler_detector_face_score', 'input');
@@ -107,7 +110,7 @@ class UpscalerApp extends HTMLElement {
       const isRunPod = this.#q('.mode-select').value === 'runpod';
       this.#q('.local-controls').style.display = isRunPod ? 'none' : '';
       this.#q('.runpod-controls').style.display = isRunPod ? '' : 'none';
-      this.#q('.detectors-panel').style.display = isRunPod ? 'none' : '';
+      this.#q('.passes-panel').style.display = isRunPod ? 'none' : '';
       this.#q('.mode-label').textContent = isRunPod ? '(RunPod Serverless)' : '(in-browser, ONNX Runtime)';
     });
   }
@@ -205,6 +208,9 @@ class UpscalerApp extends HTMLElement {
       upscaleBtn.textContent = `Upscale ${scale}x`;
     });
 
+    this.#q('.pass-all-blend').addEventListener('input', (e) => {
+      this.#q('.pass-all-blend-val').textContent = e.target.value;
+    });
     this.#q('.detector-face-score').addEventListener('input', (e) => {
       this.#q('.detector-face-score-val').textContent = e.target.value;
     });
@@ -303,6 +309,17 @@ class UpscalerApp extends HTMLElement {
     const profile = this.#q('perf-monitor').visible;
 
     const config = { modelUrl, scale, modelValueRange, backend, tileSize, profile };
+
+    if (this.#q('.pass-all-enabled').checked) {
+      const aopt = this.#q('.pass-all-model').selectedOptions[0];
+      config.all = {
+        modelUrl: aopt?.value || modelUrl,
+        scale: parseInt(aopt?.dataset.scale, 10) || scale,
+        modelValueRange: parseInt(aopt?.dataset.range, 10) || modelValueRange,
+        backend: aopt?.dataset.backend || backend,
+        blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
+      };
+    }
 
     if (this.#q('.detector-face-enabled').checked) {
       const fopt = this.#q('.detector-face-model').selectedOptions[0];
@@ -405,6 +422,8 @@ class UpscalerApp extends HTMLElement {
       ['.tilesize-select', 'upscaler_tilesize'],
       ['.backend-select', 'upscaler_backend'],
       ['.output-select', 'upscaler_output'],
+      ['.pass-all-blend', 'upscaler_pass_all_blend'],
+      ['.pass-all-model', 'upscaler_pass_all_model'],
       ['.detector-face-padding', 'upscaler_detector_face_padding_px'],
       ['.detector-face-score', 'upscaler_detector_face_score'],
       ['.detector-face-blend', 'upscaler_detector_face_blend'],
@@ -416,6 +435,7 @@ class UpscalerApp extends HTMLElement {
     }
     this.#viewState.expanded = localStorage.getItem('upscaler_view_expanded') === '1';
     this.#viewState.upscaledOnly = localStorage.getItem('upscaler_view_upscaled_only') === '1';
+    this.#q('.pass-all-enabled').checked = localStorage.getItem('upscaler_pass_all_enabled') === '1';
     this.#q('.detector-face-enabled').checked = localStorage.getItem('upscaler_detector_face_enabled') !== '0';
 
     this.#q('upscale-preview').setExpanded(this.#viewState.expanded);
@@ -425,6 +445,7 @@ class UpscalerApp extends HTMLElement {
 
     this.#q('.mode-select').dispatchEvent(new Event('change'));
     this.#q('.model-select').dispatchEvent(new Event('change'));
+    this.#q('.pass-all-blend').dispatchEvent(new Event('input'));
     this.#q('.detector-face-score').dispatchEvent(new Event('input'));
     this.#q('.detector-face-blend').dispatchEvent(new Event('input'));
   }
@@ -460,13 +481,13 @@ class UpscalerApp extends HTMLElement {
           font-size: 0.7rem;
           color: var(--pico-muted-color);
         }
-        upscaler-app .detectors-panel {
+        upscaler-app .passes-panel {
           margin-bottom: 1rem;
           padding: 0.6rem 0.7rem;
           border: 1px solid var(--pico-muted-border-color);
           border-radius: var(--pico-border-radius);
         }
-        upscaler-app .detectors-panel > summary {
+        upscaler-app .passes-panel > summary {
           cursor: pointer;
           font-size: 0.9rem;
           user-select: none;
@@ -565,12 +586,30 @@ class UpscalerApp extends HTMLElement {
         </button>
       </div>
 
-      <details class="detectors-panel">
-        <summary><i class="fas fa-user-check"></i> Detectors</summary>
+      <details class="passes-panel">
+        <summary><i class="fas fa-user-check"></i> Passes</summary>
+        <div class="detector-row">
+          <label>
+            <input class="pass-all-enabled" type="checkbox">
+            All (full image blend)
+          </label>
+          <label title="Blend opacity of the secondary full-image pass over the base upscale">
+            Blend:
+            <span style="display:inline-flex;align-items:center;gap:0.3rem">
+              <input class="pass-all-blend" type="range" min="0" max="1" step="0.05" value="0.40" style="width:7rem;vertical-align:middle">
+              <span class="pass-all-blend-val" style="min-width:4ch;font-variant-numeric:tabular-nums">0.40</span>
+            </span>
+          </label>
+          <label>All model:
+            <select class="pass-all-model">
+              ${modelOptionsHTML()}
+            </select>
+          </label>
+        </div>
         <div class="detector-row">
           <label>
             <input class="detector-face-enabled" type="checkbox" checked>
-            Face (YuNet)
+            Faces (YuNet)
           </label>
           <label>Padding:
             <input class="detector-face-padding" type="number" min="0" max="512" step="1" value="24" style="width:7ch">

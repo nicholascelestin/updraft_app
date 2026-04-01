@@ -61,6 +61,31 @@ class EnginePool {
   }
 }
 
+function clamp(v, min, max) {
+  return v < min ? min : v > max ? max : v;
+}
+
+function ensureCanvas(imageLike) {
+  if (imageLike?.getContext?.('2d')) return imageLike;
+  const copy = document.createElement('canvas');
+  copy.width = imageLike.width;
+  copy.height = imageLike.height;
+  copy.getContext('2d').drawImage(imageLike, 0, 0);
+  return copy;
+}
+
+function blendCanvas(destCanvas, srcCanvas, opacity) {
+  const alpha = clamp(opacity, 0, 1);
+  if (alpha <= 0) return destCanvas;
+  const ctx = destCanvas.getContext('2d');
+  if (!ctx) return destCanvas;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(srcCanvas, 0, 0, destCanvas.width, destCanvas.height);
+  ctx.restore();
+  return destCanvas;
+}
+
 // ---------------------------------------------------------------------------
 // Steps — { name, shouldRun?(ctx), run(ctx, cb) → ctx }
 // ---------------------------------------------------------------------------
@@ -76,6 +101,34 @@ const tiledUpscaleStep = {
       signal: cb.signal,
     });
     return { ...ctx, image: canvas, scale: engine.scale, perf, ortProfile };
+  },
+};
+
+const blendAllStep = {
+  name: 'blendAll',
+  shouldRun: (ctx) => !!ctx.config.all,
+  async run(ctx, cb) {
+    const { all, backend, tileSize } = ctx.config;
+    const passBackend = all.backend || backend;
+    const engine = ctx.pool.getUpscaler('all-upscaler', {
+      modelUrl: all.modelUrl,
+      scale: all.scale,
+      modelValueRange: all.modelValueRange,
+      backend: passBackend,
+    });
+    await engine.loadModel(passBackend);
+
+    const { canvas: overlayRaw } = await engine.upscale(ctx.source, tileSize, { signal: cb.signal });
+    let baseCanvas = ensureCanvas(ctx.image);
+    let overlayCanvas = overlayRaw;
+    if (overlayRaw.width !== baseCanvas.width || overlayRaw.height !== baseCanvas.height) {
+      overlayCanvas = document.createElement('canvas');
+      overlayCanvas.width = baseCanvas.width;
+      overlayCanvas.height = baseCanvas.height;
+      overlayCanvas.getContext('2d').drawImage(overlayRaw, 0, 0, baseCanvas.width, baseCanvas.height);
+    }
+    baseCanvas = blendCanvas(baseCanvas, overlayCanvas, all.blendOpacity);
+    return { ...ctx, image: baseCanvas };
   },
 };
 
@@ -103,14 +156,7 @@ const enhanceFacesStep = {
     const faceBackend = face.backend || backend;
     const { source, scale } = ctx;
 
-    let canvas = ctx.image;
-    if (!canvas.getContext?.('2d')) {
-      const copy = document.createElement('canvas');
-      copy.width = canvas.width;
-      copy.height = canvas.height;
-      copy.getContext('2d').drawImage(canvas, 0, 0);
-      canvas = copy;
-    }
+    let canvas = ensureCanvas(ctx.image);
 
     const engine = ctx.pool.getUpscaler('face-upscaler', {
       modelUrl: face.modelUrl,
@@ -175,7 +221,7 @@ const enhanceFacesStep = {
 // Step runner
 // ---------------------------------------------------------------------------
 
-const STEPS = [tiledUpscaleStep, detectFacesStep, enhanceFacesStep];
+const STEPS = [tiledUpscaleStep, blendAllStep, detectFacesStep, enhanceFacesStep];
 
 function getImageSize(image) {
   if (!image) return null;
