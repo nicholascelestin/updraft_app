@@ -315,7 +315,7 @@ class UpscalerApp extends HTMLElement {
       config.all = {
         modelUrl: aopt?.value || modelUrl,
         scale: parseInt(aopt?.dataset.scale, 10) || scale,
-        modelValueRange: parseInt(aopt?.dataset.range, 10) || modelValueRange,
+        modelValueRange: parseInt(aopt?.dataset.range, 10) || 1,
         backend: aopt?.dataset.backend || backend,
         blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
       };
@@ -326,7 +326,7 @@ class UpscalerApp extends HTMLElement {
       config.face = {
         modelUrl: fopt?.value || modelUrl,
         scale: parseInt(fopt?.dataset.scale, 10) || scale,
-        modelValueRange: parseInt(fopt?.dataset.range, 10) || modelValueRange,
+        modelValueRange: parseInt(fopt?.dataset.range, 10) || 1,
         backend: fopt?.dataset.backend || backend,
         paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
         featherPx: 16,
@@ -343,6 +343,12 @@ class UpscalerApp extends HTMLElement {
   async #runLocalUpscale(inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor) {
     const config = this.#extractConfig();
     if (perfMonitor.visible) perfMonitor.start(config.backend);
+    const stepLabel = {
+      tiledUpscale: 'Base pass',
+      blendAll: 'All-pass blend',
+      detectFaces: 'Face detection',
+      enhanceFaces: 'Face enhance',
+    };
 
     const outW = inputImage.width * config.scale;
     const outH = inputImage.height * config.scale;
@@ -356,11 +362,29 @@ class UpscalerApp extends HTMLElement {
         statusBar.showProgress(frac);
         statusBar.message = msg;
       },
+      onStage(stage) {
+        const label = stepLabel[stage.step] || stage.step;
+        const prefix = label ? `${label}: ` : '';
+        if (typeof stage.progress === 'number') statusBar.showProgress(stage.progress);
+        if (stage.message) statusBar.message = prefix + stage.message;
+        else if (stage.phase === 'start') statusBar.message = `${label}…`;
+        if (perfMonitor.visible) perfMonitor.updateStage(stage);
+      },
       onTile(info) {
-        preview.drawTile(info);
+        if (info.step === 'tiledUpscale' || info.step === 'blendAll') preview.drawTile(info);
         statusBar.showProgress((info.index + 1) / info.total);
-        statusBar.message = `Tile ${info.index + 1} / ${info.total}`;
+        const label = stepLabel[info.step] || info.step || 'Pass';
+        if (info.step === 'enhanceFaces') {
+          const faceN = Number.isFinite(info.faceIndex) ? info.faceIndex + 1 : null;
+          const faceTotal = Number.isFinite(info.faceTotal) ? info.faceTotal : null;
+          const facePrefix = faceN && faceTotal ? `face ${faceN}/${faceTotal}, ` : '';
+          const faceTileTotal = Number.isFinite(info.faceTileTotal) ? info.faceTileTotal : info.total;
+          statusBar.message = `${label}: ${facePrefix}tile ${info.index + 1} / ${faceTileTotal}`;
+        } else {
+          statusBar.message = `${label}: tile ${info.index + 1} / ${info.total}`;
+        }
         if (perfMonitor.visible) perfMonitor.update({
+          step: info.step,
           index: info.index, total: info.total,
           tileMs: info.tileMs, tilePixels: info.tilePixels, perf: info.perf,
         });
@@ -368,7 +392,9 @@ class UpscalerApp extends HTMLElement {
       signal,
     });
 
-    if (result.perf) perfMonitor.showResults(result.perf, result.ortProfile);
+    if (result.perf || result.pipelinePerf) {
+      perfMonitor.showResults(result.perf, result.ortProfile, result.pipelinePerf);
+    }
 
     const outputScale = Math.max(1, Math.min(requestedOutputScale, result.scale));
     const urls = await this.#createComparisonURLs(result.image, inputImage, outputScale);

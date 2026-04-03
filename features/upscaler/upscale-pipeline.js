@@ -11,6 +11,7 @@ import {
   compositeFeathered,
   computeFaceFeatherPx,
 } from './face-enhance.js';
+import { buildTileGrid } from './tiling.js';
 
 // ---------------------------------------------------------------------------
 // Engine pool — caches engines by tag, recreates when config diverges.
@@ -95,12 +96,24 @@ const tiledUpscaleStep = {
   async run(ctx, cb) {
     const { modelUrl, scale, modelValueRange, backend, tileSize, profile } = ctx.config;
     const engine = ctx.pool.getUpscaler('base', { modelUrl, scale, modelValueRange, backend, profile });
-    await engine.loadModel(backend, cb.onProgress);
+    emitStage(cb, 'tiledUpscale', 'loading', { message: 'Loading base model…' });
+    await engine.loadModel(backend, (frac, msg) => {
+      cb.onProgress?.(frac, msg);
+      emitStage(cb, 'tiledUpscale', 'loading', { progress: frac, message: msg });
+    });
+    emitStage(cb, 'tiledUpscale', 'running', { message: 'Running base upscale pass…' });
     const { canvas, perf, ortProfile } = await engine.upscale(ctx.image, tileSize, {
-      onTile: cb.onTile,
+      onTile: (info) => cb.onTile?.({ ...info, step: 'tiledUpscale' }),
       signal: cb.signal,
     });
-    return { ...ctx, image: canvas, scale: engine.scale, perf, ortProfile };
+    return {
+      ...ctx,
+      image: canvas,
+      scale: engine.scale,
+      perf,
+      ortProfile,
+      stepPerf: { ...(ctx.stepPerf || {}), tiledUpscale: perf },
+    };
   },
 };
 
@@ -116,9 +129,16 @@ const blendAllStep = {
       modelValueRange: all.modelValueRange,
       backend: passBackend,
     });
-    await engine.loadModel(passBackend);
+    emitStage(cb, 'blendAll', 'loading', { message: 'Loading all-pass model…' });
+    await engine.loadModel(passBackend, (progress, message) => {
+      emitStage(cb, 'blendAll', 'loading', { progress, message });
+    });
+    emitStage(cb, 'blendAll', 'running', { message: 'Running all-pass tiled blend…' });
 
-    const { canvas: overlayRaw } = await engine.upscale(ctx.source, tileSize, { signal: cb.signal });
+    const { canvas: overlayRaw, perf } = await engine.upscale(ctx.source, tileSize, {
+      onTile: (info) => cb.onTile?.({ ...info, step: 'blendAll' }),
+      signal: cb.signal,
+    });
     let baseCanvas = ensureCanvas(ctx.image);
     let overlayCanvas = overlayRaw;
     if (overlayRaw.width !== baseCanvas.width || overlayRaw.height !== baseCanvas.height) {
@@ -128,7 +148,7 @@ const blendAllStep = {
       overlayCanvas.getContext('2d').drawImage(overlayRaw, 0, 0, baseCanvas.width, baseCanvas.height);
     }
     baseCanvas = blendCanvas(baseCanvas, overlayCanvas, all.blendOpacity);
-    return { ...ctx, image: baseCanvas };
+    return { ...ctx, image: baseCanvas, stepPerf: { ...(ctx.stepPerf || {}), blendAll: perf } };
   },
 };
 
@@ -138,13 +158,27 @@ const detectFacesStep = {
   async run(ctx, cb) {
     const { backend, face } = ctx.config;
     const detector = ctx.pool.getDetector('face-detector', backend);
-    await detector.loadModel('face-yunet', backend);
+    emitStage(cb, 'detectFaces', 'loading', { message: 'Loading face detector…' });
+    await detector.loadModel('face-yunet', backend, (progress, message) => {
+      emitStage(cb, 'detectFaces', 'loading', { progress, message });
+    });
+    emitStage(cb, 'detectFaces', 'running', { message: 'Detecting faces…' });
+    const tDetect = performance.now();
     const faces = await detector.detectFaces(ctx.source, {
       detectorKey: 'face-yunet',
       scoreThreshold: face.scoreThreshold,
       signal: cb.signal,
     });
-    return { ...ctx, detections: { ...ctx.detections, face: faces } };
+    const detectPerf = {
+      total: performance.now() - tDetect,
+      detections: faces.length,
+    };
+    emitStage(cb, 'detectFaces', 'running', { message: `Detected ${faces.length} face(s).` });
+    return {
+      ...ctx,
+      detections: { ...ctx.detections, face: faces },
+      stepPerf: { ...(ctx.stepPerf || {}), detectFaces: detectPerf },
+    };
   },
 };
 
@@ -164,13 +198,26 @@ const enhanceFacesStep = {
       modelValueRange: face.modelValueRange,
       backend: faceBackend,
     });
-    await engine.loadModel(faceBackend);
+    emitStage(cb, 'enhanceFaces', 'loading', { message: 'Loading face enhancer model…' });
+    await engine.loadModel(faceBackend, (progress, message) => {
+      emitStage(cb, 'enhanceFaces', 'loading', { progress, message });
+    });
+    emitStage(cb, 'enhanceFaces', 'running', { message: 'Enhancing detected faces…' });
 
     const srcW = source.naturalWidth ?? source.width;
     const srcH = source.naturalHeight ?? source.height;
+    const faces = ctx.detections.face || [];
+    const configuredFaceTileSize = Number.isFinite(face.tileSize) ? face.tileSize : ctx.config.tileSize;
+    const agg = {
+      setup: 0, extract: 0, inference: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, total: 0, tiles: 0,
+    };
 
-    for (const det of ctx.detections.face) {
+    for (let faceIndex = 0; faceIndex < faces.length; faceIndex++) {
+      const det = faces[faceIndex];
       if (cb.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+      emitStage(cb, 'enhanceFaces', 'running', {
+        message: `Enhancing face ${faceIndex + 1}/${faces.length}…`,
+      });
 
       const roi = expandRect(det, face.paddingPx, srcW, srcH);
       if (roi.w < 1 || roi.h < 1) continue;
@@ -178,8 +225,32 @@ const enhanceFacesStep = {
       const crop = cropToCanvas(source, roi);
       if (!crop) continue;
 
-      const tileSize = Math.min(192, Math.max(64, Math.min(roi.w, roi.h)));
-      const { canvas: patchRaw } = await engine.upscale(crop, tileSize, { signal: cb.signal });
+      const maxTileForRoi = Math.max(1, Math.min(roi.w, roi.h));
+      const requestedTileSize = Number.isFinite(configuredFaceTileSize) ? configuredFaceTileSize : 192;
+      // Honor selected tile size for face patches so large faces are not over-tiled.
+      const tileSize = requestedTileSize <= 0
+        ? 0
+        : Math.min(maxTileForRoi, Math.max(64, requestedTileSize));
+      const faceTileTotal = buildTileGrid(roi.w, roi.h, tileSize, 16).length;
+      const { canvas: patchRaw, perf } = await engine.upscale(crop, tileSize, {
+        onTile: (info) => cb.onTile?.({
+          ...info,
+          step: 'enhanceFaces',
+          faceIndex,
+          faceTotal: faces.length,
+          faceTileTotal,
+        }),
+        signal: cb.signal,
+      });
+      agg.setup += perf.setup;
+      agg.extract += perf.extract;
+      agg.inference += perf.inference;
+      agg.readback += perf.readback;
+      agg.gpuRender += perf.gpuRender;
+      agg.writeTile += perf.writeTile;
+      agg.dispose += perf.dispose;
+      agg.total += perf.total;
+      agg.tiles += perf.tiles;
 
       const tw = roi.w * scale;
       const th = roi.h * scale;
@@ -213,7 +284,7 @@ const enhanceFacesStep = {
       patchRaw.width = patchRaw.height = 0;
     }
 
-    return { ...ctx, image: canvas };
+    return { ...ctx, image: canvas, stepPerf: { ...(ctx.stepPerf || {}), enhanceFaces: agg } };
   },
 };
 
@@ -234,6 +305,10 @@ function logStep(event, stepName, details = {}) {
   console.debug(`[UpscalePipeline] ${event} ${stepName}`, details);
 }
 
+function emitStage(cb, step, phase, details = {}) {
+  cb.onStage?.({ step, phase, ...details });
+}
+
 async function runSteps(steps, pool, input, config, cb = {}) {
   let ctx = {
     image: input,
@@ -246,6 +321,7 @@ async function runSteps(steps, pool, input, config, cb = {}) {
     pool,
   };
   const tPipeline = performance.now();
+  const stepPerf = {};
   logStep('start', 'pipeline', {
     steps: steps.length,
     input: getImageSize(input),
@@ -256,26 +332,37 @@ async function runSteps(steps, pool, input, config, cb = {}) {
     if (cb.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
     if (step.shouldRun && !step.shouldRun(ctx)) {
       logStep('skip', step.name);
+      emitStage(cb, step.name, 'skip');
       continue;
     }
     const tStep = performance.now();
+    emitStage(cb, step.name, 'start');
     logStep('start', step.name);
     try {
       ctx = await step.run(ctx, cb);
+      const durationMs = Number((performance.now() - tStep).toFixed(1));
+      stepPerf[step.name] = {
+        durationMs,
+        ...(ctx.stepPerf?.[step.name] ? { perf: ctx.stepPerf[step.name] } : {}),
+      };
+      emitStage(cb, step.name, 'done', { durationMs });
       logStep('done', step.name, {
-        durationMs: Number((performance.now() - tStep).toFixed(1)),
+        durationMs,
         output: getImageSize(ctx.image),
       });
     } catch (error) {
+      emitStage(cb, step.name, 'error', { message: error?.message || String(error) });
       console.warn(`[UpscalePipeline] failed ${step.name}`, error);
       throw error;
     }
   }
+  const totalMs = Number((performance.now() - tPipeline).toFixed(1));
+  emitStage(cb, 'pipeline', 'done', { durationMs: totalMs });
   logStep('done', 'pipeline', {
-    durationMs: Number((performance.now() - tPipeline).toFixed(1)),
+    durationMs: totalMs,
     output: getImageSize(ctx.image),
   });
-  return ctx;
+  return { ...ctx, pipelinePerf: { totalMs, steps: stepPerf } };
 }
 
 // ---------------------------------------------------------------------------

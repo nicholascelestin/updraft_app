@@ -22,17 +22,29 @@ function fmtMB(bytes) {
   return (bytes / 1048576).toFixed(1) + ' MB';
 }
 
+function humanStepName(step) {
+  const names = {
+    tiledUpscale: 'Base pass',
+    blendAll: 'All-pass blend',
+    detectFaces: 'Face detection',
+    enhanceFaces: 'Face enhance',
+    pipeline: 'Pipeline',
+  };
+  return names[step] || step || '—';
+}
+
 class PerfMonitor extends HTMLElement {
   #tileTimes = [];
   #startTime = 0;
   #heapInterval = null;
   #state = 'idle';
   #tilePerf = null;
+  #currentStep = null;
 
   #stats = {
     backend: '\u2014', tile: '\u2014', tileTime: '\u2014', avgTile: '\u2014',
     elapsed: '\u2014', eta: '\u2014', heap: '\u2014', heapLimit: '\u2014',
-    heapPct: 0, heapClass: '', throughput: '\u2014',
+    heapPct: 0, heapClass: '', throughput: '\u2014', stage: '\u2014',
   };
 
   #results = null;
@@ -58,12 +70,14 @@ class PerfMonitor extends HTMLElement {
     this.#startTime = performance.now();
     this.#state = 'running';
     this.#tilePerf = null;
+    this.#currentStep = null;
     this.#results = null;
 
     const s = this.#stats;
     s.backend = backend.toUpperCase();
     s.tile = '\u2014'; s.tileTime = '\u2014'; s.avgTile = '\u2014';
     s.elapsed = '0 s'; s.eta = '\u2014'; s.throughput = '\u2014';
+    s.stage = '\u2014';
 
     this.#refreshHeap();
     this.style.display = 'block';
@@ -71,7 +85,11 @@ class PerfMonitor extends HTMLElement {
     this.#heapInterval = setInterval(() => { this.#refreshHeap(); this.#render(); }, 500);
   }
 
-  update({ index, total, tileMs, tilePixels, perf: tilePerf }) {
+  update({ step, index, total, tileMs, tilePixels, perf: tilePerf }) {
+    if (step && step !== this.#currentStep) {
+      this.#currentStep = step;
+      this.#tileTimes = [];
+    }
     this.#tileTimes.push(tileMs);
     this.#tilePerf = tilePerf || null;
     const elapsed = performance.now() - this.#startTime;
@@ -81,6 +99,7 @@ class PerfMonitor extends HTMLElement {
     const mpxPerSec = (totalPixels / (elapsed / 1000)) / 1e6;
 
     const s = this.#stats;
+    s.stage = humanStepName(step);
     s.tile = `${index + 1} / ${total}`;
     s.tileTime = fmtTime(tileMs);
     s.avgTile = fmtTime(avg);
@@ -92,9 +111,17 @@ class PerfMonitor extends HTMLElement {
     this.#render();
   }
 
-  showResults(perf, ortProfile) {
+  updateStage({ step, phase, message }) {
+    if (this.#state !== 'running') return;
+    const label = humanStepName(step);
+    this.#stats.stage = phase === 'done' && label ? `${label} done` : label;
+    if (message) this.#stats.tile = message;
+    this.#render();
+  }
+
+  showResults(perf, ortProfile, pipelinePerf) {
     this.#state = 'done';
-    this.#results = { perf, ortProfile };
+    this.#results = { perf, ortProfile, pipelinePerf };
     if (this.#heapInterval) {
       clearInterval(this.#heapInterval);
       this.#heapInterval = null;
@@ -196,6 +223,19 @@ class PerfMonitor extends HTMLElement {
         ${ort.memcpy.toHost.n ? `<div class="perf-row"><span class="perf-label">GPU\u2192CPU</span><span class="perf-value">${ms(ort.memcpy.toHost.us)} \u00d7${ort.memcpy.toHost.n}</span></div>` : ''}
         ${ort.memcpy.fromHost.n ? `<div class="perf-row"><span class="perf-label">CPU\u2192GPU</span><span class="perf-value">${ms(ort.memcpy.fromHost.us)} \u00d7${ort.memcpy.fromHost.n}</span></div>` : ''}`;
       }
+      if (r.pipelinePerf?.steps) {
+        const rows = Object.entries(r.pipelinePerf.steps)
+          .map(([name, data]) => {
+            const tiles = data.perf?.tiles ? ` (${data.perf.tiles} tiles)` : '';
+            return `<div class="perf-row sub"><span class="perf-label">${humanStepName(name)}</span><span class="perf-value dim">${fmtMs(data.durationMs)}${tiles}</span></div>`;
+          })
+          .join('');
+        resultsHtml += `
+        <div class="perf-divider"></div>
+        <div class="perf-section-title">Pipeline Steps</div>
+        ${rows}
+        <div class="perf-row"><span class="perf-label">Pipeline total</span><span class="perf-value">${fmtMs(r.pipelinePerf.totalMs || 0)}</span></div>`;
+      }
     }
 
     morph(this, `
@@ -242,6 +282,7 @@ class PerfMonitor extends HTMLElement {
         <button class="perf-close" title="Close">\u00d7</button>
       </div>
       <div class="perf-row"><span class="perf-label">Backend</span><span class="perf-value">${s.backend}</span></div>
+      <div class="perf-row"><span class="perf-label">Stage</span><span class="perf-value">${s.stage}</span></div>
       <div class="perf-row"><span class="perf-label">Tile</span><span class="perf-value">${s.tile}</span></div>
       <div class="perf-row"><span class="perf-label">Tile time</span><span class="perf-value">${s.tileTime}</span></div>
       ${tileBreakdownHtml}

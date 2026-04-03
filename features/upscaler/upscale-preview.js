@@ -79,9 +79,15 @@ class UpscalePreview extends HTMLElement {
     const next = !!expanded;
     if (this.#expanded === next) return;
     this.#expanded = next;
-    this.#render();
+    this.#syncExpandButtonLabel();
     if (this.style.display !== 'none') this.#applySize();
     this.#emitViewState();
+  }
+
+  #syncExpandButtonLabel() {
+    const btn = this.querySelector('.preview-expand-btn');
+    if (!btn) return;
+    btn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
   }
 
   #applySize() {
