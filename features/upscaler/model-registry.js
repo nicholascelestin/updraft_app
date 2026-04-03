@@ -4,11 +4,10 @@
  */
 
 export const UPSCALER_MODELS = [
-  { url: 'models/RMBN_M16C32_OTF_x4_V3.onnx', scale: 4, range: 255, label: '4x Lightweight M16C32 V1(RMBN)' },
-  { url: 'models/RMBN_M16C32_OTF_x4_V4.onnx', scale: 4, range: 255, label: '4x Lightweight M16C32 V2(RMBN)' },
-  { url: 'models/4x-ClearRealityV1.onnx', scale: 4, backend: 'wasm', label: '4x ClearReality V1 (SPAN)' },
-  { url: 'models/4x-UltraSharpV2_Lite.onnx', scale: 4, label: '4x UltraSharp V2 Lite (RealPLKSR)' },
-  { url: 'models/4x-UltraSharpV2.onnx', scale: 4, backend: 'wasm', label: '4x UltraSharp V2 (DAT)' },
+  { url: 'models/RMBN_M16C32_OTF_x4_V4.onnx', scale: 4, range: 255, label: 'Lightweight M16C32(RMBN)' },
+  { url: 'models/4x-ClearRealityV1.onnx', scale: 4, backend: 'wasm', label: 'ClearReality(SPAN)' },
+  { url: 'models/4x-UltraSharpV2_Lite.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)' },
+  { url: 'models/4x-UltraSharpV2.onnx', scale: 4, backend: 'wasm', label: 'UltraSharp V2 (DAT)' },
 ];
 
 /**
