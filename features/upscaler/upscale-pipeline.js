@@ -262,7 +262,9 @@ const enhanceFacesStep = {
       pctx.imageSmoothingQuality = 'high';
       pctx.drawImage(patchRaw, 0, 0, tw, th);
 
-      compositeFeathered(canvas, patch, roi.x * scale, roi.y * scale, {
+      const roiOutX = roi.x * scale;
+      const roiOutY = roi.y * scale;
+      compositeFeathered(canvas, patch, roiOutX, roiOutY, {
         featherPx: computeFaceFeatherPx({
           configuredFeatherPx: face.featherPx ?? 16,
           faceW: det.w, faceH: det.h,
@@ -277,6 +279,20 @@ const enhanceFacesStep = {
           h: Math.max(1, det.h * scale),
         },
         blendOpacity: face.blendOpacity,
+      });
+
+      cb.onTile?.({
+        canvas,
+        outX: roiOutX,
+        outY: roiOutY,
+        outW: tw,
+        outH: th,
+        step: 'enhanceFaces',
+        faceIndex,
+        faceTotal: faces.length,
+        composited: true,
+        index: faceIndex,
+        total: faces.length,
       });
 
       crop.width = crop.height = 0;

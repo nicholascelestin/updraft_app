@@ -7,7 +7,7 @@
 import { fetchWithProgress } from 'lib/fetch-progress';
 import { GpuTileRenderer } from './gpu-tile-renderer.js';
 import { GpuFrameExtractor } from './gpu-frame-extractor.js';
-import { buildTileGrid, pasteTileCropped } from './tiling.js';
+import { buildTileGrid, pasteTileCropped, overlapCrop } from './tiling.js';
 
 const DEFAULT_SCALE = 4;
 const DEFAULT_OVERLAP = 16;
@@ -259,9 +259,11 @@ export class UpscalerEngine {
       const disposeMs = performance.now() - tDispose;
       perf.dispose += disposeMs;
 
+      const crop = overlapCrop(tx * scale, ty * scale, outTW, outTH, outW, outH, overlap * scale);
       onTile?.({
         index: i, total: tiles.length, tileMs: inferenceMs, tilePixels: tw * th,
         canvas: outCanvas, outX: tx * scale, outY: ty * scale, outW: outTW, outH: outTH,
+        crop,
         perf: { extractMs, inferenceMs, readbackMs, renderMs, disposeMs },
       });
 

@@ -53,12 +53,20 @@ class UpscalePreview extends HTMLElement {
 
   /**
    * Draw a completed tile onto the preview canvas.
-   * @param {{ canvas: HTMLCanvasElement, outX: number, outY: number, outW: number, outH: number }} tileInfo
+   * Uses the overlap-cropped rect when available so each pixel is written
+   * exactly once per step (avoids double-blend artifacts at tile seams).
+   * @param {{ canvas: HTMLCanvasElement, outX: number, outY: number, outW: number, outH: number, crop?: {x:number,y:number,w:number,h:number} }} tileInfo
+   * @param {{ opacity?: number }} [opts]
    */
-  drawTile(tileInfo) {
+  drawTile(tileInfo, { opacity = 1 } = {}) {
     if (!this.#ctx) return;
-    const { outX, outY, outW: tw, outH: th } = tileInfo;
-    this.#ctx.drawImage(tileInfo.canvas, outX, outY, tw, th, outX, outY, tw, th);
+    const { x, y, w, h } = tileInfo.crop ?? {
+      x: tileInfo.outX, y: tileInfo.outY, w: tileInfo.outW, h: tileInfo.outH,
+    };
+    const needsAlpha = opacity < 1;
+    if (needsAlpha) { this.#ctx.save(); this.#ctx.globalAlpha = opacity; }
+    this.#ctx.drawImage(tileInfo.canvas, x, y, w, h, x, y, w, h);
+    if (needsAlpha) this.#ctx.restore();
   }
 
   cleanup() {

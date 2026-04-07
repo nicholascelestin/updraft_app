@@ -371,15 +371,25 @@ class UpscalerApp extends HTMLElement {
         if (perfMonitor.visible) perfMonitor.updateStage(stage);
       },
       onTile(info) {
-        if (info.step === 'tiledUpscale' || info.step === 'blendAll') preview.drawTile(info);
+        if (info.step === 'tiledUpscale') {
+          preview.drawTile(info);
+        } else if (info.step === 'blendAll') {
+          preview.drawTile(info, { opacity: config.all?.blendOpacity ?? 1 });
+        } else if (info.step === 'enhanceFaces' && info.composited) {
+          preview.drawTile(info);
+        }
         statusBar.showProgress((info.index + 1) / info.total);
         const label = stepLabel[info.step] || info.step || 'Pass';
         if (info.step === 'enhanceFaces') {
-          const faceN = Number.isFinite(info.faceIndex) ? info.faceIndex + 1 : null;
-          const faceTotal = Number.isFinite(info.faceTotal) ? info.faceTotal : null;
-          const facePrefix = faceN && faceTotal ? `face ${faceN}/${faceTotal}, ` : '';
-          const faceTileTotal = Number.isFinite(info.faceTileTotal) ? info.faceTileTotal : info.total;
-          statusBar.message = `${label}: ${facePrefix}tile ${info.index + 1} / ${faceTileTotal}`;
+          if (info.composited) {
+            statusBar.message = `${label}: composited face ${(info.faceIndex ?? 0) + 1}/${info.faceTotal ?? '?'}`;
+          } else {
+            const faceN = Number.isFinite(info.faceIndex) ? info.faceIndex + 1 : null;
+            const faceTotal = Number.isFinite(info.faceTotal) ? info.faceTotal : null;
+            const facePrefix = faceN && faceTotal ? `face ${faceN}/${faceTotal}, ` : '';
+            const faceTileTotal = Number.isFinite(info.faceTileTotal) ? info.faceTileTotal : info.total;
+            statusBar.message = `${label}: ${facePrefix}tile ${info.index + 1} / ${faceTileTotal}`;
+          }
         } else {
           statusBar.message = `${label}: tile ${info.index + 1} / ${info.total}`;
         }
