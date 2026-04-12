@@ -32,7 +32,6 @@ class ImageDropZone extends HTMLElement {
       if (e.target.matches('input[type="file"]') && e.target.files.length) this.#handleFile(e.target.files[0]);
     });
     document.addEventListener('paste', e => {
-      if (this.style.display === 'none') return;
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {

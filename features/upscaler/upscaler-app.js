@@ -21,7 +21,6 @@ class UpscalerApp extends HTMLElement {
 
   #pipeline = new Pipeline();
   #abortController = null;
-  #blobURLs = [];
 
   connectedCallback() {
     this.#render();
@@ -36,7 +35,7 @@ class UpscalerApp extends HTMLElement {
 
   // --- Pipeline helpers ---
 
-  async #createComparisonURLs(resultCanvas, image, outputScale) {
+  #createComparisonCanvases(resultCanvas, image, outputScale) {
     const targetScale = Math.max(1, outputScale || Math.round(resultCanvas.width / image.width) || 1);
     const w = image.width * targetScale;
     const h = image.height * targetScale;
@@ -60,20 +59,7 @@ class UpscalerApp extends HTMLElement {
     bCtx.imageSmoothingEnabled = false;
     bCtx.drawImage(image, 0, 0, w, h);
 
-    const [afterBlob, beforeBlob] = await Promise.all([
-      new Promise(r => afterCanvas.toBlob(r, 'image/png')),
-      new Promise(r => beforeCanvas.toBlob(r, 'image/png')),
-    ]);
-
-    const afterSrc = URL.createObjectURL(afterBlob);
-    const beforeSrc = URL.createObjectURL(beforeBlob);
-    this.#blobURLs = [afterSrc, beforeSrc];
-    return { beforeSrc, afterSrc };
-  }
-
-  #revokeBlobURLs() {
-    for (const url of this.#blobURLs) URL.revokeObjectURL(url);
-    this.#blobURLs = [];
+    return { beforeCanvas, afterCanvas };
   }
 
   // --- Event setup ---
@@ -158,12 +144,17 @@ class UpscalerApp extends HTMLElement {
       perfMonitor.visible ? perfMonitor.hide() : perfMonitor.show();
     });
 
+    this.#q('.clear-cache-btn').addEventListener('click', () => {
+      if (this.#running) return;
+      this.#pipeline.destroy();
+      statusBar.message = 'Model cache cleared — models will reload on next upscale.';
+    });
+
     const resetToStart = () => {
       this.#loadedImage = null;
       this.#running = false;
       this.#generation++;
       this.#abortController = null;
-      this.#revokeBlobURLs();
       upscaleBtn.disabled = true;
       stopBtn.style.display = 'none';
       startOverBtn.style.display = 'none';
@@ -182,7 +173,6 @@ class UpscalerApp extends HTMLElement {
       compareSlider.hide();
       preview.hide();
       preview.cleanup();
-      this.#revokeBlobURLs();
       dropZone.hide();
       cropper.show(this.#loadedImage);
       statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 ready to upscale.`;
@@ -190,6 +180,14 @@ class UpscalerApp extends HTMLElement {
     };
 
     dropZone.addEventListener('image-loaded', (e) => {
+      if (this.#running) {
+        this.#abortController?.abort();
+        this.#running = false;
+        this.#generation++;
+        this.#abortController = null;
+        stopBtn.style.display = 'none';
+        this.#q('.clear-cache-btn').disabled = false;
+      }
       this.#loadedImage = e.detail.image;
       showReady();
     });
@@ -225,9 +223,9 @@ class UpscalerApp extends HTMLElement {
       this.#running = true;
       const gen = ++this.#generation;
       this.#abortController = new AbortController();
-      this.#revokeBlobURLs();
 
       upscaleBtn.disabled = true;
+      this.#q('.clear-cache-btn').disabled = true;
       stopBtn.style.display = 'inline-block';
       startOverBtn.style.display = 'none';
       compareSlider.hide();
@@ -242,14 +240,14 @@ class UpscalerApp extends HTMLElement {
         const parsedOutputScale = parseInt(this.#q('.output-select').value, 10);
         const requestedOutputScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : 4;
 
-        let beforeSrc, afterSrc, scale;
+        let beforeCanvas, afterCanvas, scale;
 
         if (this.#q('.mode-select').value === 'runpod') {
-          ({ beforeSrc, afterSrc, scale } = await this.#runRunPodUpscale(
+          ({ beforeCanvas, afterCanvas, scale } = await this.#runRunPodUpscale(
             inputImage, signal, statusBar, preview,
           ));
         } else {
-          ({ beforeSrc, afterSrc, scale } = await this.#runLocalUpscale(
+          ({ beforeCanvas, afterCanvas, scale } = await this.#runLocalUpscale(
             inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor,
           ));
         }
@@ -261,7 +259,7 @@ class UpscalerApp extends HTMLElement {
 
         compareSlider.style.maxWidth = outW + 'px';
         compareSlider.setAttribute('after-label', `${scale}x Upscaled`);
-        await compareSlider.show(beforeSrc, afterSrc, {
+        await compareSlider.show(beforeCanvas, afterCanvas, {
           downloadName: `upscaled_${scale}x.png`,
         });
         compareSlider.setViewState(this.#viewState);
@@ -284,6 +282,7 @@ class UpscalerApp extends HTMLElement {
         stopBtn.style.display = 'none';
         startOverBtn.style.display = 'inline-block';
         upscaleBtn.disabled = false;
+        this.#q('.clear-cache-btn').disabled = false;
       }
     });
 
@@ -407,8 +406,8 @@ class UpscalerApp extends HTMLElement {
     }
 
     const outputScale = Math.max(1, Math.min(requestedOutputScale, result.scale));
-    const urls = await this.#createComparisonURLs(result.image, inputImage, outputScale);
-    return { ...urls, scale: outputScale };
+    const canvases = this.#createComparisonCanvases(result.image, inputImage, outputScale);
+    return { ...canvases, scale: outputScale };
   }
 
   async #runRunPodUpscale(inputImage, signal, statusBar, preview) {
@@ -442,8 +441,8 @@ class UpscalerApp extends HTMLElement {
     );
 
     const scale = Math.min(finalScale, actualScale);
-    const urls = await this.#createComparisonURLs(resultCanvas, inputImage, scale);
-    return { ...urls, scale };
+    const canvases = this.#createComparisonCanvases(resultCanvas, inputImage, scale);
+    return { ...canvases, scale };
   }
 
   // --- Settings ---
@@ -619,6 +618,9 @@ class UpscalerApp extends HTMLElement {
         </button>
         <button class="perf-toggle-btn secondary outline" title="Toggle performance monitor">
           <i class="fas fa-gauge-high"></i>
+        </button>
+        <button class="clear-cache-btn secondary outline" title="Clear cached ONNX models (frees memory)">
+          <i class="fas fa-broom"></i> Clear Cache
         </button>
       </div>
 

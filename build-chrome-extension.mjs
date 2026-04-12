@@ -2,6 +2,8 @@ import { mkdir, cp, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { UPSCALER_MODELS } from './features/upscaler/model-registry.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = __dirname;
@@ -22,13 +24,8 @@ const copyPairs = [
   ['features/upscaler/model-registry.js', 'chrome-extension/src/model-registry.js'],
   ['lib/fetch-progress.js', 'chrome-extension/src/fetch-progress.js'],
 
-  // Models — should match UPSCALER_MODELS in features/upscaler/model-registry.js.
-  ['models/RMBN_M4C8_x4.onnx', 'chrome-extension/models/RMBN_M4C8_x4.onnx'],
-  ['models/RMBN_M4C8_FACES_x4.onnx', 'chrome-extension/models/RMBN_M4C8_FACES_x4.onnx'],
-  ['models/RMBN_M8C16_OTF_x4_FACES.onnx', 'chrome-extension/models/RMBN_M8C16_OTF_x4_FACES.onnx'],
-  ['models/4x-UltraMix_Balanced.onnx', 'chrome-extension/models/4x-UltraMix_Balanced.onnx'],
-  ['models/4x-UltraSharpV2_Lite.onnx', 'chrome-extension/models/4x-UltraSharpV2_Lite.onnx'],
-  ['models/4x-ClearRealityV1.onnx', 'chrome-extension/models/4x-ClearRealityV1.onnx'],
+  // ONNX weights — derived from UPSCALER_MODELS (same paths as model `url` fields).
+  ...UPSCALER_MODELS.map(m => [m.url, path.join('chrome-extension', m.url)]),
 ];
 
 const ortFiles = [
