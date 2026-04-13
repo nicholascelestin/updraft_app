@@ -197,6 +197,11 @@ class UpscalerApp extends HTMLElement {
     modelEl.addEventListener('change', () => {
       const scale = modelEl.selectedOptions[0].dataset.scale;
       upscaleBtn.textContent = `Upscale ${scale}x`;
+      this.#updateHangWarning();
+    });
+
+    this.#q('.tilesize-select').addEventListener('change', () => {
+      this.#updateHangWarning();
     });
 
     this.#q('.pass-all-blend').addEventListener('input', (e) => {
@@ -287,6 +292,14 @@ class UpscalerApp extends HTMLElement {
       if (this.#running) this.#abortController?.abort();
       resetToStart();
     });
+  }
+
+  #updateHangWarning() {
+    const modelOpt = this.#q('.model-select').selectedOptions[0];
+    const sizeMB = parseFloat(modelOpt?.dataset.sizemb) || 0;
+    const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
+    const show = sizeMB > 10 && tileSize > 128;
+    this.#q('.hang-warn').classList.toggle('visible', show);
   }
 
   // --- Config extraction ---
@@ -474,6 +487,7 @@ class UpscalerApp extends HTMLElement {
     this.#q('.pass-all-blend').dispatchEvent(new Event('input'));
     this.#q('.detector-face-score').dispatchEvent(new Event('input'));
     this.#q('.detector-face-blend').dispatchEvent(new Event('input'));
+    this.#updateHangWarning();
   }
 
   // --- Template ---
@@ -535,6 +549,40 @@ class UpscalerApp extends HTMLElement {
         }
         upscaler-app .detector-row input[type="checkbox"] {
           margin-top: 0;
+        }
+        upscaler-app .hang-warn {
+          display: none;
+          position: relative;
+          color: var(--pico-del-color, #c62828);
+          font-size: 1rem;
+          cursor: help;
+          align-self: center;
+        }
+        upscaler-app .hang-warn.visible {
+          display: inline-flex;
+        }
+        upscaler-app .hang-warn .hang-warn-tip {
+          display: none;
+          position: absolute;
+          bottom: calc(100% + 0.45rem);
+          left: 50%;
+          transform: translateX(-50%);
+          background: var(--pico-card-background-color, #1e1e2e);
+          color: var(--pico-color, #cdd6f4);
+          border: 1px solid var(--pico-muted-border-color);
+          border-radius: var(--pico-border-radius);
+          padding: 0.5rem 0.65rem;
+          font-size: 0.78rem;
+          line-height: 1.4;
+          white-space: normal;
+          width: max-content;
+          max-width: 26rem;
+          z-index: 10;
+          pointer-events: none;
+          box-shadow: 0 2px 8px rgba(0,0,0,.25);
+        }
+        upscaler-app .hang-warn:hover .hang-warn-tip {
+          display: block;
         }
       </style>
 
@@ -602,6 +650,15 @@ class UpscalerApp extends HTMLElement {
         <button class="perf-toggle-btn secondary outline" title="Toggle performance monitor">
           <i class="fas fa-gauge-high"></i>
         </button>
+        <span class="hang-warn" aria-label="Performance warning">
+          <i class="fas fa-triangle-exclamation"></i>
+          <span class="hang-warn-tip">
+            Large models (&gt;10 MB) with tile sizes above 128 can block the
+            browser's main thread for extended periods, causing the UI to freeze.
+            You may not be able to click Stop until the current tile finishes.
+            Consider reducing the tile size or using a smaller model.
+          </span>
+        </span>
         <button class="clear-cache-btn secondary outline" hidden title="Clear cached ONNX models (frees memory)">
           <i class="fas fa-broom"></i> Clear Cache
         </button>

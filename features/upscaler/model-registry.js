@@ -25,6 +25,7 @@ export function modelOptionsHTML(models = UPSCALER_MODELS, { selected } = {}) {
     ];
     if (m.range) attrs.push(`data-range="${m.range}"`);
     if (m.backend) attrs.push(`data-backend="${m.backend}"`);
+    if (m.sizeMB != null) attrs.push(`data-sizemb="${m.sizeMB}"`);
     if (m.url === selected) attrs.push('selected');
     const sizeStr = m.sizeMB != null ? ` (~${m.sizeMB}MB)` : '';
     return `<option ${attrs.join(' ')}>${m.label}${sizeStr}</option>`;
