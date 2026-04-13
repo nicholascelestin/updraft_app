@@ -463,7 +463,7 @@ class UpscalerApp extends HTMLElement {
     this.#viewState.expanded = localStorage.getItem('upscaler_view_expanded') === '1';
     this.#viewState.upscaledOnly = localStorage.getItem('upscaler_view_upscaled_only') === '1';
     this.#q('.pass-all-enabled').checked = localStorage.getItem('upscaler_pass_all_enabled') === '1';
-    this.#q('.detector-face-enabled').checked = localStorage.getItem('upscaler_detector_face_enabled') !== '0';
+    this.#q('.detector-face-enabled').checked = localStorage.getItem('upscaler_detector_face_enabled') === '1';
 
     this.#q('upscale-preview').setExpanded(this.#viewState.expanded);
     this.#q('compare-slider').setViewState(this.#viewState);
@@ -629,15 +629,15 @@ class UpscalerApp extends HTMLElement {
         </div>
         <div class="detector-row">
           <label>
-            <input class="detector-face-enabled" type="checkbox" checked>
+            <input class="detector-face-enabled" type="checkbox">
             Faces (YuNet)
           </label>
-          <label>Padding:
-            <input class="detector-face-padding" type="number" min="0" max="512" step="1" value="24" style="width:7ch">
+          <label hidden>Padding:
+            <input class="detector-face-padding" type="number" min="0" max="512" step="1" value="20" style="width:7ch">
             px
           </label>
           <label title="Minimum face detection confidence">
-            Score:
+            Confidence Threshold:
             <span style="display:inline-flex;align-items:center;gap:0.3rem">
               <input class="detector-face-score" type="range" min="0.3" max="0.95" step="0.01" value="0.70" style="width:7rem;vertical-align:middle">
               <span class="detector-face-score-val" style="min-width:4ch;font-variant-numeric:tabular-nums">0.70</span>
