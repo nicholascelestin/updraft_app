@@ -69,6 +69,26 @@ function chwToImageData(chwData, width, height, valueScale) {
   return imgData;
 }
 
+/**
+ * Convert HWC float32 data (channels-last: [R,G,B, R,G,B, …] per pixel)
+ * into an RGBA ImageData. Used when the WebGPU EP returns NHWC-ordered output.
+ */
+function hwcToImageData(hwcData, width, height, valueScale) {
+  const imgData = new ImageData(width, height);
+  const px = imgData.data;
+  for (let row = 0; row < height; row++) {
+    for (let col = 0; col < width; col++) {
+      const srcIdx = (row * width + col) * 3;
+      const dstIdx = (row * width + col) * 4;
+      px[dstIdx]     = clampByte(hwcData[srcIdx]     * valueScale);
+      px[dstIdx + 1] = clampByte(hwcData[srcIdx + 1] * valueScale);
+      px[dstIdx + 2] = clampByte(hwcData[srcIdx + 2] * valueScale);
+      px[dstIdx + 3] = 255;
+    }
+  }
+  return imgData;
+}
+
 export class UpscalerEngine {
   #session = null;
   #modelBuffer = null;
@@ -113,7 +133,7 @@ export class UpscalerEngine {
 
     ort.env.wasm.wasmPaths =
       globalThis.__ORT_WASM_PATHS__ ||
-      'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
+      'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
     ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
 
     if (backend === 'webgpu' && ort.env.webgpu) {
@@ -127,7 +147,11 @@ export class UpscalerEngine {
     report?.(1, 'Loading model into runtime\u2026');
 
     const sessionOpts = {
-      executionProviders: [backend],
+      executionProviders: [
+        backend === 'webgpu'
+          ? { name: 'webgpu', preferredLayout: 'NCHW' }
+          : backend,
+      ],
       graphOptimizationLevel: 'all',
       ...(this.#profiling && { enableProfiling: true }),
     };
@@ -242,12 +266,16 @@ export class UpscalerEngine {
         perf.gpuRender += renderMs;
       } else {
         const tReadback = performance.now();
-        const outData = results[outputName].data;
+        const outTensor = results[outputName];
+        const outData = outTensor.data;
         readbackMs = performance.now() - tReadback;
         perf.readback += readbackMs;
 
         const tWrite = performance.now();
-        const imgData = chwToImageData(outData, outTW, outTH, 255 / this.#modelValueRange);
+        const dims = outTensor.dims;
+        const isNHWC = dims.length === 4 && dims[3] === 3 && dims[1] !== 3;
+        const decode = isNHWC ? hwcToImageData : chwToImageData;
+        const imgData = decode(outData, outTW, outTH, 255 / this.#modelValueRange);
         pasteTileCropped(outCtx, imgData, tx * scale, ty * scale, outW, outH, overlap * scale);
         renderMs = performance.now() - tWrite;
         perf.writeTile += renderMs;

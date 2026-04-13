@@ -51,7 +51,7 @@ export class BgRemovalEngine {
     const ort = globalThis.ort;
     if (!ort) throw new Error('ONNX Runtime not loaded');
 
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/';
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
     ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
 
     // Release old session if switching models
