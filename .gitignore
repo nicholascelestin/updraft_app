@@ -17,6 +17,9 @@ node_modules/
 .env
 .env.*
 
+# Deploy script (contains AWS account/bucket info)
+deploy.js
+
 # Chrome extension build artifacts (generated/copied)
 chrome-extension/src/
 chrome-extension/models/

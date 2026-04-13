@@ -76,7 +76,6 @@ class UpscalerApp extends HTMLElement {
 
     persist('.runpod-endpoint', 'upscaler_runpod_endpoint', 'input');
     persist('.runpod-apikey', 'upscaler_runpod_apikey', 'input');
-    persist('.mode-select', 'upscaler_mode');
     persist('.model-select', 'upscaler_model');
     persist('.tilesize-select', 'upscaler_tilesize');
     persist('.backend-select', 'upscaler_backend');
@@ -92,13 +91,7 @@ class UpscalerApp extends HTMLElement {
   }
 
   #setupModeSwitch() {
-    this.#q('.mode-select').addEventListener('change', () => {
-      const isRunPod = this.#q('.mode-select').value === 'runpod';
-      this.#q('.local-controls').style.display = isRunPod ? 'none' : '';
-      this.#q('.runpod-controls').style.display = isRunPod ? '' : 'none';
-      this.#q('.passes-panel').style.display = isRunPod ? 'none' : '';
-      this.#q('.mode-label').textContent = isRunPod ? '(RunPod Serverless)' : '(in-browser, ONNX Runtime)';
-    });
+    // Mode is locked to 'local' — RunPod UI hidden but code path preserved
   }
 
   #setupViewStateSync() {
@@ -452,7 +445,6 @@ class UpscalerApp extends HTMLElement {
     this.#q('.runpod-apikey').value = localStorage.getItem('upscaler_runpod_apikey') || '';
 
     const controls = [
-      ['.mode-select', 'upscaler_mode'],
       ['.model-select', 'upscaler_model'],
       ['.tilesize-select', 'upscaler_tilesize'],
       ['.backend-select', 'upscaler_backend'],
@@ -478,7 +470,6 @@ class UpscalerApp extends HTMLElement {
     const modelEl = this.#q('.model-select');
     if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
 
-    this.#q('.mode-select').dispatchEvent(new Event('change'));
     this.#q('.model-select').dispatchEvent(new Event('change'));
     this.#q('.pass-all-blend').dispatchEvent(new Event('input'));
     this.#q('.detector-face-score').dispatchEvent(new Event('input'));
@@ -511,10 +502,6 @@ class UpscalerApp extends HTMLElement {
         upscaler-app .runpod-controls {
           display: inline-flex; flex-wrap: wrap; gap: 0.4rem 0.75rem;
           align-items: center;
-        }
-        upscaler-app .mode-label {
-          font-size: 0.7rem;
-          color: var(--pico-muted-color);
         }
         upscaler-app .passes-panel {
           margin-bottom: 1rem;
@@ -553,21 +540,24 @@ class UpscalerApp extends HTMLElement {
 
       <h2>
         <i class="fas fa-expand"></i> Image Upscaler
-        <span class="mode-label">(in-browser, ONNX Runtime)</span>
       </h2>
 
-      <div class="controls">
-        <label>Mode:
-          <select class="mode-select">
-            <option value="local">Local (ONNX)</option>
-            <option value="runpod">RunPod Serverless</option>
-          </select>
-        </label>
+      <select class="mode-select" hidden>
+        <option value="local" selected>Local (ONNX)</option>
+        <option value="runpod">RunPod Serverless</option>
+      </select>
 
+      <div class="controls">
         <span class="local-controls">
           <label>Model:
             <select class="model-select">
               ${modelOptionsHTML()}
+            </select>
+          </label>
+          <label>Backend:
+            <select class="backend-select">
+              <option value="webgpu">GPU (WebGPU)</option>
+              <option value="wasm">CPU (WASM)</option>
             </select>
           </label>
           <label>Tile size:
@@ -579,13 +569,6 @@ class UpscalerApp extends HTMLElement {
               <option value="384">384</option>
               <option value="512">512</option>
               <option value="0">Full image (no tiling)</option>
-            </select>
-          </label>
-          <label>Backend:
-            <select class="backend-select">
-              <option value="webgpu">WebGPU</option>
-              <option value="webgl">WebGL</option>
-              <option value="wasm">WASM</option>
             </select>
           </label>
           <label>Final Output:
@@ -619,13 +602,13 @@ class UpscalerApp extends HTMLElement {
         <button class="perf-toggle-btn secondary outline" title="Toggle performance monitor">
           <i class="fas fa-gauge-high"></i>
         </button>
-        <button class="clear-cache-btn secondary outline" title="Clear cached ONNX models (frees memory)">
+        <button class="clear-cache-btn secondary outline" hidden title="Clear cached ONNX models (frees memory)">
           <i class="fas fa-broom"></i> Clear Cache
         </button>
       </div>
 
       <details class="passes-panel">
-        <summary><i class="fas fa-user-check"></i> Passes</summary>
+        <summary><i class="fas fa-user-check"></i> Additional Passes</summary>
         <div class="detector-row">
           <label>
             <input class="pass-all-enabled" type="checkbox">

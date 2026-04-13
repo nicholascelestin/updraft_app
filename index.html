@@ -20,30 +20,12 @@
             <li><a href="#" class="nav-link active" data-feature="upscaler">
                 <i class="fas fa-expand"></i> Upscaler
             </a></li>
-            <li><a href="#" class="nav-link" data-feature="i2v">
-                <i class="fas fa-video"></i> Image to Video
-            </a></li>
-            <li><a href="#" class="nav-link" data-feature="video-upscaler">
-                <i class="fas fa-film"></i> Video Upscaler
-            </a></li>
-            <li><a href="#" class="nav-link" data-feature="bg-removal">
-                <i class="fas fa-eraser"></i> BG Removal
-            </a></li>
         </ul>
     </nav>
 
     <main class="container-fluid">
         <section id="feature-upscaler">
             <upscaler-app></upscaler-app>
-        </section>
-        <section id="feature-i2v" style="display:none">
-            <i2v-app></i2v-app>
-        </section>
-        <section id="feature-video-upscaler" style="display:none">
-            <video-upscaler-app></video-upscaler-app>
-        </section>
-        <section id="feature-bg-removal" style="display:none">
-            <bg-removal-app></bg-removal-app>
         </section>
     </main>
 
@@ -65,9 +47,6 @@
     </script>
     <script type="module">
         import './features/upscaler/upscaler-app.js';
-        import './features/i2v/i2v-app.js';
-        import './features/video-upscaler/video-upscaler-app.js';
-        import './features/bg-removal/bg-removal-app.js';
 
         function activateFeature(link) {
             const feature = link.dataset.feature;

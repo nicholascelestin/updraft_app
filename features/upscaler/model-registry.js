@@ -4,7 +4,7 @@
  */
 
 export const UPSCALER_MODELS = [
-  { url: 'models/4x-UpdraftTiny.onnx', scale: 4, range: 255, label: 'Updraft Tiny (SPAN-like)' },
+  { url: 'models/4x-UpdraftTiny.onnx', scale: 4, range: 255, label: 'Updraft Tiny (RMBN)' },
   { url: 'models/4x-UpdraftLightweight.onnx', scale: 4, range: 255, label: 'Updraft Lightweight (SPAN-like)' },
   { url: 'models/4x-UpdraftMidweight.onnx', scale: 4, range: 255, label: 'Updraft Midweight (SPAN-like)' },
   { url: 'models/4x-ClearRealityV1.onnx', scale: 4, backend: 'wasm', label: 'ClearReality (SPAN)' },
