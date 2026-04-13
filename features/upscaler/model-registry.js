@@ -4,14 +4,10 @@
  */
 
 export const UPSCALER_MODELS = [
-  { url: 'models/RMBN_M16C32_OTF_x4_V4.onnx', scale: 4, range: 255, label: 'Lightweight Plain' },
-  { url: 'models/RMBN_M16C32_OTF_x4_V6.onnx', scale: 4, range: 255, label: 'Lightweight Global Attention 1' },
-  { url: 'models/RMBN_M16C32_OTF_x4_V8.onnx', scale: 4, range: 255, label: 'Lightweight Global Attention 2' },
-  { url: 'models/RMBN_M16C32_OTF_x4_V9.onnx', scale: 4, range: 255, label: 'Lightweight Local Attention 1' },
-  { url: 'models/RMBN_M16C32_OTF_x4_V10.onnx', scale: 4, range: 255, label: 'Lightweight Local Attention 2' },
-  { url: 'models/RMBN_M16C32_OTF_x4_V11.onnx', scale: 4, range: 255, label: 'Midweight Local Attention 1' },
-  { url: 'models/RMBN_M16C32_OTF_x4_V12.onnx', scale: 4, range: 255, label: 'Midweight Local Attention 2' },
-  { url: 'models/4x-ClearRealityV1.onnx', scale: 4, backend: 'wasm', label: 'ClearReality(SPAN)' },
+  { url: 'models/4x-UpdraftTiny.onnx', scale: 4, range: 255, label: 'Updraft Tiny (SPAN-like)' },
+  { url: 'models/4x-UpdraftLightweight.onnx', scale: 4, range: 255, label: 'Updraft Lightweight (SPAN-like)' },
+  { url: 'models/4x-UpdraftMidweight.onnx', scale: 4, range: 255, label: 'Updraft Midweight (SPAN-like)' },
+  { url: 'models/4x-ClearRealityV1.onnx', scale: 4, backend: 'wasm', label: 'ClearReality (SPAN)' },
   { url: 'models/4x-UltraSharpV2_Lite.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)' },
   { url: 'models/4x-UltraSharpV2.onnx', scale: 4, backend: 'wasm', label: 'UltraSharp V2 (DAT)' },
 ];
