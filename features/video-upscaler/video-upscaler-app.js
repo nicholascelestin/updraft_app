@@ -37,8 +37,36 @@ class VideoUpscalerApp extends HTMLElement {
     const startOverBtn = this.#q('.startover-btn');
     const statusBar  = this.#q('status-bar');
     const dropZone   = this.#q('video-drop-zone');
+    const outputLabelsByValue = new Map(Array.from(outputEl.options).map(opt => ([
+      opt.value,
+      opt.textContent.replace(/\s+\(no downscale\)$/i, ''),
+    ])));
+
+    const updateModelBoundControls = () => {
+      const scale = parseInt(modelEl.selectedOptions[0]?.dataset.scale, 10) || 4;
+      const verb = scale === 1 ? 'Enhance' : 'Upscale';
+      const maxOutputScale = Math.max(1, Math.min(scale, 4));
+
+      upscaleBtn.innerHTML = `<i class="fas fa-wand-magic-sparkles"></i> ${verb} ${scale}x`;
+
+      for (const opt of outputEl.options) {
+        const optionScale = parseInt(opt.value, 10) || 1;
+        const baseLabel = outputLabelsByValue.get(opt.value) || `${optionScale}x`;
+        opt.textContent = optionScale === maxOutputScale
+          ? `${baseLabel} (no downscale)`
+          : baseLabel;
+        opt.disabled = optionScale > maxOutputScale;
+      }
+
+      outputEl.value = String(maxOutputScale);
+      localStorage.setItem('video_upscaler_output', outputEl.value);
+    };
+
     // Persist settings on change
-    modelEl.addEventListener('change', () => localStorage.setItem('video_upscaler_model', modelEl.value));
+    modelEl.addEventListener('change', () => {
+      localStorage.setItem('video_upscaler_model', modelEl.value);
+      updateModelBoundControls();
+    });
     tileSizeEl.addEventListener('change', () => localStorage.setItem('video_upscaler_tilesize', tileSizeEl.value));
     backendEl.addEventListener('change', () => localStorage.setItem('video_upscaler_backend', backendEl.value));
     fpsEl.addEventListener('change', () => localStorage.setItem('video_upscaler_fps', fpsEl.value));
@@ -199,6 +227,10 @@ class VideoUpscalerApp extends HTMLElement {
       const saved = localStorage.getItem(key);
       if (saved !== null) this.#q(sel).value = saved;
     }
+
+    const modelEl = this.#q('.model-select');
+    if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
+    modelEl.dispatchEvent(new Event('change'));
   }
 
   #render() {
@@ -256,6 +288,7 @@ class VideoUpscalerApp extends HTMLElement {
         <label>Tile size:
           <select class="tilesize-select">
             <option value="64">64</option>
+            <option value="80">80</option>
             <option value="128">128</option>
             <option value="192" selected>192</option>
             <option value="256">256</option>

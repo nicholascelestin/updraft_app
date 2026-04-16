@@ -130,6 +130,11 @@ class UpscalerApp extends HTMLElement {
     const stopBtn       = this.#q('.stop-btn');
     const startOverBtn  = this.#q('.startover-btn');
     const modelEl       = this.#q('.model-select');
+    const outputEl      = this.#q('.output-select');
+    const outputLabelsByValue = new Map(Array.from(outputEl.options).map(opt => ([
+      opt.value,
+      opt.textContent.replace(/\s+\(no downscale\)$/i, ''),
+    ])));
 
     statusBar.message = 'Load an image to begin.';
 
@@ -194,10 +199,29 @@ class UpscalerApp extends HTMLElement {
       }
     });
 
-    modelEl.addEventListener('change', () => {
-      const scale = modelEl.selectedOptions[0].dataset.scale;
-      upscaleBtn.textContent = `Upscale ${scale}x`;
+    const updateModelBoundControls = () => {
+      const scale = parseInt(modelEl.selectedOptions[0]?.dataset.scale, 10) || 4;
+      const verb = scale === 1 ? 'Enhance' : 'Upscale';
+      const maxOutputScale = Math.max(1, Math.min(scale, 4));
+
+      upscaleBtn.innerHTML = `<i class="fas fa-wand-magic-sparkles"></i> ${verb} ${scale}x`;
+
+      for (const opt of outputEl.options) {
+        const optionScale = parseInt(opt.value, 10) || 1;
+        const baseLabel = outputLabelsByValue.get(opt.value) || `${optionScale}x`;
+        opt.textContent = optionScale === maxOutputScale
+          ? `${baseLabel} (no downscale)`
+          : baseLabel;
+        opt.disabled = optionScale > maxOutputScale;
+      }
+
+      outputEl.value = String(maxOutputScale);
+      localStorage.setItem('upscaler_output', outputEl.value);
       this.#updateHangWarning();
+    };
+
+    modelEl.addEventListener('change', () => {
+      updateModelBoundControls();
     });
 
     this.#q('.tilesize-select').addEventListener('change', () => {
@@ -611,6 +635,7 @@ class UpscalerApp extends HTMLElement {
           <label>Tile size:
             <select class="tilesize-select">
               <option value="64">64</option>
+              <option value="80">80</option>
               <option value="128">128</option>
               <option value="192" selected>192</option>
               <option value="256">256</option>
