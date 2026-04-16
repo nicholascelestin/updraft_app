@@ -7,7 +7,7 @@ import 'components/image-drop-zone';
 import 'components/status-bar';
 import 'components/compare-slider';
 import 'components/image-cropper';
-import { BgRemovalEngine, MODELS } from './bg-removal-engine.js';
+import { BgRemovalEngine } from './bg-removal-engine.js';
 
 /**
  * Draw a checkerboard pattern + transparent image onto a canvas, return as blob URL.
@@ -46,6 +46,8 @@ function imageToBlobUrl(image) {
 }
 
 class BgRemovalApp extends HTMLElement {
+  static BRIA_MODEL_KEY = 'rmbg-1.4';
+
   #loadedImage = null;
   #running = false;
   #engine = new BgRemovalEngine();
@@ -70,7 +72,6 @@ class BgRemovalApp extends HTMLElement {
   }
 
   #setupEvents() {
-    const modelEl     = this.#q('.model-select');
     const backendEl   = this.#q('.backend-select');
     const removeBtn   = this.#q('.remove-btn');
     const stopBtn     = this.#q('.stop-btn');
@@ -141,7 +142,7 @@ class BgRemovalApp extends HTMLElement {
       cropper.style.display = 'none';
 
       try {
-        await this.#engine.loadModel(modelEl.value, backendEl.value, (frac, msg) => {
+        await this.#engine.loadModel(BgRemovalApp.BRIA_MODEL_KEY, backendEl.value, (frac, msg) => {
           statusBar.showProgress(frac);
           statusBar.message = msg;
         });
@@ -200,10 +201,6 @@ class BgRemovalApp extends HTMLElement {
   }
 
   #render() {
-    const modelOptions = Object.entries(MODELS)
-      .map(([key, m]) => `<option value="${key}">${m.label}</option>`)
-      .join('');
-
     morph(this, `
       <style>
         bg-removal-app .controls {
@@ -230,14 +227,10 @@ class BgRemovalApp extends HTMLElement {
       </h2>
 
       <div class="controls">
-        <label>Model:
-          <select class="model-select">${modelOptions}</select>
-        </label>
         <label>Backend:
           <select class="backend-select">
-            <option value="webgpu">WebGPU</option>
-            <option value="webgl">WebGL</option>
-            <option value="wasm">WASM</option>
+            <option value="webgpu">GPU (WebGPU)</option>
+            <option value="wasm">CPU (WASM)</option>
           </select>
         </label>
 

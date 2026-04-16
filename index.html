@@ -20,12 +20,18 @@
             <li><a href="#" class="nav-link active" data-feature="upscaler">
                 <i class="fas fa-expand"></i> Upscaler
             </a></li>
+            <li><a href="#" class="nav-link" data-feature="bg-removal">
+                <i class="fas fa-eraser"></i> Background Removal
+            </a></li>
         </ul>
     </nav>
 
     <main class="container-fluid">
         <section id="feature-upscaler">
             <upscaler-app></upscaler-app>
+        </section>
+        <section id="feature-bg-removal" style="display: none;">
+            <bg-removal-app></bg-removal-app>
         </section>
     </main>
 
@@ -47,6 +53,7 @@
     </script>
     <script type="module">
         import './features/upscaler/upscaler-app.js';
+        import './features/bg-removal/bg-removal-app.js';
 
         function activateFeature(link) {
             const feature = link.dataset.feature;

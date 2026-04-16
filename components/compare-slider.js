@@ -61,7 +61,7 @@ class CompareSlider extends HTMLElement {
       }
       if (toggleBtn) {
         this.toggleUpscaledView();
-        toggleBtn.textContent = this.#upscaledOnly ? 'Show Compare' : 'Show Upscaled';
+        toggleBtn.textContent = this.#upscaledOnly ? 'Show Compare' : 'Show Enhanced';
       }
       if (downloadBtn) {
         const url = this.#downloadSrc || await this.#ensureDownloadURL();
@@ -265,7 +265,7 @@ class CompareSlider extends HTMLElement {
 
   #render() {
     const expandLabel = this.#expanded ? 'Fit to View' : 'Full Size';
-    const toggleLabel = this.#upscaledOnly ? 'Show Compare' : 'Show Upscaled';
+    const toggleLabel = this.#upscaledOnly ? 'Show Compare' : 'Show Enhanced';
     const beforeLabel = esc(this.getAttribute('before-label') || 'Original');
     const afterLabel = esc(this.getAttribute('after-label') || '4x Upscaled');
     const cm = !!this.#afterCanvas;
