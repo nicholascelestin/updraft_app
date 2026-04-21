@@ -8,13 +8,15 @@ export const UPSCALER_MODELS = [
   { url: 'models/1x-ITF-SkinDiffDetail-Lite-v1.onnx', scale: 1, range: 1, label: 'SkinDiffDetail Lite', sizeMB: 20 },
   { url: 'models/2xParagonSR_Nano_gan_op18_fp32.onnx', scale: 2, range: 1, label: 'ParagonSR Nano GAN', sizeMB: 0.7 },
 
-  
+
   { url: 'models/4x-UpdraftTiny.onnx', scale: 4, range: 255, label: 'Updraft Tiny (RMBN)', sizeMB: 0.6 },
   { url: 'models/4x-UpdraftLightweight.onnx', scale: 4, range: 255, label: 'Updraft Lightweight (SPAN-like)', sizeMB: 0.8 },
   { url: 'models/4x-UpdraftMidweight.onnx', scale: 4, range: 255, label: 'Updraft Midweight (SPAN-like)', sizeMB: 1.2 },
   { url: 'models/4x-UpdraftMidweight_V12.onnx', scale: 4, range: 255, label: 'Updraft Midweight V2 (SPAN-like)', sizeMB: 1.3 },
   { url: 'models/4x-UpdraftMidweight_L_3.onnx', scale: 4, range: 255, label: 'Updraft Midweight L (SPAN-like)', sizeMB: 1.8 },
   { url: 'models/4x-UpdraftMidweight_L_SE_S_5.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_L_SE_S_6.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE 247k  (SPAN-faithful)', sizeMB: 1.8 },
+
 
   { url: 'models/4x-ClearRealityV1.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.8 },
   { url: 'models/4xPurePhoto-Span.onnx', scale: 4, label: 'PurePhoto (SPAN)', sizeMB: 1.7 },
