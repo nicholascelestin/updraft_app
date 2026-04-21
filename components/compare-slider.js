@@ -12,6 +12,7 @@ class CompareSlider extends HTMLElement {
   #afterSrc = '';
   #expanded = false;
   #upscaledOnly = false;
+  #pixelZoomed = false;
   #positionFrac = 0.5;
   #naturalMaxWidth = 0;
   #downloadSrc = '';
@@ -19,6 +20,7 @@ class CompareSlider extends HTMLElement {
   #beforeCanvas = null;
   #afterCanvas = null;
   #lazyBlobURL = '';
+  #probeRadius = 57;
 
   #onWindowMouseMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
   #onWindowTouchMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
@@ -50,6 +52,7 @@ class CompareSlider extends HTMLElement {
       const expandBtn = e.target.closest('.compare-expand-btn');
       const toggleBtn = e.target.closest('.compare-toggle-upscaled-btn');
       const downloadBtn = e.target.closest('.compare-download-btn');
+      const toolbarHit = e.target.closest('.compare-toolbar');
       if (openBtn) {
         const url = this.#downloadSrc || await this.#ensureDownloadURL();
         if (url) window.open(url, '_blank');
@@ -58,10 +61,12 @@ class CompareSlider extends HTMLElement {
       if (expandBtn) {
         this.toggleExpand();
         expandBtn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
+        return;
       }
       if (toggleBtn) {
         this.toggleUpscaledView();
         toggleBtn.textContent = this.#upscaledOnly ? 'Show Compare' : 'Show Enhanced';
+        return;
       }
       if (downloadBtn) {
         const url = this.#downloadSrc || await this.#ensureDownloadURL();
@@ -71,7 +76,17 @@ class CompareSlider extends HTMLElement {
           a.href = url;
           a.click();
         }
+        return;
       }
+      if (this.#upscaledOnly && !toolbarHit) {
+        this.togglePixelZoom();
+      }
+    });
+    this.addEventListener('mousemove', (e) => {
+      this.#updatePixelProbe(e);
+    });
+    this.addEventListener('mouseleave', () => {
+      this.#hidePixelProbe();
     });
 
     this.#resizeObserver = new ResizeObserver(() => {
@@ -112,6 +127,7 @@ class CompareSlider extends HTMLElement {
       this.#downloadSrc = opts.downloadSrc || afterSrc;
     }
     this.#downloadName = opts.downloadName || 'download.png';
+    this.#pixelZoomed = false;
     this.#render();
 
     if (!canvasMode) {
@@ -131,9 +147,13 @@ class CompareSlider extends HTMLElement {
 
   hide() {
     this.style.display = 'none';
+    this.style.width = '';
     this.style.maxWidth = '';
+    this.style.maxHeight = '';
+    this.#hidePixelProbe();
     this.#beforeCanvas = null;
     this.#afterCanvas = null;
+    this.#pixelZoomed = false;
     if (this.#lazyBlobURL) {
       URL.revokeObjectURL(this.#lazyBlobURL);
       this.#lazyBlobURL = '';
@@ -154,8 +174,24 @@ class CompareSlider extends HTMLElement {
 
   toggleUpscaledView() {
     this.#upscaledOnly = !this.#upscaledOnly;
+    this.#pixelZoomed = false;
+    this.#hidePixelProbe();
     this.#syncModeClass();
     if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
+    if (this.style.display !== 'none') this.#applySize();
+    this.#emitViewState();
+  }
+
+  togglePixelZoom() {
+    if (!this.#upscaledOnly) return;
+    this.#pixelZoomed = !this.#pixelZoomed;
+    if (!this.#pixelZoomed) {
+      this.scrollLeft = 0;
+      this.scrollTop = 0;
+    }
+    this.#hidePixelProbe();
+    if (this.style.display !== 'none') this.#applySize();
+    this.#syncModeClass();
     this.#emitViewState();
   }
 
@@ -171,6 +207,8 @@ class CompareSlider extends HTMLElement {
   setViewState({ expanded, upscaledOnly } = {}) {
     if (typeof expanded === 'boolean') this.#expanded = expanded;
     if (typeof upscaledOnly === 'boolean') this.#upscaledOnly = upscaledOnly;
+    this.#pixelZoomed = false;
+    this.#hidePixelProbe();
     this.#render();
     if (this.style.display !== 'none') {
       this.#applySize();
@@ -188,6 +226,15 @@ class CompareSlider extends HTMLElement {
     const aspect = natW / natH;
     const fittedW = Math.round(maxH * aspect);
 
+    if (this.#upscaledOnly && this.#pixelZoomed) {
+      this.style.width = '';
+      this.style.maxWidth = '';
+      this.style.maxHeight = '';
+      return;
+    }
+
+    this.style.width = '';
+    this.style.maxHeight = '';
     if (this.#expanded) {
       const expandedNatW = this.#naturalMaxWidth || natW || 0;
       const minExpandedW = Math.max(expandedNatW, fittedW);
@@ -223,6 +270,8 @@ class CompareSlider extends HTMLElement {
 
   #syncModeClass() {
     this.classList.toggle('upscaled-only', this.#upscaledOnly);
+    this.classList.toggle('pixel-zoom', this.#upscaledOnly && this.#pixelZoomed);
+    if (!(this.#upscaledOnly && !this.#pixelZoomed)) this.#hidePixelProbe();
   }
 
   #emitViewState() {
@@ -230,6 +279,7 @@ class CompareSlider extends HTMLElement {
       detail: {
         expanded: this.#expanded,
         upscaledOnly: this.#upscaledOnly,
+        pixelZoomed: this.#pixelZoomed,
       },
     }));
   }
@@ -261,6 +311,73 @@ class CompareSlider extends HTMLElement {
     if (this.#afterCanvas !== canvas) return;
     this.#lazyBlobURL = URL.createObjectURL(blob);
     this.#downloadSrc = this.#lazyBlobURL;
+  }
+
+  #hidePixelProbe() {
+    const probe = this.querySelector('.compare-pixel-probe');
+    if (probe) probe.classList.remove('visible');
+  }
+
+  #updatePixelProbe(e) {
+    if (!(this.#upscaledOnly && !this.#pixelZoomed)) {
+      this.#hidePixelProbe();
+      return;
+    }
+    const afterEl = this.querySelector('.compare-after');
+    const probe = this.querySelector('.compare-pixel-probe');
+    const probeCanvas = this.querySelector('.compare-pixel-probe-canvas');
+    if (!afterEl || !probe || !probeCanvas) return;
+
+    const rect = afterEl.getBoundingClientRect();
+    const relX = e.clientX - rect.left;
+    const relY = e.clientY - rect.top;
+    if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) {
+      this.#hidePixelProbe();
+      return;
+    }
+
+    const natW = afterEl.naturalWidth || afterEl.width || 0;
+    const natH = afterEl.naturalHeight || afterEl.height || 0;
+    if (!natW || !natH || !rect.width || !rect.height) return;
+    const srcX = Math.floor((relX / rect.width) * natW);
+    const srcY = Math.floor((relY / rect.height) * natH);
+
+    const diameter = this.#probeRadius * 2 + 1;
+    const ctx = probeCanvas.getContext('2d');
+    probeCanvas.width = diameter;
+    probeCanvas.height = diameter;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, diameter, diameter);
+
+    const sx = Math.max(0, Math.min(natW - diameter, srcX - this.#probeRadius));
+    const sy = Math.max(0, Math.min(natH - diameter, srcY - this.#probeRadius));
+    const sw = Math.min(diameter, natW - sx);
+    const sh = Math.min(diameter, natH - sy);
+    ctx.drawImage(afterEl, sx, sy, sw, sh, 0, 0, sw, sh);
+
+    // Center marker for the hovered source pixel.
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.lineWidth = 1;
+    const c = this.#probeRadius + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(c - 5, c);
+    ctx.lineTo(c + 5, c);
+    ctx.moveTo(c, c - 5);
+    ctx.lineTo(c, c + 5);
+    ctx.stroke();
+
+    const dx = 18;
+    const dy = 18;
+    const bubbleSize = diameter + 2;
+    let left = e.clientX + dx;
+    let top = e.clientY + dy;
+    if (left + bubbleSize > window.innerWidth - 8) left = e.clientX - bubbleSize - dx;
+    if (top + bubbleSize > window.innerHeight - 8) top = e.clientY - bubbleSize - dy;
+    if (left < 8) left = 8;
+    if (top < 8) top = 8;
+    probe.style.left = `${left}px`;
+    probe.style.top = `${top}px`;
+    probe.classList.add('visible');
   }
 
   #render() {
@@ -326,11 +443,58 @@ class CompareSlider extends HTMLElement {
         .compare .compare-toolbar button:hover {
           background: rgba(0,0,0,0.85); border-color: rgba(255,255,255,0.5);
         }
-        .compare.upscaled-only { cursor: default; }
+        .compare.upscaled-only { cursor: zoom-in; }
+        .compare.upscaled-only.pixel-zoom {
+          position: fixed;
+          inset: 0;
+          z-index: 1000;
+          cursor: zoom-out;
+          overflow: auto;
+          max-width: none;
+          max-height: none;
+          width: 100vw;
+          height: 100vh;
+          border-radius: 0;
+        }
+        .compare.upscaled-only.pixel-zoom .compare-toolbar {
+          position: sticky;
+          top: 10px;
+          bottom: auto;
+          left: 100%;
+          transform: translateX(calc(-100% - 10px));
+          width: max-content;
+        }
+        .compare.upscaled-only.pixel-zoom .compare-after {
+          width: auto;
+          max-width: none;
+          height: auto;
+        }
         .compare.upscaled-only .compare-before-wrap,
         .compare.upscaled-only .compare-handle,
         .compare.upscaled-only .compare-label-before {
           display: none;
+        }
+        .compare .compare-pixel-probe {
+          position: fixed;
+          width: 115px;
+          height: 115px;
+          border-radius: 50%;
+          border: 1px solid rgba(255,255,255,0.9);
+          box-shadow: 0 2px 10px rgba(0,0,0,0.45);
+          overflow: hidden;
+          pointer-events: none;
+          z-index: 20;
+          display: none;
+          background: #111;
+        }
+        .compare .compare-pixel-probe.visible {
+          display: block;
+        }
+        .compare .compare-pixel-probe-canvas {
+          width: 115px;
+          height: 115px;
+          image-rendering: pixelated;
+          display: block;
         }
       </style>
       ${afterTag}
@@ -345,6 +509,9 @@ class CompareSlider extends HTMLElement {
         <button type="button" class="compare-open-btn">Open in Tab</button>
         <button type="button" class="compare-expand-btn">${expandLabel}</button>
         <button type="button" class="compare-download-btn"><i class="fas fa-download"></i> Download</button>
+      </div>
+      <div class="compare-pixel-probe" aria-hidden="true">
+        <canvas class="compare-pixel-probe-canvas" width="115" height="115"></canvas>
       </div>
     `);
     if (cm) this.#drawCanvasSources();

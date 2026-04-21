@@ -5,17 +5,16 @@
 
 export const UPSCALER_MODELS = [
   { url: 'models/1x-Kim2091-DeJpeg-v0.onnx', scale: 1, range: 1, label: 'Kim2091 DeJpeg', sizeMB: 9.2 },
+  { url: 'models/1x-ITF-SkinDiffDetail-Lite-v1.onnx', scale: 1, range: 1, label: 'SkinDiffDetail Lite', sizeMB: 20 },
   { url: 'models/2xParagonSR_Nano_gan_op18_fp32.onnx', scale: 2, range: 1, label: 'ParagonSR Nano GAN', sizeMB: 0.7 },
+
+  
   { url: 'models/4x-UpdraftTiny.onnx', scale: 4, range: 255, label: 'Updraft Tiny (RMBN)', sizeMB: 0.6 },
   { url: 'models/4x-UpdraftLightweight.onnx', scale: 4, range: 255, label: 'Updraft Lightweight (SPAN-like)', sizeMB: 0.8 },
   { url: 'models/4x-UpdraftMidweight.onnx', scale: 4, range: 255, label: 'Updraft Midweight (SPAN-like)', sizeMB: 1.2 },
-  // { url: 'models/4x-UpdraftMidweight_V2.onnx', scale: 4, range: 255, label: 'Updraft Midweight V2 (SPAN-like)', sizeMB: 1.4 },
-  // { url: 'models/4x-UpdraftMidweight_V3.onnx', scale: 4, range: 255, label: 'Updraft Midweight V3 (SPAN-like)', sizeMB: 1.4 },
-  // { url: 'models/4x-UpdraftMidweight_V4.onnx', scale: 4, range: 255, label: 'Updraft Midweight V4 (SPAN-like)', sizeMB: 1.4 },
-  // { url: 'models/4x-UpdraftMidweight_V4_SOFT.onnx', scale: 4, range: 255, label: 'Updraft Midweight V4 Soft (SPAN-like)', sizeMB: 1.4 },
-  // { url: 'models/4x-UpdraftMidweight_V5.onnx', scale: 4, range: 255, label: 'Updraft Midweight V5 (SPAN-like)', sizeMB: 1.4 },
-  // { url: 'models/4x-UpdraftMidweight_V6.onnx', scale: 4, range: 255, label: 'Updraft Midweight V6 (SPAN-like)', sizeMB: 1.4 },
-  // { url: 'models/4x-UpdraftMidweight_V7.onnx', scale: 4, range: 255, label: 'Updraft Midweight V7 (SPAN-like)', sizeMB: 1.4 },
+  { url: 'models/4x-UpdraftMidweight_V12.onnx', scale: 4, range: 255, label: 'Updraft Midweight V2 (SPAN-like)', sizeMB: 1.3 },
+  { url: 'models/4x-UpdraftMidweight_L_3.onnx', scale: 4, range: 255, label: 'Updraft Midweight L (SPAN-like)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_L_SE_S_5.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE (SPAN-faithful)', sizeMB: 1.8 },
 
   { url: 'models/4x-ClearRealityV1.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.8 },
   { url: 'models/4xPurePhoto-Span.onnx', scale: 4, label: 'PurePhoto (SPAN)', sizeMB: 1.7 },
