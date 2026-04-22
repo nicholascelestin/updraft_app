@@ -16,6 +16,7 @@ export const UPSCALER_MODELS = [
   { url: 'models/4x-UpdraftMidweight_L_3.onnx', scale: 4, range: 255, label: 'Updraft Midweight L (SPAN-like)', sizeMB: 1.8 },
   { url: 'models/4x-UpdraftMidweight_L_SE_S_5.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE (SPAN-faithful)', sizeMB: 1.8 },
   { url: 'models/4x-UpdraftMidweight_L_SE_S_6.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE 247k  (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_L_SE_S_7.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE 300k  (SPAN-faithful)', sizeMB: 1.8 },
 
 
   { url: 'models/4x-ClearRealityV1.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.8 },
@@ -25,13 +26,24 @@ export const UPSCALER_MODELS = [
   { url: 'models/4x-UltraSharpV2.onnx', scale: 4, label: 'UltraSharp V2 (DAT)', sizeMB: 49 },
 ];
 
+export const UPSCALER_RESAMPLER_MODELS = [
+  { url: 'builtin:lanczos-4x', scale: 4, label: 'Lanczos 4x' },
+  { url: 'builtin:bicubic-4x', scale: 4, label: 'Bicubic 4x' },
+];
+
 /**
  * Render <option> elements for a model <select>.
  * @param {typeof UPSCALER_MODELS} [models]
- * @param {{ selected?: string }} [opts] — `selected` is matched against model URL
+ * @param {{ selected?: string, includeResamplers?: boolean }} [opts]
+ *   - `selected` is matched against model URL
+ *   - `includeResamplers` appends built-in non-ONNX upscale methods
  */
-export function modelOptionsHTML(models = UPSCALER_MODELS, { selected } = {}) {
-  return models.map(m => {
+export function modelOptionsHTML(models = UPSCALER_MODELS, { selected, includeResamplers = false } = {}) {
+  const modelList = includeResamplers
+    ? [...models, ...UPSCALER_RESAMPLER_MODELS]
+    : models;
+
+  return modelList.map(m => {
     const attrs = [
       `value="${m.url}"`,
       `data-scale="${m.scale}"`,

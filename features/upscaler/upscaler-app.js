@@ -32,6 +32,7 @@ class UpscalerApp extends HTMLElement {
   }
 
   #q(sel) { return this.querySelector(sel); }
+  #isBuiltInResampler(modelOpt) { return !!modelOpt?.value?.startsWith('builtin:'); }
 
   // --- Pipeline helpers ---
 
@@ -130,6 +131,8 @@ class UpscalerApp extends HTMLElement {
     const stopBtn       = this.#q('.stop-btn');
     const startOverBtn  = this.#q('.startover-btn');
     const modelEl       = this.#q('.model-select');
+    const backendEl     = this.#q('.backend-select');
+    const tileSizeEl    = this.#q('.tilesize-select');
     const outputEl      = this.#q('.output-select');
     const outputLabelsByValue = new Map(Array.from(outputEl.options).map(opt => ([
       opt.value,
@@ -217,6 +220,9 @@ class UpscalerApp extends HTMLElement {
 
       outputEl.value = String(maxOutputScale);
       localStorage.setItem('upscaler_output', outputEl.value);
+      const isBuiltInResampler = this.#isBuiltInResampler(modelEl.selectedOptions[0]);
+      backendEl.disabled = isBuiltInResampler;
+      tileSizeEl.disabled = isBuiltInResampler;
       this.#updateHangWarning();
     };
 
@@ -320,6 +326,10 @@ class UpscalerApp extends HTMLElement {
 
   #updateHangWarning() {
     const modelOpt = this.#q('.model-select').selectedOptions[0];
+    if (this.#isBuiltInResampler(modelOpt)) {
+      this.#q('.hang-warn').classList.remove('visible');
+      return;
+    }
     const sizeMB = parseFloat(modelOpt?.dataset.sizemb) || 0;
     const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const show = sizeMB > 10 && tileSize > 128;
@@ -367,9 +377,55 @@ class UpscalerApp extends HTMLElement {
     return config;
   }
 
+  async #runBuiltInResampleUpscale(inputImage, signal, requestedOutputScale, statusBar, preview, modelUrl) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    const isLanczos = modelUrl === 'builtin:lanczos-4x';
+    const methodLabel = isLanczos ? 'Lanczos' : 'Bicubic';
+    const scale = 4;
+    const outW = inputImage.width * scale;
+    const outH = inputImage.height * scale;
+
+    preview.showDimmedPreview(
+      inputImage,
+      outW,
+      outH,
+      `Upscaling ${inputImage.width}\u00d7${inputImage.height} via ${methodLabel}\u2026`,
+    );
+    statusBar.showProgress(0.25);
+    statusBar.message = `Applying ${methodLabel} resample\u2026`;
+
+    const resultCanvas = document.createElement('canvas');
+    resultCanvas.width = outW;
+    resultCanvas.height = outH;
+    const ctx = resultCanvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = isLanczos ? 'high' : 'medium';
+    ctx.drawImage(inputImage, 0, 0, outW, outH);
+
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+    statusBar.showProgress(1);
+    const outputScale = Math.max(1, Math.min(requestedOutputScale, scale));
+    const canvases = this.#createComparisonCanvases(resultCanvas, inputImage, outputScale);
+    return { ...canvases, scale: outputScale };
+  }
+
   // --- Pipeline branches ---
 
   async #runLocalUpscale(inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor) {
+    const modelOpt = this.#q('.model-select').selectedOptions[0];
+    if (this.#isBuiltInResampler(modelOpt)) {
+      return this.#runBuiltInResampleUpscale(
+        inputImage,
+        signal,
+        requestedOutputScale,
+        statusBar,
+        preview,
+        modelOpt.value,
+      );
+    }
+
     const config = this.#extractConfig();
     if (perfMonitor.visible) perfMonitor.start(config.backend);
     const stepLabel = {
@@ -623,7 +679,7 @@ class UpscalerApp extends HTMLElement {
         <span class="local-controls">
           <label>Model:
             <select class="model-select">
-              ${modelOptionsHTML()}
+              ${modelOptionsHTML(undefined, { includeResamplers: true })}
             </select>
           </label>
           <label>Backend:
