@@ -17,6 +17,16 @@ export const UPSCALER_MODELS = [
   { url: 'models/4x-UpdraftMidweight_L_SE_S_5.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE (SPAN-faithful)', sizeMB: 1.8 },
   { url: 'models/4x-UpdraftMidweight_L_SE_S_6.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE 247k  (SPAN-faithful)', sizeMB: 1.8 },
   { url: 'models/4x-UpdraftMidweight_L_SE_S_7.onnx', scale: 4, range: 255, label: 'Updraft Midweight L SE 300k  (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_PW.onnx', scale: 4, range: 255, label: 'Updraft Midweight PW 89k  (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_PW_2.onnx', scale: 4, range: 255, label: 'Updraft Midweight PW 108k  (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_PW_3.onnx', scale: 4, range: 255, label: 'Updraft Midweight PW 190k  (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_PW_NOAVG.onnx', scale: 4, range: 1, label: 'Updraft Midweight PW NOAVG 100k  (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_PW_NOAVG_2.onnx', scale: 4, range: 1, label: 'Updraft Midweight PW NOAVG 200k  (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_PW_NOAVG_3.onnx', scale: 4, range: 1, label: 'Updraft Midweight PW NOAVG 300k  (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftLightweight_PW_NOAVG.onnx', scale: 4, range: 1, label: 'Updraft Lightweight PW NOAVG 135k  (SPAN-faithful)', sizeMB: 1.8 },
+
+
+
 
 
   { url: 'models/4x-ClearRealityV1.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.8 },

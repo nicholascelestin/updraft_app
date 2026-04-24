@@ -21,11 +21,21 @@ class CompareSlider extends HTMLElement {
   #afterCanvas = null;
   #lazyBlobURL = '';
   #probeRadius = 57;
+  #probeRadiusMin = 16;
+  #probeRadiusMax = 140;
+  #probeRadiusStep = 4;
 
   #onWindowMouseMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
   #onWindowTouchMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
   #onWindowMouseUp = () => { this.#dragging = false; };
   #onWindowTouchEnd = () => { this.#dragging = false; };
+  #onWheel = (e) => {
+    if (!(this.#upscaledOnly && !this.#pixelZoomed && e.shiftKey)) return;
+    e.preventDefault();
+    const nextRadius = this.#probeRadius + (e.deltaY < 0 ? this.#probeRadiusStep : -this.#probeRadiusStep);
+    this.#setProbeRadius(nextRadius);
+    this.#updatePixelProbe(e);
+  };
 
   connectedCallback() {
     this.classList.add('compare');
@@ -88,6 +98,7 @@ class CompareSlider extends HTMLElement {
     this.addEventListener('mouseleave', () => {
       this.#hidePixelProbe();
     });
+    this.addEventListener('wheel', this.#onWheel, { passive: false });
 
     this.#resizeObserver = new ResizeObserver(() => {
       if (this.style.display !== 'none') {
@@ -104,6 +115,7 @@ class CompareSlider extends HTMLElement {
     window.removeEventListener('touchmove', this.#onWindowTouchMove);
     window.removeEventListener('mouseup', this.#onWindowMouseUp);
     window.removeEventListener('touchend', this.#onWindowTouchEnd);
+    this.removeEventListener('wheel', this.#onWheel);
   }
 
   /**
@@ -318,8 +330,28 @@ class CompareSlider extends HTMLElement {
     if (probe) probe.classList.remove('visible');
   }
 
+  #setProbeRadius(nextRadius) {
+    const clamped = Math.max(this.#probeRadiusMin, Math.min(this.#probeRadiusMax, Math.round(nextRadius)));
+    this.#probeRadius = clamped;
+    const diameter = this.#probeRadius * 2 + 1;
+    const probe = this.querySelector('.compare-pixel-probe');
+    const probeCanvas = this.querySelector('.compare-pixel-probe-canvas');
+    if (probe) {
+      probe.style.width = `${diameter}px`;
+      probe.style.height = `${diameter}px`;
+    }
+    if (probeCanvas) {
+      probeCanvas.style.width = `${diameter}px`;
+      probeCanvas.style.height = `${diameter}px`;
+    }
+  }
+
   #updatePixelProbe(e) {
     if (!(this.#upscaledOnly && !this.#pixelZoomed)) {
+      this.#hidePixelProbe();
+      return;
+    }
+    if (e.target?.closest('.compare-toolbar')) {
       this.#hidePixelProbe();
       return;
     }
@@ -366,13 +398,12 @@ class CompareSlider extends HTMLElement {
     ctx.lineTo(c, c + 5);
     ctx.stroke();
 
-    const dx = 18;
-    const dy = 18;
     const bubbleSize = diameter + 2;
-    let left = e.clientX + dx;
-    let top = e.clientY + dy;
-    if (left + bubbleSize > window.innerWidth - 8) left = e.clientX - bubbleSize - dx;
-    if (top + bubbleSize > window.innerHeight - 8) top = e.clientY - bubbleSize - dy;
+    const half = bubbleSize / 2;
+    let left = e.clientX - half;
+    let top = e.clientY - half;
+    if (left + bubbleSize > window.innerWidth - 8) left = window.innerWidth - bubbleSize - 8;
+    if (top + bubbleSize > window.innerHeight - 8) top = window.innerHeight - bubbleSize - 8;
     if (left < 8) left = 8;
     if (top < 8) top = 8;
     probe.style.left = `${left}px`;
@@ -443,7 +474,9 @@ class CompareSlider extends HTMLElement {
         .compare .compare-toolbar button:hover {
           background: rgba(0,0,0,0.85); border-color: rgba(255,255,255,0.5);
         }
-        .compare.upscaled-only { cursor: zoom-in; }
+        .compare.upscaled-only { cursor: none; }
+        .compare.upscaled-only .compare-toolbar { cursor: default; }
+        .compare.upscaled-only .compare-toolbar button { cursor: pointer; }
         .compare.upscaled-only.pixel-zoom {
           position: fixed;
           inset: 0;
@@ -511,9 +544,10 @@ class CompareSlider extends HTMLElement {
         <button type="button" class="compare-download-btn"><i class="fas fa-download"></i> Download</button>
       </div>
       <div class="compare-pixel-probe" aria-hidden="true">
-        <canvas class="compare-pixel-probe-canvas" width="115" height="115"></canvas>
+        <canvas class="compare-pixel-probe-canvas" width="${this.#probeRadius * 2 + 1}" height="${this.#probeRadius * 2 + 1}"></canvas>
       </div>
     `);
+    this.#setProbeRadius(this.#probeRadius);
     if (cm) this.#drawCanvasSources();
   }
 }

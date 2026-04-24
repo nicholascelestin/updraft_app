@@ -588,6 +588,23 @@ class UpscalerApp extends HTMLElement {
           margin-bottom: 0; padding: 0.3rem 0.5rem;
           font-size: 0.85rem; width: auto;
         }
+        upscaler-app select:not([multiple], [size]) {
+          max-width: 100%;
+          padding-left: 0.7rem;
+          padding-right: 2.25rem;
+          padding-inline-start: 0.7rem;
+          padding-inline-end: 2.25rem;
+          background-position: center right 0.7rem;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        upscaler-app .model-select,
+        upscaler-app .pass-all-model,
+        upscaler-app .detector-face-model {
+          width: min(100%, 24rem);
+          max-width: 24rem;
+        }
         upscaler-app .controls button {
           margin-bottom: 0; padding: 0.4rem 0.8rem;
           font-size: 0.85rem; width: auto;
@@ -610,18 +627,53 @@ class UpscalerApp extends HTMLElement {
           margin-bottom: 0.6rem;
         }
         upscaler-app .detector-row {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 0.4rem 0.75rem;
+          display: grid;
+          grid-template-columns:
+            minmax(11rem, 1fr)
+            minmax(17rem, 2.2fr)
+            minmax(13rem, 1.2fr)
+            minmax(14rem, 1.35fr);
+          gap: 0.35rem 0.55rem;
           align-items: center;
+          width: 100%;
+          max-width: none;
+          margin-top: 0.45rem;
+        }
+        upscaler-app .detector-row:first-of-type {
           margin-top: 0;
         }
         upscaler-app .detector-row label {
           margin-bottom: 0;
+          display: grid;
+          grid-template-columns: auto minmax(0, 1fr);
+          align-items: center;
+          column-gap: 0.35rem;
+          font-size: 0.85rem;
+          min-height: 2rem;
+          width: 100%;
+        }
+        upscaler-app .detector-row .check-control {
           display: inline-flex;
           align-items: center;
           gap: 0.35rem;
-          font-size: 0.85rem;
+          width: auto;
+        }
+        upscaler-app .detector-row .range-control {
+          grid-template-columns: auto auto;
+        }
+        upscaler-app .detector-row .range-field {
+          display: inline-grid;
+          grid-auto-flow: column;
+          align-items: center;
+          column-gap: 0.3rem;
+        }
+        upscaler-app .detector-row .range-input {
+          width: 7rem;
+          vertical-align: middle;
+        }
+        upscaler-app .detector-row .range-value {
+          min-width: 4ch;
+          font-variant-numeric: tabular-nums;
         }
         upscaler-app .detector-row input,
         upscaler-app .detector-row select {
@@ -629,6 +681,18 @@ class UpscalerApp extends HTMLElement {
         }
         upscaler-app .detector-row input[type="checkbox"] {
           margin-top: 0;
+        }
+        upscaler-app .detector-row .model-control select {
+          width: 100%;
+          min-width: 0;
+        }
+        upscaler-app .detector-row .model-control {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        @media (max-width: 980px) {
+          upscaler-app .detector-row {
+            grid-template-columns: 1fr;
+          }
         }
         upscaler-app .hang-warn {
           display: none;
@@ -748,50 +812,50 @@ class UpscalerApp extends HTMLElement {
       <details class="passes-panel">
         <summary><i class="fas fa-user-check"></i> Additional Passes</summary>
         <div class="detector-row">
-          <label>
+          <label class="check-control">
             <input class="pass-all-enabled" type="checkbox">
             All (full image blend)
           </label>
-          <label title="Blend opacity of the secondary full-image pass over the base upscale">
-            Blend:
-            <span style="display:inline-flex;align-items:center;gap:0.3rem">
-              <input class="pass-all-blend" type="range" min="0" max="1" step="0.05" value="0.40" style="width:7rem;vertical-align:middle">
-              <span class="pass-all-blend-val" style="min-width:4ch;font-variant-numeric:tabular-nums">0.40</span>
-            </span>
-          </label>
-          <label>All model:
-            <select class="pass-all-model">
+          <label class="model-control">
+            <select class="pass-all-model" aria-label="All pass model">
               ${modelOptionsHTML()}
             </select>
           </label>
+          <label class="range-control" title="Blend opacity of the secondary full-image pass over the base upscale">
+            Blend:
+            <span class="range-field">
+              <input class="pass-all-blend range-input" type="range" min="0" max="1" step="0.05" value="0.40">
+              <span class="pass-all-blend-val range-value">0.40</span>
+            </span>
+          </label>
         </div>
         <div class="detector-row">
-          <label>
+          <label class="check-control">
             <input class="detector-face-enabled" type="checkbox">
             Faces (YuNet)
+          </label>
+          <label class="model-control">
+            <select class="detector-face-model" aria-label="Face pass model">
+              ${modelOptionsHTML(undefined, { selected: 'models/RMBN_M4C8_FACES_x4.onnx' })}
+            </select>
+          </label>
+          <label class="range-control" title="Blend opacity of the face patch over the base upscale (1 = full replace, lower = transparent blend)">
+            Blend:
+            <span class="range-field">
+              <input class="detector-face-blend range-input" type="range" min="0" max="1" step="0.05" value="0.65">
+              <span class="detector-face-blend-val range-value">0.65</span>
+            </span>
           </label>
           <label hidden>Padding:
             <input class="detector-face-padding" type="number" min="0" max="512" step="1" value="20" style="width:7ch">
             px
           </label>
-          <label title="Minimum face detection confidence">
+          <label class="range-control" title="Minimum face detection confidence">
             Confidence Threshold:
-            <span style="display:inline-flex;align-items:center;gap:0.3rem">
-              <input class="detector-face-score" type="range" min="0.3" max="0.95" step="0.01" value="0.70" style="width:7rem;vertical-align:middle">
-              <span class="detector-face-score-val" style="min-width:4ch;font-variant-numeric:tabular-nums">0.70</span>
+            <span class="range-field">
+              <input class="detector-face-score range-input" type="range" min="0.3" max="0.95" step="0.01" value="0.70">
+              <span class="detector-face-score-val range-value">0.70</span>
             </span>
-          </label>
-          <label title="Blend opacity of the face patch over the base upscale (1 = full replace, lower = transparent blend)">
-            Blend:
-            <span style="display:inline-flex;align-items:center;gap:0.3rem">
-              <input class="detector-face-blend" type="range" min="0" max="1" step="0.05" value="0.65" style="width:7rem;vertical-align:middle">
-              <span class="detector-face-blend-val" style="min-width:4ch;font-variant-numeric:tabular-nums">0.65</span>
-            </span>
-          </label>
-          <label>Face model:
-            <select class="detector-face-model">
-              ${modelOptionsHTML(undefined, { selected: 'models/RMBN_M4C8_FACES_x4.onnx' })}
-            </select>
           </label>
         </div>
       </details>
