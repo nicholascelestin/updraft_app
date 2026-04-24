@@ -97,10 +97,12 @@ const tiledUpscaleStep = {
     const { modelUrl, scale, modelValueRange, backend, tileSize, profile } = ctx.config;
     const engine = ctx.pool.getUpscaler('base', { modelUrl, scale, modelValueRange, backend, profile });
     emitStage(cb, 'tiledUpscale', 'loading', { message: 'Loading base model…' });
+    const tLoad = performance.now();
     await engine.loadModel(backend, (frac, msg) => {
       cb.onProgress?.(frac, msg);
       emitStage(cb, 'tiledUpscale', 'loading', { progress: frac, message: msg });
     });
+    const modelLoadMs = Number((performance.now() - tLoad).toFixed(1));
     emitStage(cb, 'tiledUpscale', 'running', { message: 'Running base upscale pass…' });
     const { canvas, perf, ortProfile } = await engine.upscale(ctx.image, tileSize, {
       onTile: (info) => cb.onTile?.({ ...info, step: 'tiledUpscale' }),
@@ -112,7 +114,7 @@ const tiledUpscaleStep = {
       scale: engine.scale,
       perf,
       ortProfile,
-      stepPerf: { ...(ctx.stepPerf || {}), tiledUpscale: perf },
+      stepPerf: { ...(ctx.stepPerf || {}), tiledUpscale: { ...perf, modelLoadMs } },
     };
   },
 };
@@ -130,9 +132,11 @@ const blendAllStep = {
       backend: passBackend,
     });
     emitStage(cb, 'blendAll', 'loading', { message: 'Loading all-pass model…' });
+    const tLoad = performance.now();
     await engine.loadModel(passBackend, (progress, message) => {
       emitStage(cb, 'blendAll', 'loading', { progress, message });
     });
+    const modelLoadMs = Number((performance.now() - tLoad).toFixed(1));
     emitStage(cb, 'blendAll', 'running', { message: 'Running all-pass tiled blend…' });
 
     const { canvas: overlayRaw, perf } = await engine.upscale(ctx.source, tileSize, {
@@ -148,7 +152,11 @@ const blendAllStep = {
       overlayCanvas.getContext('2d').drawImage(overlayRaw, 0, 0, baseCanvas.width, baseCanvas.height);
     }
     baseCanvas = blendCanvas(baseCanvas, overlayCanvas, all.blendOpacity);
-    return { ...ctx, image: baseCanvas, stepPerf: { ...(ctx.stepPerf || {}), blendAll: perf } };
+    return {
+      ...ctx,
+      image: baseCanvas,
+      stepPerf: { ...(ctx.stepPerf || {}), blendAll: { ...perf, modelLoadMs } },
+    };
   },
 };
 
@@ -159,9 +167,11 @@ const detectFacesStep = {
     const { backend, face } = ctx.config;
     const detector = ctx.pool.getDetector('face-detector', backend);
     emitStage(cb, 'detectFaces', 'loading', { message: 'Loading face detector…' });
+    const tLoad = performance.now();
     await detector.loadModel('face-yunet', backend, (progress, message) => {
       emitStage(cb, 'detectFaces', 'loading', { progress, message });
     });
+    const modelLoadMs = Number((performance.now() - tLoad).toFixed(1));
     emitStage(cb, 'detectFaces', 'running', { message: 'Detecting faces…' });
     const tDetect = performance.now();
     const faces = await detector.detectFaces(ctx.source, {
@@ -170,6 +180,7 @@ const detectFacesStep = {
       signal: cb.signal,
     });
     const detectPerf = {
+      modelLoadMs,
       total: performance.now() - tDetect,
       detections: faces.length,
     };
@@ -199,9 +210,11 @@ const enhanceFacesStep = {
       backend: faceBackend,
     });
     emitStage(cb, 'enhanceFaces', 'loading', { message: 'Loading face enhancer model…' });
+    const tLoad = performance.now();
     await engine.loadModel(faceBackend, (progress, message) => {
       emitStage(cb, 'enhanceFaces', 'loading', { progress, message });
     });
+    const modelLoadMs = Number((performance.now() - tLoad).toFixed(1));
     emitStage(cb, 'enhanceFaces', 'running', { message: 'Enhancing detected faces…' });
 
     const srcW = source.naturalWidth ?? source.width;
@@ -209,7 +222,7 @@ const enhanceFacesStep = {
     const faces = ctx.detections.face || [];
     const configuredFaceTileSize = Number.isFinite(face.tileSize) ? face.tileSize : ctx.config.tileSize;
     const agg = {
-      setup: 0, extract: 0, inference: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, total: 0, tiles: 0,
+      setup: 0, extract: 0, inference: 0, inferenceEstimated: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, total: 0, tiles: 0, modelLoadMs,
     };
 
     for (let faceIndex = 0; faceIndex < faces.length; faceIndex++) {
@@ -245,6 +258,7 @@ const enhanceFacesStep = {
       agg.setup += perf.setup;
       agg.extract += perf.extract;
       agg.inference += perf.inference;
+      agg.inferenceEstimated += perf.inferenceEstimated || 0;
       agg.readback += perf.readback;
       agg.gpuRender += perf.gpuRender;
       agg.writeTile += perf.writeTile;
@@ -325,6 +339,70 @@ function emitStage(cb, step, phase, details = {}) {
   cb.onStage?.({ step, phase, ...details });
 }
 
+const UPSCALE_PERF_KEYS = [
+  'setup',
+  'extract',
+  'inference',
+  'inferenceEstimated',
+  'readback',
+  'gpuRender',
+  'writeTile',
+  'dispose',
+];
+
+function getImageDims(image) {
+  return {
+    width: image?.naturalWidth ?? image?.videoWidth ?? image?.width ?? 0,
+    height: image?.naturalHeight ?? image?.videoHeight ?? image?.height ?? 0,
+  };
+}
+
+function looksLikeUpscalePerf(perf) {
+  return perf && typeof perf === 'object' && (
+    Number.isFinite(perf.inference) ||
+    Number.isFinite(perf.setup) ||
+    Number.isFinite(perf.gpuRender)
+  );
+}
+
+function aggregateSessionPerf(stepPerf, ctx, input, config, totalMs) {
+  const src = getImageDims(input);
+  const out = getImageDims(ctx.image);
+  const session = {
+    setup: 0,
+    extract: 0,
+    inference: 0,
+    inferenceEstimated: 0,
+    readback: 0,
+    gpuRender: 0,
+    writeTile: 0,
+    dispose: 0,
+    modelLoad: 0,
+    total: totalMs,
+    tiles: 0,
+    tileSize: Number.isFinite(config.tileSize) ? config.tileSize : 0,
+    srcW: src.width,
+    srcH: src.height,
+    outW: out.width,
+    outH: out.height,
+    pipeline: config.backend === 'webgpu' ? 'gpu' : 'cpu',
+  };
+
+  for (const { perf } of Object.values(stepPerf)) {
+    if (!perf) continue;
+    if (Number.isFinite(perf.modelLoadMs)) session.modelLoad += perf.modelLoadMs;
+    if (!looksLikeUpscalePerf(perf)) continue;
+    if (Number.isFinite(perf.tiles)) session.tiles += perf.tiles;
+    if (perf.pipeline === 'gpu-gpu') session.pipeline = 'gpu-gpu';
+    else if (perf.pipeline === 'gpu' && session.pipeline !== 'gpu-gpu') session.pipeline = 'gpu';
+    for (const key of UPSCALE_PERF_KEYS) {
+      if (Number.isFinite(perf[key])) session[key] += perf[key];
+    }
+  }
+
+  return session;
+}
+
 async function runSteps(steps, pool, input, config, cb = {}) {
   let ctx = {
     image: input,
@@ -378,7 +456,8 @@ async function runSteps(steps, pool, input, config, cb = {}) {
     durationMs: totalMs,
     output: getImageSize(ctx.image),
   });
-  return { ...ctx, pipelinePerf: { totalMs, steps: stepPerf } };
+  const sessionPerf = aggregateSessionPerf(stepPerf, ctx, input, config, totalMs);
+  return { ...ctx, perf: sessionPerf, pipelinePerf: { totalMs, steps: stepPerf } };
 }
 
 // ---------------------------------------------------------------------------

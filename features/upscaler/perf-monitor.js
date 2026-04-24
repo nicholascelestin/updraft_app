@@ -187,6 +187,7 @@ class PerfMonitor extends HTMLElement {
       const p = r.perf;
       const pipelineLabel = p.pipeline === 'gpu-gpu' ? 'GPU\u2192GPU' : p.pipeline === 'gpu' ? 'GPU' : 'CPU';
       const tileSizeLabel = p.tileSize > 0 ? p.tileSize + 'px' : 'full';
+      const isGpuPipeline = p.pipeline === 'gpu' || p.pipeline === 'gpu-gpu';
       resultsHtml = `
         <div class="perf-divider"></div>
         <div class="perf-section-title">Session Summary</div>
@@ -194,9 +195,10 @@ class PerfMonitor extends HTMLElement {
         <div class="perf-row"><span class="perf-label">Resolution</span><span class="perf-value">${p.srcW}\u00d7${p.srcH} \u2192 ${p.outW}\u00d7${p.outH}</span></div>
         <div class="perf-row"><span class="perf-label">Tiles</span><span class="perf-value">${p.tiles} @ ${tileSizeLabel}</span></div>
         <div class="perf-row"><span class="perf-label">Total</span><span class="perf-value em">${fmtMs(p.total)}</span></div>
+        ${p.modelLoad > 0 ? `<div class="perf-row sub"><span class="perf-label">Model load</span><span class="perf-value">${fmtMs(p.modelLoad)}</span></div>` : ''}
         <div class="perf-row sub"><span class="perf-label">Setup</span><span class="perf-value">${fmtMs(p.setup)}</span></div>
         <div class="perf-row sub"><span class="perf-label">Extract</span><span class="perf-value">${fmtMs(p.extract)}</span></div>
-        <div class="perf-row sub"><span class="perf-label">Inference</span><span class="perf-value">${fmtMs(p.inference)}</span></div>
+        <div class="perf-row sub"><span class="perf-label">${isGpuPipeline ? 'Inference est.' : 'Inference'}</span><span class="perf-value">${fmtMs(isGpuPipeline ? (p.inferenceEstimated || 0) : p.inference)}</span></div>
         ${p.readback > 0 ? `<div class="perf-row sub"><span class="perf-label">Readback</span><span class="perf-value">${fmtMs(p.readback)}</span></div>` : ''}
         ${p.gpuRender > 0 ? `<div class="perf-row sub"><span class="perf-label">GPU render</span><span class="perf-value">${fmtMs(p.gpuRender)}</span></div>` : ''}
         ${p.writeTile > 0 ? `<div class="perf-row sub"><span class="perf-label">Write tiles</span><span class="perf-value">${fmtMs(p.writeTile)}</span></div>` : ''}

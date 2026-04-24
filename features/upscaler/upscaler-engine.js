@@ -201,7 +201,17 @@ export class UpscalerEngine {
   async upscale(img, tileSize, { onTile, signal } = {}) {
     if (!this.#session) throw new Error('Model not loaded — call loadModel() first');
 
-    const perf = { setup: 0, extract: 0, inference: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, total: 0 };
+    const perf = {
+      setup: 0,
+      extract: 0,
+      inference: 0,
+      inferenceEstimated: 0,
+      readback: 0,
+      gpuRender: 0,
+      writeTile: 0,
+      dispose: 0,
+      total: 0,
+    };
     const tTotal = performance.now();
 
     const scale = this.#scale;
@@ -233,6 +243,9 @@ export class UpscalerEngine {
 
     if (this.#profiling) try { this.#session.startProfiling(); } catch {}
 
+    let firstInferAt = 0;
+    let callbackMs = 0;
+    let yieldMs = 0;
     for (let i = 0; i < tiles.length; i++) {
       if (signal?.aborted) throw new DOMException('Upscale cancelled', 'AbortError');
       if (useGpu && (this.#gpuRenderer?.lost || this.#gpuExtractor?.lost)) {
@@ -247,6 +260,7 @@ export class UpscalerEngine {
       perf.extract += extractMs;
 
       const tInfer = performance.now();
+      if (!firstInferAt) firstInferAt = tInfer;
       const results = await this.#session.run({ [inputName]: tensor });
       const inferenceMs = performance.now() - tInfer;
       perf.inference += inferenceMs;
@@ -288,14 +302,18 @@ export class UpscalerEngine {
       perf.dispose += disposeMs;
 
       const crop = overlapCrop(tx * scale, ty * scale, outTW, outTH, outW, outH, overlap * scale);
+      const tCallback = performance.now();
       onTile?.({
         index: i, total: tiles.length, tileMs: inferenceMs, tilePixels: tw * th,
         canvas: outCanvas, outX: tx * scale, outY: ty * scale, outW: outTW, outH: outTH,
         crop,
         perf: { extractMs, inferenceMs, readbackMs, renderMs, disposeMs },
       });
+      callbackMs += performance.now() - tCallback;
 
+      const tYield = performance.now();
       await yieldToEventLoop();
+      yieldMs += performance.now() - tYield;
     }
 
     if (useGpu) {
@@ -303,7 +321,20 @@ export class UpscalerEngine {
       await this.#waitForGpuWork();
     }
 
-    perf.total = performance.now() - tTotal;
+    const tDone = performance.now();
+    perf.total = tDone - tTotal;
+    if (useGpu && firstInferAt) {
+      const gpuSpanMs = tDone - firstInferAt;
+      const otherTrackedMs =
+        perf.extract +
+        perf.gpuRender +
+        perf.readback +
+        perf.writeTile +
+        perf.dispose +
+        callbackMs +
+        yieldMs;
+      perf.inferenceEstimated = Math.max(0, gpuSpanMs - otherTrackedMs);
+    }
 
     let ortProfile = null;
     if (this.#profiling) {
