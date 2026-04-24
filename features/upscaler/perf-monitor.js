@@ -241,7 +241,7 @@ class PerfMonitor extends HTMLElement {
     morph(this, `
       <style>
         .perf-monitor {
-          display: none; position: fixed; top: 12px; right: 12px; z-index: 9999;
+          display: none; position: fixed; bottom: 12px; right: 12px; z-index: 9999;
           background: rgba(0,0,0,0.85); border: 1px solid #333; border-radius: 6px;
           padding: 10px 14px; font-family: 'SF Mono', 'Consolas', monospace; font-size: 0.72rem;
           color: #ccc; min-width: 240px; max-height: calc(100vh - 24px); overflow-y: auto;
