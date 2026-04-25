@@ -6,6 +6,14 @@
 import { morph } from 'lib/morph';
 import { Pipeline } from './upscale-pipeline.js';
 import { modelOptionsHTML } from './model-registry.js';
+import {
+  deleteCustomModelByUrl,
+  getCustomModelByUrl,
+  getUploadCustomOptionHTML,
+  listCustomModels,
+  saveCustomModel,
+} from './custom-model-store.js';
+import { inspectCustomModelFile } from './custom-model-inspector.js';
 import 'components/image-drop-zone';
 import 'components/status-bar';
 import 'components/image-cropper';
@@ -13,17 +21,31 @@ import 'components/compare-slider';
 import './upscale-preview.js';
 import './perf-monitor.js';
 
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+const UPLOAD_CUSTOM_VALUE = '__upload_custom__';
+
 class UpscalerApp extends HTMLElement {
   #loadedImage = null;
   #running = false;
   #generation = 0;
   #viewState = { expanded: false, upscaledOnly: false };
+  #customModels = [];
 
   #pipeline = new Pipeline();
   #abortController = null;
 
   connectedCallback() {
     this.#render();
+    this.#customModels = listCustomModels();
+    this.#refreshModelSelectOptions(localStorage.getItem('upscaler_model') || undefined);
     this.#setupPersistence();
     this.#setupModeSwitch();
     this.#setupViewStateSync();
@@ -33,6 +55,221 @@ class UpscalerApp extends HTMLElement {
 
   #q(sel) { return this.querySelector(sel); }
   #isBuiltInResampler(modelOpt) { return !!modelOpt?.value?.startsWith('builtin:'); }
+
+  #formatUpscaleErrorMessage(error) {
+    const raw = error?.message || String(error || 'Unknown error');
+    const isReshapeWindowError =
+      /reshape_helper\.h/i.test(raw) ||
+      /input_shape_size == size/i.test(raw) ||
+      /cannot be reshaped to the requested shape/i.test(raw);
+    if (!isReshapeWindowError) return raw;
+
+    const modelOpt = this.#q('.model-select')?.selectedOptions?.[0];
+    const layout = (modelOpt?.dataset?.layout || 'nchw').toUpperCase();
+    const multiple = parseInt(modelOpt?.dataset?.multipleof, 10) || 1;
+    const altLayout = layout === 'NHWC' ? 'NCHW' : 'NHWC';
+    const parseShape = (text) => String(text || '')
+      .split(',')
+      .map((v) => parseInt(v.trim(), 10))
+      .filter(Number.isFinite);
+    const shapeMatch = raw.match(/Input shape:\{([^}]*)\}.*requested shape:\{([^}]*)\}/i);
+    const inputDims = shapeMatch ? parseShape(shapeMatch[1]) : [];
+    const requestedDims = shapeMatch ? parseShape(shapeMatch[2]) : [];
+
+    let inferredMultiple = 0;
+    const pow2Requested = requestedDims.filter((d) => d > 1 && d <= 256 && (d & (d - 1)) === 0);
+    if (pow2Requested.length) {
+      inferredMultiple = Math.max(...pow2Requested);
+    }
+    if (inputDims.length > 0 && requestedDims.length > 1) {
+      const likelyGroup = requestedDims[1];
+      if (Number.isFinite(likelyGroup) && likelyGroup > 1 && inputDims[0] % likelyGroup !== 0) {
+        inferredMultiple = Math.max(inferredMultiple, likelyGroup);
+      }
+    }
+
+    const suggestedMultiple = Math.max(multiple > 1 ? multiple : 8, inferredMultiple || 0);
+    const specificHint = inferredMultiple > 8
+      ? ` Based on the reported reshape, try Multiple-of ${inferredMultiple} first.`
+      : '';
+    return `Model reshape failed (likely window-size constraint). Try setting Multiple-of to ${suggestedMultiple} (common values: 8/16/32/64) and/or switch Layout to ${altLayout}.${specificHint} Raw error: ${raw}`;
+  }
+
+  #getCustomModelOptionsHTML(selected) {
+    if (!this.#customModels.length) return '';
+    return this.#customModels.map((model) => {
+      const attrs = [
+        `value="${model.url}"`,
+        `data-scale="${model.scale}"`,
+        `data-range="${model.range || 1}"`,
+        `data-layout="${model.layout || 'nchw'}"`,
+        `data-multipleof="${model.multipleOf || 1}"`,
+        `data-sizemb="${model.sizeMB}"`,
+      ];
+      if (model.url === selected) attrs.push('selected');
+      const sizeStr = model.sizeMB != null ? ` (~${model.sizeMB}MB)` : '';
+      return `<option ${attrs.join(' ')}>${escapeHtml(model.label)}${sizeStr}</option>`;
+    }).join('\n              ');
+  }
+
+  #refreshModelSelectOptions(selected) {
+    const modelEl = this.#q('.model-select');
+    if (!modelEl) return;
+    modelEl.innerHTML = [
+      modelOptionsHTML(undefined, { selected, includeResamplers: true }),
+      this.#getCustomModelOptionsHTML(selected),
+      getUploadCustomOptionHTML(),
+    ].filter(Boolean).join('\n              ');
+    if (selected) modelEl.value = selected;
+    if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
+  }
+
+  async #showCustomModelUploadModal(defaultScale = 4) {
+    const dialog = this.#q('.custom-model-dialog');
+    const form = this.#q('.custom-model-form');
+    const fileInput = this.#q('.custom-model-file');
+    const labelInput = this.#q('.custom-model-label');
+    const scaleInput = this.#q('.custom-model-scale');
+    const rangeInput = this.#q('.custom-model-range');
+    const layoutInput = this.#q('.custom-model-layout');
+    const multipleInput = this.#q('.custom-model-multiple');
+    const sizeLabel = this.#q('.custom-model-size');
+    const detectLabel = this.#q('.custom-model-detected');
+    const errorLabel = this.#q('.custom-model-error');
+    const saveBtn = this.#q('.custom-model-save-btn');
+    const cancelBtn = this.#q('.custom-model-cancel-btn');
+
+    if (!dialog || !form || !fileInput || !labelInput || !scaleInput || !rangeInput || !layoutInput || !multipleInput || !sizeLabel || !detectLabel || !errorLabel || !saveBtn || !cancelBtn) {
+      throw new Error('Custom model upload UI is unavailable.');
+    }
+
+    fileInput.value = '';
+    labelInput.value = '';
+    scaleInput.value = String(defaultScale);
+    rangeInput.value = '1';
+    layoutInput.value = 'nchw';
+    multipleInput.value = '1';
+    errorLabel.textContent = '';
+    sizeLabel.textContent = 'Model size: -';
+    detectLabel.textContent = 'Auto-detect: waiting for model file…';
+    saveBtn.disabled = false;
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let inspectSeq = 0;
+      const cleanup = () => {
+        form.removeEventListener('submit', onSubmit);
+        fileInput.removeEventListener('change', onFileChange);
+        cancelBtn.removeEventListener('click', onCancel);
+        dialog.removeEventListener('cancel', onCancel);
+        dialog.removeEventListener('close', onClose);
+      };
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(result);
+      };
+      const onFileChange = () => {
+        const seq = ++inspectSeq;
+        const file = fileInput.files?.[0];
+        if (!file) {
+          sizeLabel.textContent = 'Model size: -';
+          detectLabel.textContent = 'Auto-detect: waiting for model file…';
+          return;
+        }
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+        sizeLabel.textContent = `Model size: ~${sizeMB} MB`;
+        errorLabel.textContent = '';
+        if (!labelInput.value.trim()) {
+          labelInput.value = file.name.replace(/\.onnx$/i, '');
+        }
+        detectLabel.textContent = 'Auto-detect: inspecting ONNX metadata…';
+        saveBtn.disabled = true;
+        inspectCustomModelFile(file, {
+          onProgress: (message) => {
+            if (seq !== inspectSeq || settled) return;
+            detectLabel.textContent = `Auto-detect: ${message}`;
+          },
+        }).then((result) => {
+          if (seq !== inspectSeq || settled) return;
+          if (Number.isFinite(result?.scale)) {
+            scaleInput.value = String(result.scale);
+          }
+          rangeInput.value = String(result?.range === 255 ? 255 : 1);
+          layoutInput.value = result?.layout === 'nhwc' ? 'nhwc' : 'nchw';
+          if (Number.isFinite(result?.multipleOf)) {
+            multipleInput.value = String(Math.max(1, result.multipleOf));
+          }
+          const parts = [];
+          if (result?.layout) parts.push(`layout ${result.layout.toUpperCase()}`);
+          if (Number.isFinite(result?.multipleOf)) {
+            const suffix = result?.multipleOfSource === 'probe' ? ' (probed)' : '';
+            parts.push(`multiple ${result.multipleOf}${suffix}`);
+          }
+          if (result?.inputType) parts.push(`input ${result.inputType}`);
+          if (Number.isFinite(result?.scale)) {
+            const suffix = result?.scaleSource === 'probe' ? ' (probed)' : result?.scaleSource === 'metadata' ? ' (metadata)' : ' (default)';
+            parts.push(`scale ${result.scale}x${suffix}`);
+          }
+          detectLabel.textContent = parts.length
+            ? `Auto-detected: ${parts.join(', ')}.`
+            : 'Auto-detect finished with defaults.';
+          if (Array.isArray(result?.notes) && result.notes.length) {
+            errorLabel.textContent = result.notes[0];
+          }
+          saveBtn.disabled = false;
+        }).catch((err) => {
+          if (seq !== inspectSeq || settled) return;
+          detectLabel.textContent = 'Auto-detect failed; using defaults.';
+          errorLabel.textContent = err?.message || 'Could not inspect model metadata.';
+          saveBtn.disabled = false;
+        });
+      };
+      const onCancel = (e) => {
+        e?.preventDefault?.();
+        if (dialog.open) dialog.close();
+        finish(null);
+      };
+      const onClose = () => finish(null);
+      const onSubmit = async (e) => {
+        e.preventDefault();
+        errorLabel.textContent = '';
+        const file = fileInput.files?.[0];
+        if (!file) {
+          errorLabel.textContent = 'Choose an ONNX model file first.';
+          return;
+        }
+        if (!/\.onnx$/i.test(file.name)) {
+          errorLabel.textContent = 'Only .onnx files are supported.';
+          return;
+        }
+        saveBtn.disabled = true;
+        try {
+          const model = await saveCustomModel({
+            file,
+            label: labelInput.value,
+            scale: scaleInput.value,
+            range: rangeInput.value,
+            layout: layoutInput.value,
+            multipleOf: multipleInput.value,
+          });
+          if (dialog.open) dialog.close();
+          finish(model);
+        } catch (err) {
+          errorLabel.textContent = err?.message || 'Failed to save model.';
+          saveBtn.disabled = false;
+        }
+      };
+
+      form.addEventListener('submit', onSubmit);
+      fileInput.addEventListener('change', onFileChange);
+      cancelBtn.addEventListener('click', onCancel);
+      dialog.addEventListener('cancel', onCancel);
+      dialog.addEventListener('close', onClose);
+      dialog.showModal();
+    });
+  }
 
   // --- Pipeline helpers ---
 
@@ -77,7 +314,6 @@ class UpscalerApp extends HTMLElement {
 
     persist('.runpod-endpoint', 'upscaler_runpod_endpoint', 'input');
     persist('.runpod-apikey', 'upscaler_runpod_apikey', 'input');
-    persist('.model-select', 'upscaler_model');
     persist('.tilesize-select', 'upscaler_tilesize');
     persist('.backend-select', 'upscaler_backend');
     persist('.output-select', 'upscaler_output');
@@ -131,6 +367,7 @@ class UpscalerApp extends HTMLElement {
     const stopBtn       = this.#q('.stop-btn');
     const startOverBtn  = this.#q('.startover-btn');
     const modelEl       = this.#q('.model-select');
+    const deleteCustomBtn = this.#q('.delete-custom-model-btn');
     const backendEl     = this.#q('.backend-select');
     const tileSizeEl    = this.#q('.tilesize-select');
     const outputEl      = this.#q('.output-select');
@@ -226,8 +463,56 @@ class UpscalerApp extends HTMLElement {
       this.#updateHangWarning();
     };
 
-    modelEl.addEventListener('change', () => {
+    const updateCustomDeleteVisibility = () => {
+      const selected = getCustomModelByUrl(modelEl.value);
+      deleteCustomBtn.hidden = !selected;
+      deleteCustomBtn.disabled = !selected || this.#running;
+      if (selected) {
+        deleteCustomBtn.title = `Delete custom model "${selected.label}"`;
+      } else {
+        deleteCustomBtn.title = 'Delete selected custom model';
+      }
+    };
+
+    let previousModelValue = modelEl.value;
+    modelEl.addEventListener('change', async () => {
+      if (modelEl.value === UPLOAD_CUSTOM_VALUE) {
+        const previousOption = Array.from(modelEl.options).find((opt) => opt.value === previousModelValue);
+        const defaultScale = parseInt(previousOption?.dataset.scale, 10) || 4;
+        const customModel = await this.#showCustomModelUploadModal(defaultScale);
+        if (!customModel) {
+          modelEl.value = previousModelValue;
+        } else {
+          this.#customModels = listCustomModels();
+          this.#refreshModelSelectOptions(customModel.url);
+          previousModelValue = customModel.url;
+          statusBar.message = `Custom model "${customModel.label}" added (${customModel.scale}x, ~${customModel.sizeMB}MB).`;
+        }
+      } else {
+        previousModelValue = modelEl.value;
+      }
+      localStorage.setItem('upscaler_model', modelEl.value);
       updateModelBoundControls();
+      updateCustomDeleteVisibility();
+    });
+
+    deleteCustomBtn.addEventListener('click', async () => {
+      if (this.#running) return;
+      const selected = getCustomModelByUrl(modelEl.value);
+      if (!selected) return;
+      const ok = globalThis.confirm(`Delete custom model "${selected.label}"?\n\nThis will remove it from the local model cache.`);
+      if (!ok) return;
+      await deleteCustomModelByUrl(selected.url);
+      this.#customModels = listCustomModels();
+      this.#refreshModelSelectOptions();
+      if (modelEl.value === UPLOAD_CUSTOM_VALUE && modelEl.options.length > 1) {
+        modelEl.selectedIndex = 0;
+      }
+      previousModelValue = modelEl.value;
+      localStorage.setItem('upscaler_model', modelEl.value);
+      updateModelBoundControls();
+      updateCustomDeleteVisibility();
+      statusBar.message = `Deleted custom model "${selected.label}".`;
     });
 
     this.#q('.tilesize-select').addEventListener('change', () => {
@@ -298,7 +583,7 @@ class UpscalerApp extends HTMLElement {
           statusBar.message = 'Upscale cancelled.';
         } else {
           console.error(e);
-          statusBar.message = 'Error: ' + e.message;
+          statusBar.message = 'Error: ' + this.#formatUpscaleErrorMessage(e);
         }
         statusBar.hideProgress();
         perfMonitor.stop();
@@ -322,6 +607,8 @@ class UpscalerApp extends HTMLElement {
       if (this.#running) this.#abortController?.abort();
       resetToStart();
     });
+
+    updateCustomDeleteVisibility();
   }
 
   #updateHangWarning() {
@@ -343,11 +630,13 @@ class UpscalerApp extends HTMLElement {
     const modelUrl = opt.value;
     const scale = parseInt(opt.dataset.scale, 10) || 4;
     const modelValueRange = parseInt(opt.dataset.range, 10) || 1;
+    const modelLayout = opt.dataset.layout || 'nchw';
+    const modelInputMultiple = parseInt(opt.dataset.multipleof, 10) || 1;
     const backend = opt.dataset.backend || this.#q('.backend-select').value;
     const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const profile = this.#q('perf-monitor').visible;
 
-    const config = { modelUrl, scale, modelValueRange, backend, tileSize, profile };
+    const config = { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, backend, tileSize, profile };
 
     if (this.#q('.pass-all-enabled').checked) {
       const aopt = this.#q('.pass-all-model').selectedOptions[0];
@@ -355,6 +644,8 @@ class UpscalerApp extends HTMLElement {
         modelUrl: aopt?.value || modelUrl,
         scale: parseInt(aopt?.dataset.scale, 10) || scale,
         modelValueRange: parseInt(aopt?.dataset.range, 10) || 1,
+        modelLayout: aopt?.dataset.layout || 'nchw',
+        modelInputMultiple: parseInt(aopt?.dataset.multipleof, 10) || 1,
         backend: aopt?.dataset.backend || backend,
         blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
       };
@@ -366,6 +657,8 @@ class UpscalerApp extends HTMLElement {
         modelUrl: fopt?.value || modelUrl,
         scale: parseInt(fopt?.dataset.scale, 10) || scale,
         modelValueRange: parseInt(fopt?.dataset.range, 10) || 1,
+        modelLayout: fopt?.dataset.layout || 'nchw',
+        modelInputMultiple: parseInt(fopt?.dataset.multipleof, 10) || 1,
         backend: fopt?.dataset.backend || backend,
         paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
         featherPx: 16,
@@ -605,6 +898,10 @@ class UpscalerApp extends HTMLElement {
           width: min(100%, 24rem);
           max-width: 24rem;
         }
+        upscaler-app .delete-custom-model-btn {
+          padding: 0.3rem 0.55rem;
+          min-width: 2rem;
+        }
         upscaler-app .controls button {
           margin-bottom: 0; padding: 0.4rem 0.8rem;
           font-size: 0.85rem; width: auto;
@@ -728,6 +1025,66 @@ class UpscalerApp extends HTMLElement {
         upscaler-app .hang-warn:hover .hang-warn-tip {
           display: block;
         }
+        upscaler-app .custom-model-dialog {
+          width: min(34rem, calc(100vw - 2rem));
+        }
+        upscaler-app .custom-model-form {
+          display: grid;
+          gap: 0.6rem;
+          margin: 0;
+        }
+        upscaler-app .custom-model-form label {
+          display: grid;
+          gap: 0.25rem;
+          margin: 0;
+          font-size: 0.85rem;
+        }
+        upscaler-app .custom-model-row {
+          display: grid;
+          gap: 0.5rem;
+          grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+          align-items: end;
+        }
+        upscaler-app .custom-model-scale {
+          width: 8ch;
+        }
+        upscaler-app .custom-model-range {
+          width: 9ch;
+        }
+        upscaler-app .custom-model-layout {
+          width: 9ch;
+        }
+        upscaler-app .custom-model-multiple {
+          width: 9ch;
+        }
+        @media (max-width: 900px) {
+          upscaler-app .custom-model-row {
+            grid-template-columns: minmax(0, 1fr) auto auto;
+          }
+        }
+        upscaler-app .custom-model-meta {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 0.5rem;
+          font-size: 0.8rem;
+          color: var(--pico-muted-color);
+        }
+        upscaler-app .custom-model-detected {
+          font-size: 0.8rem;
+          color: var(--pico-muted-color);
+        }
+        upscaler-app .custom-model-error {
+          color: var(--pico-del-color, #c62828);
+          min-height: 1.1rem;
+          font-size: 0.8rem;
+        }
+        upscaler-app .custom-model-actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 0.5rem;
+          margin-top: 0.4rem;
+        }
       </style>
 
       <h2>
@@ -744,8 +1101,12 @@ class UpscalerApp extends HTMLElement {
           <label>Model:
             <select class="model-select">
               ${modelOptionsHTML(undefined, { includeResamplers: true })}
+              ${getUploadCustomOptionHTML()}
             </select>
           </label>
+          <button class="secondary outline delete-custom-model-btn" type="button" hidden title="Delete selected custom model" aria-label="Delete selected custom model">
+            <i class="fas fa-trash"></i>
+          </button>
           <label>Backend:
             <select class="backend-select">
               <option value="webgpu">GPU (WebGPU)</option>
@@ -859,6 +1220,54 @@ class UpscalerApp extends HTMLElement {
           </label>
         </div>
       </details>
+
+      <dialog class="custom-model-dialog">
+        <form class="custom-model-form" method="dialog">
+          <h3 style="margin:0">Upload custom ONNX model</h3>
+          <label>
+            Model file
+            <input class="custom-model-file" type="file" accept=".onnx,application/octet-stream" required>
+          </label>
+          <div class="custom-model-row">
+            <label>
+              Label
+              <input class="custom-model-label" type="text" maxlength="80" placeholder="My custom model">
+            </label>
+            <label>
+              Scale
+              <input class="custom-model-scale" type="number" min="1" max="16" step="1" value="4" required>
+            </label>
+            <label>
+              Range
+              <select class="custom-model-range">
+                <option value="1">1</option>
+                <option value="255">255</option>
+              </select>
+            </label>
+            <label>
+              Layout
+              <select class="custom-model-layout">
+                <option value="nchw">NCHW</option>
+                <option value="nhwc">NHWC</option>
+              </select>
+            </label>
+            <label>
+              Multiple-of
+              <input class="custom-model-multiple" type="number" min="1" max="64" step="1" value="1">
+            </label>
+          </div>
+          <div class="custom-model-detected">Auto-detect: waiting for model file…</div>
+          <div class="custom-model-meta">
+            <span class="custom-model-size">Model size: -</span>
+            <span>Only essential fields shown</span>
+          </div>
+          <div class="custom-model-error"></div>
+          <div class="custom-model-actions">
+            <button type="button" class="secondary custom-model-cancel-btn">Cancel</button>
+            <button type="submit" class="custom-model-save-btn">Save model</button>
+          </div>
+        </form>
+      </dialog>
 
       <status-bar></status-bar>
       <image-drop-zone></image-drop-zone>

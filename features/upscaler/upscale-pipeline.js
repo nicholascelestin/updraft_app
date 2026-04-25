@@ -27,9 +27,14 @@ class EnginePool {
     (slot.engine.destroy ?? slot.engine.release)?.call(slot.engine);
   }
 
-  getUpscaler(tag, { modelUrl, scale, modelValueRange, backend, profile = false }) {
+  getUpscaler(tag, { modelUrl, scale, modelValueRange, modelLayout = 'nchw', modelInputMultiple = 1, backend, profile = false }) {
     const slot = this.#slots.get(tag);
-    if (slot && slot.modelUrl === modelUrl) {
+    if (
+      slot &&
+      slot.modelUrl === modelUrl &&
+      slot.modelLayout === modelLayout &&
+      slot.modelInputMultiple === modelInputMultiple
+    ) {
       const backendOk = !slot.engine.activeBackend || slot.engine.activeBackend === backend;
       if (backendOk) {
         slot.engine.profiling = profile;
@@ -37,8 +42,8 @@ class EnginePool {
       }
     }
     this.#evict(tag);
-    const engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, profile });
-    this.#slots.set(tag, { engine, modelUrl });
+    const engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, profile });
+    this.#slots.set(tag, { engine, modelUrl, modelLayout, modelInputMultiple });
     return engine;
   }
 
@@ -94,8 +99,16 @@ function blendCanvas(destCanvas, srcCanvas, opacity) {
 const tiledUpscaleStep = {
   name: 'tiledUpscale',
   async run(ctx, cb) {
-    const { modelUrl, scale, modelValueRange, backend, tileSize, profile } = ctx.config;
-    const engine = ctx.pool.getUpscaler('base', { modelUrl, scale, modelValueRange, backend, profile });
+    const { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, backend, tileSize, profile } = ctx.config;
+    const engine = ctx.pool.getUpscaler('base', {
+      modelUrl,
+      scale,
+      modelValueRange,
+      modelLayout,
+      modelInputMultiple,
+      backend,
+      profile,
+    });
     emitStage(cb, 'tiledUpscale', 'loading', { message: 'Loading base model…' });
     const tLoad = performance.now();
     await engine.loadModel(backend, (frac, msg) => {
@@ -129,6 +142,8 @@ const blendAllStep = {
       modelUrl: all.modelUrl,
       scale: all.scale,
       modelValueRange: all.modelValueRange,
+      modelLayout: all.modelLayout,
+      modelInputMultiple: all.modelInputMultiple,
       backend: passBackend,
     });
     emitStage(cb, 'blendAll', 'loading', { message: 'Loading all-pass model…' });
@@ -207,6 +222,8 @@ const enhanceFacesStep = {
       modelUrl: face.modelUrl,
       scale: face.scale,
       modelValueRange: face.modelValueRange,
+      modelLayout: face.modelLayout,
+      modelInputMultiple: face.modelInputMultiple,
       backend: faceBackend,
     });
     emitStage(cb, 'enhanceFaces', 'loading', { message: 'Loading face enhancer model…' });
@@ -472,8 +489,16 @@ export class Pipeline {
   }
 
   async warmup(config, { onProgress } = {}) {
-    const { modelUrl, scale, modelValueRange, backend, profile } = config;
-    const engine = this.#pool.getUpscaler('base', { modelUrl, scale, modelValueRange, backend, profile });
+    const { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, backend, profile } = config;
+    const engine = this.#pool.getUpscaler('base', {
+      modelUrl,
+      scale,
+      modelValueRange,
+      modelLayout,
+      modelInputMultiple,
+      backend,
+      profile,
+    });
     await engine.loadModel(backend, onProgress);
   }
 

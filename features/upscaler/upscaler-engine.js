@@ -24,23 +24,56 @@ function yieldToEventLoop() {
   });
 }
 
+function clampCoord(v, max) {
+  if (v < 0) return 0;
+  if (v > max) return max;
+  return v;
+}
+
 /**
  * Extract a tile from ImageData as Float32 in CHW layout
- * (channels-first: [R plane, G plane, B plane]).
+ * (channels-first: [R plane, G plane, B plane]), with edge replication padding.
  *
  * @param {number} valueScale - multiply each pixel byte by this (e.g. 1/255 for [0,1] output)
  */
-function extractTileCHW(imageData, tx, ty, tw, th, valueScale) {
+function extractTileNCHW(imageData, tx, ty, tw, th, padW, padH, valueScale) {
   const { data, width } = imageData;
-  const out = new Float32Array(3 * th * tw);
-  const planeSize = th * tw;
-  for (let row = 0; row < th; row++) {
-    for (let col = 0; col < tw; col++) {
-      const srcIdx = ((ty + row) * width + (tx + col)) * 4;
-      const dstIdx = row * tw + col;
+  const out = new Float32Array(3 * padH * padW);
+  const planeSize = padH * padW;
+  const maxX = tx + tw - 1;
+  const maxY = ty + th - 1;
+  for (let row = 0; row < padH; row++) {
+    for (let col = 0; col < padW; col++) {
+      const srcX = clampCoord(tx + col, maxX);
+      const srcY = clampCoord(ty + row, maxY);
+      const srcIdx = (srcY * width + srcX) * 4;
+      const dstIdx = row * padW + col;
       out[dstIdx]                 = data[srcIdx]     * valueScale;
       out[planeSize + dstIdx]     = data[srcIdx + 1] * valueScale;
       out[2 * planeSize + dstIdx] = data[srcIdx + 2] * valueScale;
+    }
+  }
+  return out;
+}
+
+/**
+ * Extract a tile from ImageData as Float32 in HWC layout
+ * (channels-last: [R,G,B, R,G,B, ...]), with edge replication padding.
+ */
+function extractTileNHWC(imageData, tx, ty, tw, th, padW, padH, valueScale) {
+  const { data, width } = imageData;
+  const out = new Float32Array(padH * padW * 3);
+  const maxX = tx + tw - 1;
+  const maxY = ty + th - 1;
+  for (let row = 0; row < padH; row++) {
+    for (let col = 0; col < padW; col++) {
+      const srcX = clampCoord(tx + col, maxX);
+      const srcY = clampCoord(ty + row, maxY);
+      const srcIdx = (srcY * width + srcX) * 4;
+      const dstIdx = (row * padW + col) * 3;
+      out[dstIdx] = data[srcIdx] * valueScale;
+      out[dstIdx + 1] = data[srcIdx + 1] * valueScale;
+      out[dstIdx + 2] = data[srcIdx + 2] * valueScale;
     }
   }
   return out;
@@ -96,17 +129,29 @@ export class UpscalerEngine {
   #scale;
   #overlap;
   #modelValueRange;
+  #modelLayout;
+  #modelInputMultiple;
   #profiling = false;
   #activeBackend = null;
   #device = null;
   #gpuRenderer = null;
   #gpuExtractor = null;
 
-  constructor({ modelUrl, scale = DEFAULT_SCALE, overlap = DEFAULT_OVERLAP, modelValueRange = 1, profile = false }) {
+  constructor({
+    modelUrl,
+    scale = DEFAULT_SCALE,
+    overlap = DEFAULT_OVERLAP,
+    modelValueRange = 1,
+    modelLayout = 'nchw',
+    modelInputMultiple = 1,
+    profile = false,
+  }) {
     this.#modelUrl = modelUrl;
     this.#scale = scale;
     this.#overlap = overlap;
     this.#modelValueRange = modelValueRange;
+    this.#modelLayout = modelLayout === 'nhwc' ? 'nhwc' : 'nchw';
+    this.#modelInputMultiple = Number.isFinite(modelInputMultiple) ? Math.max(1, Math.floor(modelInputMultiple)) : 1;
     this.#profiling = profile;
   }
 
@@ -156,7 +201,8 @@ export class UpscalerEngine {
       ...(this.#profiling && { enableProfiling: true }),
     };
 
-    if (backend === 'webgpu') {
+    const canUseGpuFastPath = this.#modelLayout === 'nchw' && this.#modelInputMultiple === 1;
+    if (backend === 'webgpu' && canUseGpuFastPath) {
       sessionOpts.preferredOutputLocation = 'gpu-buffer';
     }
 
@@ -182,8 +228,10 @@ export class UpscalerEngine {
     if (actualBackend === 'webgpu') {
       try {
         this.#device = await ort.env.webgpu.device;
-        this.#gpuRenderer = new GpuTileRenderer(this.#device);
-        if (typeof ort.Tensor.fromGpuBuffer === 'function') {
+        if (canUseGpuFastPath) {
+          this.#gpuRenderer = new GpuTileRenderer(this.#device);
+        }
+        if (canUseGpuFastPath && typeof ort.Tensor.fromGpuBuffer === 'function') {
           this.#gpuExtractor = new GpuFrameExtractor(this.#device);
         }
       } catch (err) {
@@ -254,8 +302,19 @@ export class UpscalerEngine {
 
       const { x: tx, y: ty, w: tw, h: th } = tiles[i];
 
+      const paddedTW = this.#alignToMultiple(tw);
+      const paddedTH = this.#alignToMultiple(th);
       const tExtract = performance.now();
-      const tensor = this.#createTileTensor(srcData, tx, ty, tw, th, useGpuInput);
+      const tensor = this.#createTileTensor(
+        srcData,
+        tx,
+        ty,
+        tw,
+        th,
+        paddedTW,
+        paddedTH,
+        useGpuInput && paddedTW === tw && paddedTH === th,
+      );
       const extractMs = performance.now() - tExtract;
       perf.extract += extractMs;
 
@@ -267,9 +326,11 @@ export class UpscalerEngine {
 
       const outTW = tw * scale;
       const outTH = th * scale;
+      const outPaddedTW = paddedTW * scale;
+      const outPaddedTH = paddedTH * scale;
       let renderMs = 0, readbackMs = 0;
 
-      if (useGpu) {
+      if (useGpu && outPaddedTW === outTW && outPaddedTH === outTH) {
         const tGpu = performance.now();
         this.#gpuRenderer.renderTile(
           results[outputName].gpuBuffer, outTW, outTH,
@@ -289,7 +350,10 @@ export class UpscalerEngine {
         const dims = outTensor.dims;
         const isNHWC = dims.length === 4 && dims[3] === 3 && dims[1] !== 3;
         const decode = isNHWC ? hwcToImageData : chwToImageData;
-        const imgData = decode(outData, outTW, outTH, 255 / this.#modelValueRange);
+        const paddedImgData = decode(outData, outPaddedTW, outPaddedTH, 255 / this.#modelValueRange);
+        const imgData = outPaddedTW === outTW && outPaddedTH === outTH
+          ? paddedImgData
+          : this.#cropImageData(paddedImgData, outTW, outTH);
         pasteTileCropped(outCtx, imgData, tx * scale, ty * scale, outW, outH, overlap * scale);
         renderMs = performance.now() - tWrite;
         perf.writeTile += renderMs;
@@ -384,7 +448,28 @@ export class UpscalerEngine {
     return srcData;
   }
 
-  #createTileTensor(srcData, tx, ty, tw, th, useGpuInput) {
+  #alignToMultiple(value) {
+    const m = this.#modelInputMultiple;
+    if (!Number.isFinite(m) || m <= 1) return value;
+    return Math.ceil(value / m) * m;
+  }
+
+  #cropImageData(imgData, width, height) {
+    if (imgData.width === width && imgData.height === height) return imgData;
+    const out = new ImageData(width, height);
+    const src = imgData.data;
+    const dst = out.data;
+    const srcStride = imgData.width * 4;
+    const dstStride = width * 4;
+    for (let row = 0; row < height; row++) {
+      const srcStart = row * srcStride;
+      const dstStart = row * dstStride;
+      dst.set(src.subarray(srcStart, srcStart + dstStride), dstStart);
+    }
+    return out;
+  }
+
+  #createTileTensor(srcData, tx, ty, tw, th, paddedTW, paddedTH, useGpuInput) {
     const ort = globalThis.ort;
     if (useGpuInput) {
       const gpuBuf = this.#gpuExtractor.extractTile(tx, ty, tw, th, this.#modelValueRange);
@@ -394,8 +479,30 @@ export class UpscalerEngine {
         dispose: () => {},
       });
     }
-    const input = extractTileCHW(srcData, tx, ty, tw, th, this.#modelValueRange / 255);
-    return new ort.Tensor('float32', input, [1, 3, th, tw]);
+    if (this.#modelLayout === 'nhwc') {
+      const input = extractTileNHWC(
+        srcData,
+        tx,
+        ty,
+        tw,
+        th,
+        paddedTW,
+        paddedTH,
+        this.#modelValueRange / 255,
+      );
+      return new ort.Tensor('float32', input, [1, paddedTH, paddedTW, 3]);
+    }
+    const input = extractTileNCHW(
+      srcData,
+      tx,
+      ty,
+      tw,
+      th,
+      paddedTW,
+      paddedTH,
+      this.#modelValueRange / 255,
+    );
+    return new ort.Tensor('float32', input, [1, 3, paddedTH, paddedTW]);
   }
 
   async #waitForGpuWork() {
