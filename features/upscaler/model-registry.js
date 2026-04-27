@@ -6,29 +6,11 @@
 export const UPSCALER_MODELS = [
   { url: 'models/1x-Kim2091-DeJpeg-v0.onnx', scale: 1, range: 1, label: 'Kim2091 DeJpeg', sizeMB: 9.2 },
   { url: 'models/1x-ITF-SkinDiffDetail-Lite-v1.onnx', scale: 1, range: 1, label: 'SkinDiffDetail Lite', sizeMB: 20 },
-  { url: 'models/2xParagonSR_Nano_gan_op18_fp32.onnx', scale: 2, range: 1, label: 'ParagonSR Nano GAN', sizeMB: 0.7 },
-
 
   { url: 'models/4x-UpdraftTiny.onnx', scale: 4, range: 255, label: 'Updraft Tiny (RMBN)', sizeMB: 0.6 },
   { url: 'models/4x-UpdraftLightweight.onnx', scale: 4, range: 255, label: 'Updraft Lightweight (SPAN-like)', sizeMB: 0.8 },
   { url: 'models/4x-UpdraftMidweight.onnx', scale: 4, range: 255, label: 'Updraft Midweight (SPAN-like)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftMidweight_V12.onnx', scale: 4, range: 255, label: 'Updraft Midweight V2 (SPAN-like)', sizeMB: 1.3 },
-  { url: 'models/4x-UpdraftMidweight_PW_NOAVG_3.onnx', scale: 4, range: 1, label: 'Updraft Midweight V3 (SPAN-faithful)', sizeMB: 1.8 },
-  { url: 'models/4x-UpdraftLightweight_PW_NOAVG_3.onnx', scale: 4, range: 1, label: 'Updraft Lightweight (SPAN-faithful)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftLightweight_PW_MACRO.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro 124k (SPAN-faithful)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftLightweight_PW_RES_2.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Res 150k (SPAN-faithful)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftLightweight_PW_MACRO_2.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro 168k (SPAN-faithful)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftLightweight_PW_MACRO_3.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro 180k (SPAN-faithful)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 50k (SPAN-faithful)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_2.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 82k (SPAN-faithful)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_3.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 150k (SPAN-faithful)', sizeMB: 1.2 },
-  { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_4.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 180k (SPAN-faithful)', sizeMB: 1.2 },
-
-
-
-
-
-
+  // { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_4.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 180k (SPAN-faithful)', sizeMB: 1.2 },
 
   { url: 'models/4x-ClearRealityV1.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.8 },
   { url: 'models/4xPurePhoto-Span.onnx', scale: 4, label: 'PurePhoto (SPAN)', sizeMB: 1.7 },
