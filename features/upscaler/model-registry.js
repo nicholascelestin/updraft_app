@@ -13,8 +13,15 @@ export const UPSCALER_MODELS = [
   { url: 'models/4x-UpdraftLightweight.onnx', scale: 4, range: 255, label: 'Updraft Lightweight (SPAN-like)', sizeMB: 0.8 },
   { url: 'models/4x-UpdraftMidweight.onnx', scale: 4, range: 255, label: 'Updraft Midweight (SPAN-like)', sizeMB: 1.2 },
   { url: 'models/4x-UpdraftMidweight_V12.onnx', scale: 4, range: 255, label: 'Updraft Midweight V2 (SPAN-like)', sizeMB: 1.3 },
-  { url: 'models/4x-UpdraftMidweight_PW_NOAVG_3.onnx', scale: 4, range: 1, label: 'Updraft Midweight PW NOAVG 300k  (SPAN-faithful)', sizeMB: 1.8 },
-  { url: 'models/4x-UpdraftLightweight_PW_NOAVG_3.onnx', scale: 4, range: 1, label: 'Updraft Lightweight (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftMidweight_PW_NOAVG_3.onnx', scale: 4, range: 1, label: 'Updraft Midweight V3 (SPAN-faithful)', sizeMB: 1.8 },
+  { url: 'models/4x-UpdraftLightweight_PW_NOAVG_3.onnx', scale: 4, range: 1, label: 'Updraft Lightweight (SPAN-faithful)', sizeMB: 1.2 },
+  { url: 'models/4x-UpdraftLightweight_PW_MACRO.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro 124k (SPAN-faithful)', sizeMB: 1.2 },
+  { url: 'models/4x-UpdraftLightweight_PW_RES_2.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Res 150k (SPAN-faithful)', sizeMB: 1.2 },
+  { url: 'models/4x-UpdraftLightweight_PW_MACRO_2.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro 168k (SPAN-faithful)', sizeMB: 1.2 },
+  { url: 'models/4x-UpdraftLightweight_PW_MACRO_3.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro 180k (SPAN-faithful)', sizeMB: 1.2 },
+  { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 50k (SPAN-faithful)', sizeMB: 1.2 },
+
+
 
 
 
@@ -28,8 +35,8 @@ export const UPSCALER_MODELS = [
 ];
 
 export const UPSCALER_RESAMPLER_MODELS = [
-  { url: 'builtin:lanczos-4x', scale: 4, label: 'Lanczos 4x' },
-  { url: 'builtin:bicubic-4x', scale: 4, label: 'Bicubic 4x' },
+  { url: 'builtin:lanczos-4x', scale: 4, label: 'Lanczos' },
+  { url: 'builtin:bicubic-4x', scale: 4, label: 'Bicubic' },
 ];
 
 /**

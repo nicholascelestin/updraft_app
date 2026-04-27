@@ -55,6 +55,11 @@ class UpscalerApp extends HTMLElement {
 
   #q(sel) { return this.querySelector(sel); }
   #isBuiltInResampler(modelOpt) { return !!modelOpt?.value?.startsWith('builtin:'); }
+  #syncViewSizeButtonLabel() {
+    const btn = this.#q('.viewsize-btn');
+    if (!btn) return;
+    btn.textContent = this.#viewState.expanded ? 'Fit to View' : 'Full Size';
+  }
 
   #formatUpscaleErrorMessage(error) {
     const raw = error?.message || String(error || 'Unknown error');
@@ -332,28 +337,33 @@ class UpscalerApp extends HTMLElement {
   }
 
   #setupViewStateSync() {
+    const cropper = this.#q('image-cropper');
     const preview = this.#q('upscale-preview');
     const compareSlider = this.#q('compare-slider');
+    const viewSizeBtn = this.#q('.viewsize-btn');
     const persistViewState = () => {
       localStorage.setItem('upscaler_view_expanded', this.#viewState.expanded ? '1' : '0');
       localStorage.setItem('upscaler_view_upscaled_only', this.#viewState.upscaledOnly ? '1' : '0');
     };
-
-    preview.addEventListener('view-state-change', (e) => {
-      this.#viewState.expanded = !!e.detail.expanded;
+    const applyExpandedAcrossViews = () => {
+      cropper.setExpanded(this.#viewState.expanded);
+      preview.setExpanded(this.#viewState.expanded);
       compareSlider.setExpanded(this.#viewState.expanded);
+    };
+    viewSizeBtn.addEventListener('click', () => {
+      this.#viewState.expanded = !this.#viewState.expanded;
+      applyExpandedAcrossViews();
+      this.#syncViewSizeButtonLabel();
       persistViewState();
     });
     compareSlider.addEventListener('view-state-change', (e) => {
-      if (typeof e.detail.expanded === 'boolean') {
-        this.#viewState.expanded = e.detail.expanded;
-      }
       if (typeof e.detail.upscaledOnly === 'boolean') {
         this.#viewState.upscaledOnly = e.detail.upscaledOnly;
       }
-      preview.setExpanded(this.#viewState.expanded);
       persistViewState();
     });
+    applyExpandedAcrossViews();
+    this.#syncViewSizeButtonLabel();
   }
 
   #setupUpscaleActions() {
@@ -443,21 +453,24 @@ class UpscalerApp extends HTMLElement {
       const scale = parseInt(modelEl.selectedOptions[0]?.dataset.scale, 10) || 4;
       const verb = scale === 1 ? 'Enhance' : 'Upscale';
       const maxOutputScale = Math.max(1, Math.min(scale, 4));
+      const isBuiltInResampler = this.#isBuiltInResampler(modelEl.selectedOptions[0]);
+      const previousOutputScale = parseInt(outputEl.value, 10);
 
       upscaleBtn.innerHTML = `<i class="fas fa-wand-magic-sparkles"></i> ${verb} ${scale}x`;
 
       for (const opt of outputEl.options) {
         const optionScale = parseInt(opt.value, 10) || 1;
         const baseLabel = outputLabelsByValue.get(opt.value) || `${optionScale}x`;
-        opt.textContent = optionScale === maxOutputScale
+        opt.textContent = !isBuiltInResampler && optionScale === maxOutputScale
           ? `${baseLabel} (no downscale)`
           : baseLabel;
         opt.disabled = optionScale > maxOutputScale;
       }
 
-      outputEl.value = String(maxOutputScale);
+      const preferredScale = Number.isFinite(previousOutputScale) ? previousOutputScale : maxOutputScale;
+      const nextOutputScale = Math.max(1, Math.min(maxOutputScale, preferredScale));
+      outputEl.value = String(nextOutputScale);
       localStorage.setItem('upscaler_output', outputEl.value);
-      const isBuiltInResampler = this.#isBuiltInResampler(modelEl.selectedOptions[0]);
       backendEl.disabled = isBuiltInResampler;
       tileSizeEl.disabled = isBuiltInResampler;
       this.#updateHangWarning();
@@ -568,7 +581,7 @@ class UpscalerApp extends HTMLElement {
         statusBar.hideProgress();
         const outW = inputImage.width * scale;
         const outH = inputImage.height * scale;
-        statusBar.message = `Done \u2014 ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}. Drag the slider to compare.`;
+        statusBar.message = `Done \u2014 ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}.`;
 
         compareSlider.style.maxWidth = outW + 'px';
         compareSlider.setAttribute('after-label', `${scale}x Upscaled`);
@@ -851,8 +864,10 @@ class UpscalerApp extends HTMLElement {
     this.#q('.pass-all-enabled').checked = localStorage.getItem('upscaler_pass_all_enabled') === '1';
     this.#q('.detector-face-enabled').checked = localStorage.getItem('upscaler_detector_face_enabled') === '1';
 
+    this.#q('image-cropper').setExpanded(this.#viewState.expanded);
     this.#q('upscale-preview').setExpanded(this.#viewState.expanded);
     this.#q('compare-slider').setViewState(this.#viewState);
+    this.#syncViewSizeButtonLabel();
     const modelEl = this.#q('.model-select');
     if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
 
@@ -892,11 +907,23 @@ class UpscalerApp extends HTMLElement {
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        upscaler-app .model-select,
-        upscaler-app .pass-all-model,
-        upscaler-app .detector-face-model {
-          width: min(100%, 24rem);
-          max-width: 24rem;
+        upscaler-app select.model-select,
+        upscaler-app select.pass-all-model,
+        upscaler-app select.detector-face-model {
+          width: min(100%, 17em);
+          max-width: 17em;
+        }
+        upscaler-app select.output-select {
+          width: min(100%, calc(4ch + 0.7rem + 2.25rem));
+          max-width: calc(4ch + 0.7rem + 2.25rem);
+        }
+        upscaler-app select.tilesize-select {
+          width: min(100%, calc(4.25ch + 0.7rem + 2.25rem));
+          max-width: calc(4.25ch + 0.7rem + 2.25rem);
+        }
+        upscaler-app select.backend-select {
+          width: min(100%, calc(5ch + 0.7rem + 2.25rem));
+          max-width: calc(5ch + 0.7rem + 2.25rem);
         }
         upscaler-app .delete-custom-model-btn {
           padding: 0.3rem 0.55rem;
@@ -921,7 +948,8 @@ class UpscalerApp extends HTMLElement {
           cursor: pointer;
           font-size: 0.9rem;
           user-select: none;
-          margin-bottom: 0.6rem;
+          margin-bottom: 0;
+          padding: 0.15rem 0;
         }
         upscaler-app .detector-row {
           display: grid;
@@ -1153,6 +1181,7 @@ class UpscalerApp extends HTMLElement {
         <button class="startover-btn secondary outline" style="display:none">
           <i class="fas fa-redo"></i> Start Over
         </button>
+        <button class="viewsize-btn secondary outline" type="button">Full Size</button>
         <button class="perf-toggle-btn secondary outline" title="Toggle performance monitor">
           <i class="fas fa-gauge-high"></i>
         </button>
@@ -1259,7 +1288,6 @@ class UpscalerApp extends HTMLElement {
           <div class="custom-model-detected">Auto-detect: waiting for model file…</div>
           <div class="custom-model-meta">
             <span class="custom-model-size">Model size: -</span>
-            <span>Only essential fields shown</span>
           </div>
           <div class="custom-model-error"></div>
           <div class="custom-model-actions">

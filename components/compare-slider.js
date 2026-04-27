@@ -5,6 +5,8 @@
 import { morph } from 'lib/morph';
 import { esc } from 'lib/escape';
 
+const PROBE_PREFS_KEY = 'upscaler_compare_probe_prefs_v1';
+
 class CompareSlider extends HTMLElement {
   #dragging = false;
   #resizeObserver;
@@ -24,20 +26,50 @@ class CompareSlider extends HTMLElement {
   #probeRadiusMin = 16;
   #probeRadiusMax = 140;
   #probeRadiusStep = 4;
+  #probeZoomLevel = 1;
+  #probeZoomLevelMin = 0;
+  #probeZoomLevelMax = 1;
+  #probeZoomStep = 0.08;
+  #probeCompareHeld = false;
+  #lastProbePoint = null;
+  #onWindowResize = () => {
+    if (this.style.display !== 'none') {
+      this.#applySize();
+      if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
+    }
+  };
 
   #onWindowMouseMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
   #onWindowTouchMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
-  #onWindowMouseUp = () => { this.#dragging = false; };
+  #onWindowMouseUp = () => {
+    this.#dragging = false;
+    if (this.#probeCompareHeld) {
+      this.#probeCompareHeld = false;
+      this.#refreshPixelProbe();
+    }
+  };
   #onWindowTouchEnd = () => { this.#dragging = false; };
   #onWheel = (e) => {
-    if (!(this.#upscaledOnly && !this.#pixelZoomed && e.shiftKey)) return;
-    e.preventDefault();
-    const nextRadius = this.#probeRadius + (e.deltaY < 0 ? this.#probeRadiusStep : -this.#probeRadiusStep);
-    this.#setProbeRadius(nextRadius);
-    this.#updatePixelProbe(e);
+    if (!(this.#upscaledOnly && !this.#pixelZoomed)) return;
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const nextZoom = this.#probeZoomLevel + (e.deltaY < 0 ? this.#probeZoomStep : -this.#probeZoomStep);
+      this.#setProbeZoomLevel(nextZoom);
+      this.#updatePixelProbe(e);
+      return;
+    }
+    if (e.shiftKey) {
+      e.preventDefault();
+      const nextRadius = this.#probeRadius + (e.deltaY < 0 ? this.#probeRadiusStep : -this.#probeRadiusStep);
+      this.#setProbeRadius(nextRadius);
+      this.#updatePixelProbe(e);
+      return;
+    }
+    requestAnimationFrame(() => this.#refreshPixelProbe());
   };
 
   connectedCallback() {
+    this.#loadProbePrefs();
     this.classList.add('compare');
     this.#render();
 
@@ -56,10 +88,10 @@ class CompareSlider extends HTMLElement {
     window.addEventListener('touchmove', this.#onWindowTouchMove, { passive: true });
     window.addEventListener('mouseup', this.#onWindowMouseUp);
     window.addEventListener('touchend', this.#onWindowTouchEnd);
+    window.addEventListener('resize', this.#onWindowResize);
 
     this.addEventListener('click', async e => {
       const openBtn = e.target.closest('.compare-open-btn');
-      const expandBtn = e.target.closest('.compare-expand-btn');
       const toggleBtn = e.target.closest('.compare-toggle-upscaled-btn');
       const downloadBtn = e.target.closest('.compare-download-btn');
       const toolbarHit = e.target.closest('.compare-toolbar');
@@ -68,14 +100,8 @@ class CompareSlider extends HTMLElement {
         if (url) window.open(url, '_blank');
         return;
       }
-      if (expandBtn) {
-        this.toggleExpand();
-        expandBtn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
-        return;
-      }
       if (toggleBtn) {
         this.toggleUpscaledView();
-        toggleBtn.textContent = this.#upscaledOnly ? 'Show Compare' : 'Show Enhanced';
         return;
       }
       if (downloadBtn) {
@@ -89,11 +115,24 @@ class CompareSlider extends HTMLElement {
         return;
       }
       if (this.#upscaledOnly && !toolbarHit) {
-        this.togglePixelZoom();
+        this.#togglePixelZoomAtPoint(e.clientX, e.clientY);
       }
     });
     this.addEventListener('mousemove', (e) => {
       this.#updatePixelProbe(e);
+    });
+    this.addEventListener('mousedown', (e) => {
+      if (!(this.#upscaledOnly && !this.#pixelZoomed)) return;
+      if (e.button !== 2) return;
+      if (e.target.closest('.compare-toolbar')) return;
+      e.preventDefault();
+      this.#probeCompareHeld = true;
+      this.#updatePixelProbe(e);
+    });
+    this.addEventListener('contextmenu', (e) => {
+      if (!(this.#upscaledOnly && !this.#pixelZoomed)) return;
+      if (e.target.closest('.compare-toolbar')) return;
+      e.preventDefault();
     });
     this.addEventListener('mouseleave', () => {
       this.#hidePixelProbe();
@@ -115,6 +154,7 @@ class CompareSlider extends HTMLElement {
     window.removeEventListener('touchmove', this.#onWindowTouchMove);
     window.removeEventListener('mouseup', this.#onWindowMouseUp);
     window.removeEventListener('touchend', this.#onWindowTouchEnd);
+    window.removeEventListener('resize', this.#onWindowResize);
     this.removeEventListener('wheel', this.#onWheel);
   }
 
@@ -166,6 +206,8 @@ class CompareSlider extends HTMLElement {
     this.#beforeCanvas = null;
     this.#afterCanvas = null;
     this.#pixelZoomed = false;
+    this.#probeCompareHeld = false;
+    this.#lastProbePoint = null;
     if (this.#lazyBlobURL) {
       URL.revokeObjectURL(this.#lazyBlobURL);
       this.#lazyBlobURL = '';
@@ -187,16 +229,19 @@ class CompareSlider extends HTMLElement {
   toggleUpscaledView() {
     this.#upscaledOnly = !this.#upscaledOnly;
     this.#pixelZoomed = false;
+    this.#probeCompareHeld = false;
     this.#hidePixelProbe();
+    this.#render();
     this.#syncModeClass();
-    if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
     if (this.style.display !== 'none') this.#applySize();
+    if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
     this.#emitViewState();
   }
 
   togglePixelZoom() {
     if (!this.#upscaledOnly) return;
     this.#pixelZoomed = !this.#pixelZoomed;
+    this.#probeCompareHeld = false;
     if (!this.#pixelZoomed) {
       this.scrollLeft = 0;
       this.scrollTop = 0;
@@ -205,6 +250,36 @@ class CompareSlider extends HTMLElement {
     if (this.style.display !== 'none') this.#applySize();
     this.#syncModeClass();
     this.#emitViewState();
+  }
+
+  #togglePixelZoomAtPoint(clientX, clientY) {
+    if (!this.#upscaledOnly || this.#pixelZoomed) {
+      this.togglePixelZoom();
+      return;
+    }
+    const afterEl = this.querySelector('.compare-after');
+    if (!afterEl) {
+      this.togglePixelZoom();
+      return;
+    }
+    const rect = afterEl.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      this.togglePixelZoom();
+      return;
+    }
+    const fracX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const fracY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    this.togglePixelZoom();
+    requestAnimationFrame(() => {
+      const zoomedAfter = this.querySelector('.compare-after');
+      if (!zoomedAfter || !this.#pixelZoomed) return;
+      const targetX = fracX * zoomedAfter.clientWidth;
+      const targetY = fracY * zoomedAfter.clientHeight;
+      const maxScrollLeft = Math.max(0, this.scrollWidth - this.clientWidth);
+      const maxScrollTop = Math.max(0, this.scrollHeight - this.clientHeight);
+      this.scrollLeft = Math.max(0, Math.min(maxScrollLeft, targetX - this.clientWidth / 2));
+      this.scrollTop = Math.max(0, Math.min(maxScrollTop, targetY - this.clientHeight / 2));
+    });
   }
 
   setExpanded(expanded) {
@@ -220,6 +295,7 @@ class CompareSlider extends HTMLElement {
     if (typeof expanded === 'boolean') this.#expanded = expanded;
     if (typeof upscaledOnly === 'boolean') this.#upscaledOnly = upscaledOnly;
     this.#pixelZoomed = false;
+    this.#probeCompareHeld = false;
     this.#hidePixelProbe();
     this.#render();
     if (this.style.display !== 'none') {
@@ -234,7 +310,7 @@ class CompareSlider extends HTMLElement {
     if (!afterEl) return;
     const natW = afterEl.naturalWidth || afterEl.width;
     const natH = afterEl.naturalHeight || afterEl.height;
-    const maxH = window.innerHeight - 160;
+    const maxH = this.#getViewportFitHeight();
     const aspect = natW / natH;
     const fittedW = Math.round(maxH * aspect);
 
@@ -260,6 +336,16 @@ class CompareSlider extends HTMLElement {
       const el = this.querySelector('.compare-before-wrap img, .compare-before-wrap canvas');
       if (el) el.style.width = this.offsetWidth + 'px';
     });
+  }
+
+  #getViewportFitHeight() {
+    const rect = this.getBoundingClientRect();
+    const parent = this.parentElement;
+    const parentPadBottom = parent ? (parseFloat(getComputedStyle(parent).paddingBottom) || 0) : 0;
+    const viewportGap = 8;
+    const top = Math.max(0, rect.top);
+    const available = window.innerHeight - top - parentPadBottom - viewportGap;
+    return Math.max(160, Math.round(available));
   }
 
   #getFrac(e) {
@@ -327,11 +413,15 @@ class CompareSlider extends HTMLElement {
 
   #hidePixelProbe() {
     const probe = this.querySelector('.compare-pixel-probe');
-    if (probe) probe.classList.remove('visible');
+    if (probe) {
+      probe.classList.remove('visible');
+      probe.classList.remove('no-content');
+    }
   }
 
   #setProbeRadius(nextRadius) {
     const clamped = Math.max(this.#probeRadiusMin, Math.min(this.#probeRadiusMax, Math.round(nextRadius)));
+    const changed = this.#probeRadius !== clamped;
     this.#probeRadius = clamped;
     const diameter = this.#probeRadius * 2 + 1;
     const probe = this.querySelector('.compare-pixel-probe');
@@ -344,6 +434,53 @@ class CompareSlider extends HTMLElement {
       probeCanvas.style.width = `${diameter}px`;
       probeCanvas.style.height = `${diameter}px`;
     }
+    if (changed) this.#persistProbePrefs();
+    this.#refreshPixelProbe();
+  }
+
+  #setProbeZoomLevel(nextLevel) {
+    const clamped = Math.max(this.#probeZoomLevelMin, Math.min(this.#probeZoomLevelMax, nextLevel));
+    const changed = this.#probeZoomLevel !== clamped;
+    this.#probeZoomLevel = clamped;
+    if (changed) this.#persistProbePrefs();
+    this.#refreshPixelProbe();
+  }
+
+  #loadProbePrefs() {
+    try {
+      const raw = localStorage.getItem(PROBE_PREFS_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+      if (Number.isFinite(parsed.radius)) {
+        this.#probeRadius = Math.max(this.#probeRadiusMin, Math.min(this.#probeRadiusMax, Math.round(parsed.radius)));
+      }
+      if (Number.isFinite(parsed.zoomLevel)) {
+        this.#probeZoomLevel = Math.max(this.#probeZoomLevelMin, Math.min(this.#probeZoomLevelMax, parsed.zoomLevel));
+      }
+    } catch {
+      // Ignore malformed or unavailable localStorage.
+    }
+  }
+
+  #persistProbePrefs() {
+    try {
+      localStorage.setItem(PROBE_PREFS_KEY, JSON.stringify({
+        radius: this.#probeRadius,
+        zoomLevel: Number(this.#probeZoomLevel.toFixed(3)),
+      }));
+    } catch {
+      // Ignore storage write failures.
+    }
+  }
+
+  #refreshPixelProbe() {
+    if (!this.#lastProbePoint) return;
+    this.#updatePixelProbe({
+      clientX: this.#lastProbePoint.clientX,
+      clientY: this.#lastProbePoint.clientY,
+      target: this,
+    });
   }
 
   #updatePixelProbe(e) {
@@ -356,6 +493,7 @@ class CompareSlider extends HTMLElement {
       return;
     }
     const afterEl = this.querySelector('.compare-after');
+    const beforeEl = this.querySelector('.compare-before-wrap img, .compare-before-wrap canvas');
     const probe = this.querySelector('.compare-pixel-probe');
     const probeCanvas = this.querySelector('.compare-pixel-probe-canvas');
     if (!afterEl || !probe || !probeCanvas) return;
@@ -367,9 +505,11 @@ class CompareSlider extends HTMLElement {
       this.#hidePixelProbe();
       return;
     }
+    this.#lastProbePoint = { clientX: e.clientX, clientY: e.clientY };
 
-    const natW = afterEl.naturalWidth || afterEl.width || 0;
-    const natH = afterEl.naturalHeight || afterEl.height || 0;
+    const sourceEl = (this.#probeCompareHeld && beforeEl) ? beforeEl : afterEl;
+    const natW = sourceEl.naturalWidth || sourceEl.width || 0;
+    const natH = sourceEl.naturalHeight || sourceEl.height || 0;
     if (!natW || !natH || !rect.width || !rect.height) return;
     const srcX = Math.floor((relX / rect.width) * natW);
     const srcY = Math.floor((relY / rect.height) * natH);
@@ -378,42 +518,48 @@ class CompareSlider extends HTMLElement {
     const ctx = probeCanvas.getContext('2d');
     probeCanvas.width = diameter;
     probeCanvas.height = diameter;
-    ctx.imageSmoothingEnabled = false;
+    const noZoom = this.#probeZoomLevel <= this.#probeZoomLevelMin + 0.0001;
+    const hideBubbleContent = noZoom && !this.#probeCompareHeld;
+    probe.classList.toggle('no-content', hideBubbleContent);
     ctx.clearRect(0, 0, diameter, diameter);
-
-    const sx = Math.max(0, Math.min(natW - diameter, srcX - this.#probeRadius));
-    const sy = Math.max(0, Math.min(natH - diameter, srcY - this.#probeRadius));
-    const sw = Math.min(diameter, natW - sx);
-    const sh = Math.min(diameter, natH - sy);
-    ctx.drawImage(afterEl, sx, sy, sw, sh, 0, 0, sw, sh);
-
-    // Center marker for the hovered source pixel.
-    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    ctx.lineWidth = 1;
-    const c = this.#probeRadius + 0.5;
-    ctx.beginPath();
-    ctx.moveTo(c - 5, c);
-    ctx.lineTo(c + 5, c);
-    ctx.moveTo(c, c - 5);
-    ctx.lineTo(c, c + 5);
-    ctx.stroke();
+    if (!hideBubbleContent) {
+      ctx.imageSmoothingEnabled = false;
+      const baseScaleX = rect.width ? (natW / rect.width) : 1;
+      const baseScaleY = rect.height ? (natH / rect.height) : 1;
+      const mixX = 1 + (1 - this.#probeZoomLevel) * (Math.max(1, baseScaleX) - 1);
+      const mixY = 1 + (1 - this.#probeZoomLevel) * (Math.max(1, baseScaleY) - 1);
+      const sampleW = Math.max(1, diameter * mixX);
+      const sampleH = Math.max(1, diameter * mixY);
+      const sx = Math.max(0, Math.min(natW - sampleW, srcX - sampleW / 2));
+      const sy = Math.max(0, Math.min(natH - sampleH, srcY - sampleH / 2));
+      const sw = Math.min(sampleW, natW - sx);
+      const sh = Math.min(sampleH, natH - sy);
+      ctx.drawImage(sourceEl, sx, sy, sw, sh, 0, 0, diameter, diameter);
+    }
 
     const bubbleSize = diameter + 2;
     const half = bubbleSize / 2;
-    let left = e.clientX - half;
-    let top = e.clientY - half;
-    if (left + bubbleSize > window.innerWidth - 8) left = window.innerWidth - bubbleSize - 8;
-    if (top + bubbleSize > window.innerHeight - 8) top = window.innerHeight - bubbleSize - 8;
-    if (left < 8) left = 8;
-    if (top < 8) top = 8;
+    const intendedLeft = e.clientX - half;
+    const intendedTop = e.clientY - half;
+    const hostRect = this.getBoundingClientRect();
+    const minLeft = hostRect.left;
+    const minTop = hostRect.top;
+    const maxLeft = hostRect.right - bubbleSize;
+    const maxTop = hostRect.bottom - bubbleSize;
+    let left = intendedLeft;
+    let top = intendedTop;
+    left = Math.max(minLeft, Math.min(maxLeft, left));
+    top = Math.max(minTop, Math.min(maxTop, top));
     probe.style.left = `${left}px`;
     probe.style.top = `${top}px`;
     probe.classList.add('visible');
   }
 
   #render() {
-    const expandLabel = this.#expanded ? 'Fit to View' : 'Full Size';
-    const toggleLabel = this.#upscaledOnly ? 'Show Compare' : 'Show Enhanced';
+    const toggleLabel = this.#upscaledOnly ? 'Use Slider' : 'Use Zoom';
+    const zoomHint = this.#upscaledOnly && !this.#pixelZoomed
+      ? '<span class="compare-zoom-hint">Click = Fullscreen Zoom, R Click = Compare, Shift+Scroll = Bubble Size, Ctrl+Scroll = Zoom Factor</span>'
+      : '';
     const beforeLabel = esc(this.getAttribute('before-label') || 'Original');
     const afterLabel = esc(this.getAttribute('after-label') || '4x Upscaled');
     const cm = !!this.#afterCanvas;
@@ -463,7 +609,7 @@ class CompareSlider extends HTMLElement {
         .compare .compare-label-after { right: 8px; }
         .compare .compare-toolbar {
           position: absolute; bottom: 10px; right: 10px; z-index: 3;
-          display: flex; gap: 0.4rem; cursor: default;
+          display: flex; gap: 0.4rem; align-items: center; cursor: default;
         }
         .compare .compare-toolbar button {
           padding: 0.3rem 0.6rem; font-size: 0.75rem;
@@ -474,7 +620,19 @@ class CompareSlider extends HTMLElement {
         .compare .compare-toolbar button:hover {
           background: rgba(0,0,0,0.85); border-color: rgba(255,255,255,0.5);
         }
-        .compare.upscaled-only { cursor: none; }
+        .compare .compare-zoom-hint {
+          font-size: 0.62rem;
+          color: rgba(255,255,255,0.78);
+          white-space: nowrap;
+          text-shadow: 0 1px 2px rgba(0,0,0,0.55);
+          pointer-events: none;
+          margin-right: 0.15rem;
+          background: rgba(0,0,0,0.28);
+          border: 1px solid rgba(255,255,255,0.14);
+          border-radius: 999px;
+          padding: 0.2rem 0.45rem;
+        }
+        .compare.upscaled-only { cursor: crosshair; }
         .compare.upscaled-only .compare-toolbar { cursor: default; }
         .compare.upscaled-only .compare-toolbar button { cursor: pointer; }
         .compare.upscaled-only.pixel-zoom {
@@ -516,9 +674,15 @@ class CompareSlider extends HTMLElement {
           box-shadow: 0 2px 10px rgba(0,0,0,0.45);
           overflow: hidden;
           pointer-events: none;
-          z-index: 20;
+          z-index: 2;
           display: none;
           background: #111;
+        }
+        .compare .compare-pixel-probe.no-content {
+          background: transparent;
+        }
+        .compare .compare-pixel-probe.no-content .compare-pixel-probe-canvas {
+          display: none;
         }
         .compare .compare-pixel-probe.visible {
           display: block;
@@ -538,9 +702,9 @@ class CompareSlider extends HTMLElement {
       <span class="compare-label compare-label-before">${beforeLabel}</span>
       <span class="compare-label compare-label-after">${afterLabel}</span>
       <div class="compare-toolbar">
+        ${zoomHint}
         <button type="button" class="compare-toggle-upscaled-btn">${toggleLabel}</button>
         <button type="button" class="compare-open-btn">Open in Tab</button>
-        <button type="button" class="compare-expand-btn">${expandLabel}</button>
         <button type="button" class="compare-download-btn"><i class="fas fa-download"></i> Download</button>
       </div>
       <div class="compare-pixel-probe" aria-hidden="true">

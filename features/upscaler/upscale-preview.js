@@ -15,16 +15,18 @@ class UpscalePreview extends HTMLElement {
   #expanded = false;
   #naturalW = 0;
   #ctx = null;
+  #onWindowResize = () => {
+    if (this.style.display !== 'none') this.#applySize();
+  };
 
   connectedCallback() {
     this.classList.add('upscale-preview');
     this.#render();
+    window.addEventListener('resize', this.#onWindowResize);
+  }
 
-    this.addEventListener('click', e => {
-      const expandBtn = e.target.closest('.preview-expand-btn');
-      if (!expandBtn) return;
-      this.setExpanded(!this.#expanded);
-    });
+  disconnectedCallback() {
+    window.removeEventListener('resize', this.#onWindowResize);
   }
 
   get expanded() { return this.#expanded; }
@@ -87,21 +89,13 @@ class UpscalePreview extends HTMLElement {
     const next = !!expanded;
     if (this.#expanded === next) return;
     this.#expanded = next;
-    this.#syncExpandButtonLabel();
     if (this.style.display !== 'none') this.#applySize();
-    this.#emitViewState();
-  }
-
-  #syncExpandButtonLabel() {
-    const btn = this.querySelector('.preview-expand-btn');
-    if (!btn) return;
-    btn.textContent = this.#expanded ? 'Fit to View' : 'Full Size';
   }
 
   #applySize() {
     const canvas = this.querySelector('canvas');
     if (!canvas || !canvas.height) { this.style.maxWidth = ''; return; }
-    const maxH = window.innerHeight - 160;
+    const maxH = this.#getViewportFitHeight();
     const aspect = canvas.width / canvas.height;
     const fittedW = Math.round(maxH * aspect);
 
@@ -114,13 +108,22 @@ class UpscalePreview extends HTMLElement {
     }
   }
 
+  #getViewportFitHeight() {
+    const rect = this.getBoundingClientRect();
+    const parent = this.parentElement;
+    const parentPadBottom = parent ? (parseFloat(getComputedStyle(parent).paddingBottom) || 0) : 0;
+    const viewportGap = 8;
+    const top = Math.max(0, rect.top);
+    const available = window.innerHeight - top - parentPadBottom - viewportGap;
+    return Math.max(160, Math.round(available));
+  }
+
   #clearCanvas() {
     const canvas = this.querySelector('canvas');
     if (canvas) { canvas.width = 0; canvas.height = 0; }
   }
 
   #render() {
-    const expandLabel = this.#expanded ? 'Fit to View' : 'Full Size';
     morph(this, `
       <style>
         .upscale-preview { display: none; position: relative; }
@@ -135,32 +138,10 @@ class UpscalePreview extends HTMLElement {
           color: var(--pico-muted-color, #888);
           margin-bottom: 0.4rem;
         }
-        .upscale-preview .preview-toolbar {
-          position: absolute; bottom: 14px; right: 10px; z-index: 3;
-          display: flex; gap: 0.4rem;
-        }
-        .upscale-preview .preview-toolbar button {
-          padding: 0.3rem 0.6rem; font-size: 0.75rem;
-          background: rgba(0,0,0,0.65); color: #eee; border: 1px solid rgba(255,255,255,0.3);
-          border-radius: 4px; cursor: pointer; white-space: nowrap;
-          backdrop-filter: blur(4px); width: auto; margin: 0;
-        }
-        .upscale-preview .preview-toolbar button:hover {
-          background: rgba(0,0,0,0.85); border-color: rgba(255,255,255,0.5);
-        }
       </style>
       <h3 class="upscale-preview-label">${this.#labelText}</h3>
       <canvas></canvas>
-      <div class="preview-toolbar">
-        <button class="preview-expand-btn">${expandLabel}</button>
-      </div>
     `);
-  }
-
-  #emitViewState() {
-    this.dispatchEvent(new CustomEvent('view-state-change', {
-      detail: { expanded: this.#expanded },
-    }));
   }
 }
 

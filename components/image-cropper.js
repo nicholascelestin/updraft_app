@@ -10,9 +10,14 @@ import { morph } from 'lib/morph';
 class ImageCropper extends HTMLElement {
   #image = null;
   #crop = null;
+  #expanded = false;
+  #naturalW = 0;
   #dragging = false;
   #dragStart = null;
   #dragCurrent = null;
+  #onWindowResize = () => {
+    if (this.style.display !== 'none') this.#applySize();
+  };
 
   #onWindowMouseMove = (e) => { if (this.#dragging) { this.#dragCurrent = this.#eventToElement(e); this.#drawOverlay(); } };
   #onWindowTouchMove = (e) => { if (this.#dragging) { this.#dragCurrent = this.#eventToElement(e); this.#drawOverlay(); } };
@@ -47,6 +52,7 @@ class ImageCropper extends HTMLElement {
     window.addEventListener('touchmove', this.#onWindowTouchMove, { passive: true });
     window.addEventListener('mouseup', this.#onWindowMouseUp);
     window.addEventListener('touchend', this.#onWindowTouchEnd);
+    window.addEventListener('resize', this.#onWindowResize);
   }
 
   disconnectedCallback() {
@@ -54,19 +60,23 @@ class ImageCropper extends HTMLElement {
     window.removeEventListener('touchmove', this.#onWindowTouchMove);
     window.removeEventListener('mouseup', this.#onWindowMouseUp);
     window.removeEventListener('touchend', this.#onWindowTouchEnd);
+    window.removeEventListener('resize', this.#onWindowResize);
   }
 
   show(image) {
     this.#image = image;
+    this.#naturalW = image?.width || 0;
     this.#crop = null;
     this.#render();
     this.style.display = 'block';
     this.#resizeCanvas();
     this.#drawOverlay();
+    this.#applySize();
   }
 
   hide() {
     this.style.display = 'none';
+    this.style.maxWidth = '';
     this.#image = null;
     this.#crop = null;
     const canvas = this.querySelector('canvas');
@@ -82,6 +92,14 @@ class ImageCropper extends HTMLElement {
   }
 
   get crop() { return this.#crop; }
+  get expanded() { return this.#expanded; }
+
+  setExpanded(expanded) {
+    const next = !!expanded;
+    if (this.#expanded === next) return;
+    this.#expanded = next;
+    if (this.style.display !== 'none') this.#applySize();
+  }
 
   extractImage() {
     const img = this.#image;
@@ -102,6 +120,34 @@ class ImageCropper extends HTMLElement {
     if (!canvas) return;
     canvas.width = this.#image.width;
     canvas.height = this.#image.height;
+  }
+
+  #applySize() {
+    const canvas = this.querySelector('canvas');
+    if (!canvas || !canvas.height) {
+      this.style.maxWidth = '';
+      return;
+    }
+    const maxH = this.#getViewportFitHeight();
+    const aspect = canvas.width / canvas.height;
+    const fittedW = Math.round(maxH * aspect);
+    if (this.#expanded) {
+      const naturalW = this.#naturalW || canvas.width || 0;
+      const minExpandedW = Math.max(naturalW, fittedW);
+      this.style.maxWidth = minExpandedW ? minExpandedW + 'px' : '';
+    } else {
+      this.style.maxWidth = Math.min(fittedW, this.#naturalW || Infinity) + 'px';
+    }
+  }
+
+  #getViewportFitHeight() {
+    const rect = this.getBoundingClientRect();
+    const parent = this.parentElement;
+    const parentPadBottom = parent ? (parseFloat(getComputedStyle(parent).paddingBottom) || 0) : 0;
+    const viewportGap = 8;
+    const top = Math.max(0, rect.top);
+    const available = window.innerHeight - top - parentPadBottom - viewportGap;
+    return Math.max(160, Math.round(available));
   }
 
   #eventToElement(e) {
@@ -192,7 +238,7 @@ class ImageCropper extends HTMLElement {
       ? `${this.#crop.w}\u00d7${this.#crop.h} selected`
       : 'Click and drag to select a region (optional)';
     const clearBtn = this.#crop
-      ? '<button class="crop-clear outline secondary" style="padding:0.2rem 0.6rem; font-size:0.75rem">Clear selection</button>'
+      ? '<button type="button" class="crop-clear">Clear Selection</button>'
       : '';
 
     morph(this, `
@@ -206,6 +252,23 @@ class ImageCropper extends HTMLElement {
         .image-cropper .crop-info {
           display: flex; align-items: center; gap: 0.75rem;
           font-size: 0.8rem; color: var(--pico-muted-color, #888); margin-bottom: 0.4rem;
+        }
+        .image-cropper .crop-info .crop-clear {
+          padding: 0.3rem 0.6rem;
+          font-size: 0.75rem;
+          background: rgba(0,0,0,0.65);
+          color: #eee;
+          border: 1px solid rgba(255,255,255,0.3);
+          border-radius: 4px;
+          cursor: pointer;
+          white-space: nowrap;
+          backdrop-filter: blur(4px);
+          width: auto;
+          margin: 0;
+        }
+        .image-cropper .crop-info .crop-clear:hover {
+          background: rgba(0,0,0,0.85);
+          border-color: rgba(255,255,255,0.5);
         }
       </style>
       <div class="crop-info">
