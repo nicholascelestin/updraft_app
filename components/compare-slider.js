@@ -9,14 +9,11 @@ const PROBE_PREFS_KEY = 'upscaler_compare_probe_prefs_v1';
 
 class CompareSlider extends HTMLElement {
   #dragging = false;
-  #resizeObserver;
   #beforeSrc = '';
   #afterSrc = '';
-  #expanded = false;
   #upscaledOnly = false;
   #pixelZoomed = false;
   #positionFrac = 0.5;
-  #naturalMaxWidth = 0;
   #downloadSrc = '';
   #downloadName = '';
   #beforeCanvas = null;
@@ -32,12 +29,6 @@ class CompareSlider extends HTMLElement {
   #probeZoomStep = 0.08;
   #probeCompareHeld = false;
   #lastProbePoint = null;
-  #onWindowResize = () => {
-    if (this.style.display !== 'none') {
-      this.#applySize();
-      if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
-    }
-  };
 
   #onWindowMouseMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
   #onWindowTouchMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
@@ -88,7 +79,6 @@ class CompareSlider extends HTMLElement {
     window.addEventListener('touchmove', this.#onWindowTouchMove, { passive: true });
     window.addEventListener('mouseup', this.#onWindowMouseUp);
     window.addEventListener('touchend', this.#onWindowTouchEnd);
-    window.addEventListener('resize', this.#onWindowResize);
 
     this.addEventListener('click', async e => {
       const openBtn = e.target.closest('.compare-open-btn');
@@ -101,7 +91,7 @@ class CompareSlider extends HTMLElement {
         return;
       }
       if (toggleBtn) {
-        this.toggleUpscaledView();
+        this.#toggleUpscaledView();
         return;
       }
       if (downloadBtn) {
@@ -138,23 +128,13 @@ class CompareSlider extends HTMLElement {
       this.#hidePixelProbe();
     });
     this.addEventListener('wheel', this.#onWheel, { passive: false });
-
-    this.#resizeObserver = new ResizeObserver(() => {
-      if (this.style.display !== 'none') {
-        const el = this.querySelector('.compare-before-wrap img, .compare-before-wrap canvas');
-        if (el) el.style.width = this.offsetWidth + 'px';
-      }
-    });
-    this.#resizeObserver.observe(this);
   }
 
   disconnectedCallback() {
-    this.#resizeObserver?.disconnect();
     window.removeEventListener('mousemove', this.#onWindowMouseMove);
     window.removeEventListener('touchmove', this.#onWindowTouchMove);
     window.removeEventListener('mouseup', this.#onWindowMouseUp);
     window.removeEventListener('touchend', this.#onWindowTouchEnd);
-    window.removeEventListener('resize', this.#onWindowResize);
     this.removeEventListener('wheel', this.#onWheel);
   }
 
@@ -189,9 +169,19 @@ class CompareSlider extends HTMLElement {
       ));
     }
 
-    this.#naturalMaxWidth = parseInt(this.style.maxWidth, 10) || 0;
+    const afterEl = this.querySelector('.compare-after');
+    const natW = canvasMode
+      ? (this.#afterCanvas?.width || 0)
+      : (afterEl?.naturalWidth || 0);
+    const natH = canvasMode
+      ? (this.#afterCanvas?.height || 0)
+      : (afterEl?.naturalHeight || 0);
+    if (natW && natH) {
+      this.style.setProperty('--ar', `${natW} / ${natH}`);
+      this.style.setProperty('--natural-w', `${natW}px`);
+    }
+
     this.style.display = 'block';
-    this.#applySize();
     this.#setPosition(this.#positionFrac);
     this.#syncModeClass();
     if (canvasMode) this.#prepareLazyDownload();
@@ -199,9 +189,8 @@ class CompareSlider extends HTMLElement {
 
   hide() {
     this.style.display = 'none';
-    this.style.width = '';
-    this.style.maxWidth = '';
-    this.style.maxHeight = '';
+    this.style.removeProperty('--ar');
+    this.style.removeProperty('--natural-w');
     this.#hidePixelProbe();
     this.#beforeCanvas = null;
     this.#afterCanvas = null;
@@ -215,30 +204,22 @@ class CompareSlider extends HTMLElement {
     }
   }
 
-  get afterSrc() { return this.#afterSrc; }
-
-  toggleExpand() {
-    this.#expanded = !this.#expanded;
-    this.#applySize();
-    this.#emitViewState();
-  }
-
-  get expanded() { return this.#expanded; }
-  get upscaledOnly() { return this.#upscaledOnly; }
-
-  toggleUpscaledView() {
-    this.#upscaledOnly = !this.#upscaledOnly;
+  setUpscaledOnly(upscaledOnly) {
+    this.#upscaledOnly = !!upscaledOnly;
     this.#pixelZoomed = false;
     this.#probeCompareHeld = false;
     this.#hidePixelProbe();
     this.#render();
-    this.#syncModeClass();
-    if (this.style.display !== 'none') this.#applySize();
     if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
+    this.#syncModeClass();
+  }
+
+  #toggleUpscaledView() {
+    this.setUpscaledOnly(!this.#upscaledOnly);
     this.#emitViewState();
   }
 
-  togglePixelZoom() {
+  #togglePixelZoom() {
     if (!this.#upscaledOnly) return;
     this.#pixelZoomed = !this.#pixelZoomed;
     this.#probeCompareHeld = false;
@@ -247,29 +228,28 @@ class CompareSlider extends HTMLElement {
       this.scrollTop = 0;
     }
     this.#hidePixelProbe();
-    if (this.style.display !== 'none') this.#applySize();
     this.#syncModeClass();
     this.#emitViewState();
   }
 
   #togglePixelZoomAtPoint(clientX, clientY) {
     if (!this.#upscaledOnly || this.#pixelZoomed) {
-      this.togglePixelZoom();
+      this.#togglePixelZoom();
       return;
     }
     const afterEl = this.querySelector('.compare-after');
     if (!afterEl) {
-      this.togglePixelZoom();
+      this.#togglePixelZoom();
       return;
     }
     const rect = afterEl.getBoundingClientRect();
     if (!rect.width || !rect.height) {
-      this.togglePixelZoom();
+      this.#togglePixelZoom();
       return;
     }
     const fracX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
     const fracY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-    this.togglePixelZoom();
+    this.#togglePixelZoom();
     requestAnimationFrame(() => {
       const zoomedAfter = this.querySelector('.compare-after');
       if (!zoomedAfter || !this.#pixelZoomed) return;
@@ -280,72 +260,6 @@ class CompareSlider extends HTMLElement {
       this.scrollLeft = Math.max(0, Math.min(maxScrollLeft, targetX - this.clientWidth / 2));
       this.scrollTop = Math.max(0, Math.min(maxScrollTop, targetY - this.clientHeight / 2));
     });
-  }
-
-  setExpanded(expanded) {
-    const next = !!expanded;
-    if (this.#expanded === next) return;
-    this.#expanded = next;
-    if (this.style.display !== 'none') this.#applySize();
-    this.#render();
-    this.#syncModeClass();
-  }
-
-  setViewState({ expanded, upscaledOnly } = {}) {
-    if (typeof expanded === 'boolean') this.#expanded = expanded;
-    if (typeof upscaledOnly === 'boolean') this.#upscaledOnly = upscaledOnly;
-    this.#pixelZoomed = false;
-    this.#probeCompareHeld = false;
-    this.#hidePixelProbe();
-    this.#render();
-    if (this.style.display !== 'none') {
-      this.#applySize();
-      this.#setPosition(this.#positionFrac);
-    }
-    this.#syncModeClass();
-  }
-
-  #applySize() {
-    const afterEl = this.querySelector('.compare-after');
-    if (!afterEl) return;
-    const natW = afterEl.naturalWidth || afterEl.width;
-    const natH = afterEl.naturalHeight || afterEl.height;
-    const maxH = this.#getViewportFitHeight();
-    const aspect = natW / natH;
-    const fittedW = Math.round(maxH * aspect);
-
-    if (this.#upscaledOnly && this.#pixelZoomed) {
-      this.style.width = '';
-      this.style.maxWidth = '';
-      this.style.maxHeight = '';
-      return;
-    }
-
-    this.style.width = '';
-    this.style.maxHeight = '';
-    if (this.#expanded) {
-      const expandedNatW = this.#naturalMaxWidth || natW || 0;
-      const minExpandedW = Math.max(expandedNatW, fittedW);
-      this.style.maxWidth = minExpandedW ? minExpandedW + 'px' : '';
-    } else {
-      const callerMax = this.#naturalMaxWidth || Infinity;
-      this.style.maxWidth = Math.min(fittedW, callerMax) + 'px';
-    }
-
-    requestAnimationFrame(() => {
-      const el = this.querySelector('.compare-before-wrap img, .compare-before-wrap canvas');
-      if (el) el.style.width = this.offsetWidth + 'px';
-    });
-  }
-
-  #getViewportFitHeight() {
-    const rect = this.getBoundingClientRect();
-    const parent = this.parentElement;
-    const parentPadBottom = parent ? (parseFloat(getComputedStyle(parent).paddingBottom) || 0) : 0;
-    const viewportGap = 8;
-    const top = Math.max(0, rect.top);
-    const available = window.innerHeight - top - parentPadBottom - viewportGap;
-    return Math.max(160, Math.round(available));
   }
 
   #getFrac(e) {
@@ -360,10 +274,8 @@ class CompareSlider extends HTMLElement {
     const pct = (clamped * 100).toFixed(2) + '%';
     const wrap = this.querySelector('.compare-before-wrap');
     const handle = this.querySelector('.compare-handle');
-    const media = this.querySelector('.compare-before-wrap img, .compare-before-wrap canvas');
     if (wrap) wrap.style.width = pct;
     if (handle) handle.style.left = pct;
-    if (media) media.style.width = this.offsetWidth + 'px';
   }
 
   #syncModeClass() {
@@ -375,7 +287,6 @@ class CompareSlider extends HTMLElement {
   #emitViewState() {
     this.dispatchEvent(new CustomEvent('view-state-change', {
       detail: {
-        expanded: this.#expanded,
         upscaledOnly: this.#upscaledOnly,
         pixelZoomed: this.#pixelZoomed,
       },
@@ -576,6 +487,15 @@ class CompareSlider extends HTMLElement {
           border: 1px solid var(--pico-muted-border-color, #333);
           border-radius: var(--pico-border-radius, 4px);
           cursor: col-resize; user-select: none; max-width: 100%;
+        }
+        .compare:not(.expanded) {
+          width: auto;
+          max-width: min(100%, var(--natural-w, 100%));
+          max-height: 100vh;
+          aspect-ratio: var(--ar, auto);
+        }
+        .compare.expanded {
+          width: 100%;
         }
         .compare img, .compare canvas { display: block; width: 100%; height: auto; pointer-events: none; }
         .compare .compare-before-wrap {

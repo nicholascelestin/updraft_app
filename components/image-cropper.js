@@ -10,14 +10,9 @@ import { morph } from 'lib/morph';
 class ImageCropper extends HTMLElement {
   #image = null;
   #crop = null;
-  #expanded = false;
-  #naturalW = 0;
   #dragging = false;
   #dragStart = null;
   #dragCurrent = null;
-  #onWindowResize = () => {
-    if (this.style.display !== 'none') this.#applySize();
-  };
 
   #onWindowMouseMove = (e) => { if (this.#dragging) { this.#dragCurrent = this.#eventToElement(e); this.#drawOverlay(); } };
   #onWindowTouchMove = (e) => { if (this.#dragging) { this.#dragCurrent = this.#eventToElement(e); this.#drawOverlay(); } };
@@ -52,7 +47,6 @@ class ImageCropper extends HTMLElement {
     window.addEventListener('touchmove', this.#onWindowTouchMove, { passive: true });
     window.addEventListener('mouseup', this.#onWindowMouseUp);
     window.addEventListener('touchend', this.#onWindowTouchEnd);
-    window.addEventListener('resize', this.#onWindowResize);
   }
 
   disconnectedCallback() {
@@ -60,23 +54,23 @@ class ImageCropper extends HTMLElement {
     window.removeEventListener('touchmove', this.#onWindowTouchMove);
     window.removeEventListener('mouseup', this.#onWindowMouseUp);
     window.removeEventListener('touchend', this.#onWindowTouchEnd);
-    window.removeEventListener('resize', this.#onWindowResize);
   }
 
   show(image) {
     this.#image = image;
-    this.#naturalW = image?.width || 0;
     this.#crop = null;
+    this.style.setProperty('--ar', `${image.width} / ${image.height}`);
+    this.style.setProperty('--natural-w', `${image.width}px`);
     this.#render();
     this.style.display = 'block';
     this.#resizeCanvas();
     this.#drawOverlay();
-    this.#applySize();
   }
 
   hide() {
     this.style.display = 'none';
-    this.style.maxWidth = '';
+    this.style.removeProperty('--ar');
+    this.style.removeProperty('--natural-w');
     this.#image = null;
     this.#crop = null;
     const canvas = this.querySelector('canvas');
@@ -92,14 +86,6 @@ class ImageCropper extends HTMLElement {
   }
 
   get crop() { return this.#crop; }
-  get expanded() { return this.#expanded; }
-
-  setExpanded(expanded) {
-    const next = !!expanded;
-    if (this.#expanded === next) return;
-    this.#expanded = next;
-    if (this.style.display !== 'none') this.#applySize();
-  }
 
   extractImage() {
     const img = this.#image;
@@ -120,34 +106,6 @@ class ImageCropper extends HTMLElement {
     if (!canvas) return;
     canvas.width = this.#image.width;
     canvas.height = this.#image.height;
-  }
-
-  #applySize() {
-    const canvas = this.querySelector('canvas');
-    if (!canvas || !canvas.height) {
-      this.style.maxWidth = '';
-      return;
-    }
-    const maxH = this.#getViewportFitHeight();
-    const aspect = canvas.width / canvas.height;
-    const fittedW = Math.round(maxH * aspect);
-    if (this.#expanded) {
-      const naturalW = this.#naturalW || canvas.width || 0;
-      const minExpandedW = Math.max(naturalW, fittedW);
-      this.style.maxWidth = minExpandedW ? minExpandedW + 'px' : '';
-    } else {
-      this.style.maxWidth = Math.min(fittedW, this.#naturalW || Infinity) + 'px';
-    }
-  }
-
-  #getViewportFitHeight() {
-    const rect = this.getBoundingClientRect();
-    const parent = this.parentElement;
-    const parentPadBottom = parent ? (parseFloat(getComputedStyle(parent).paddingBottom) || 0) : 0;
-    const viewportGap = 8;
-    const top = Math.max(0, rect.top);
-    const available = window.innerHeight - top - parentPadBottom - viewportGap;
-    return Math.max(160, Math.round(available));
   }
 
   #eventToElement(e) {
@@ -244,10 +202,23 @@ class ImageCropper extends HTMLElement {
     morph(this, `
       <style>
         .image-cropper { display: none; }
+        .image-cropper:not(.expanded) {
+          width: auto;
+          max-width: min(100%, var(--natural-w, 100%));
+          max-height: 100vh;
+          aspect-ratio: var(--ar, auto);
+        }
+        .image-cropper.expanded {
+          width: 100%;
+        }
         .image-cropper canvas {
-          max-width: 100%; border: 1px solid var(--pico-muted-border-color, #333);
+          display: block;
+          width: 100%;
+          height: auto;
+          max-width: 100%;
+          border: 1px solid var(--pico-muted-border-color, #333);
           border-radius: var(--pico-border-radius, 4px);
-          cursor: crosshair; display: block;
+          cursor: crosshair;
         }
         .image-cropper .crop-info {
           display: flex; align-items: center; gap: 0.75rem;

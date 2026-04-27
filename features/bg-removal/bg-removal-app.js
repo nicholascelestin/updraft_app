@@ -163,8 +163,6 @@ class BgRemovalApp extends HTMLElement {
         this.#beforeBlobUrl = await imageToBlobUrl(inputImage);
 
         // Show compare slider: original vs result-on-checkerboard
-        const maxW = Math.max(w, 800);
-        compareSlider.style.maxWidth = maxW + 'px';
         await compareSlider.show(this.#beforeBlobUrl, this.#checkerBlobUrl, {
           downloadSrc: this.#transparentBlobUrl,
           downloadName: 'bg_removed.png',

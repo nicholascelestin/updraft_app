@@ -3,33 +3,18 @@
  *
  * Pure presentation component. The parent orchestrates engines and the
  * upscale pipeline; this element just renders tiles as they arrive.
- *
- * Events emitted:
- *   view-state-change — detail: { expanded }
  */
 
 import { morph } from 'lib/morph';
 
 class UpscalePreview extends HTMLElement {
   #labelText = '';
-  #expanded = false;
-  #naturalW = 0;
   #ctx = null;
-  #onWindowResize = () => {
-    if (this.style.display !== 'none') this.#applySize();
-  };
 
   connectedCallback() {
     this.classList.add('upscale-preview');
     this.#render();
-    window.addEventListener('resize', this.#onWindowResize);
   }
-
-  disconnectedCallback() {
-    window.removeEventListener('resize', this.#onWindowResize);
-  }
-
-  get expanded() { return this.#expanded; }
 
   /**
    * Set up the canvas with a dimmed version of the source image,
@@ -37,14 +22,14 @@ class UpscalePreview extends HTMLElement {
    */
   showDimmedPreview(image, outW, outH, label) {
     this.#labelText = label;
-    this.#naturalW = outW;
+    this.style.setProperty('--ar', `${outW} / ${outH}`);
+    this.style.setProperty('--natural-w', `${outW}px`);
     this.#render();
     this.style.display = 'block';
 
     const canvas = this.querySelector('canvas');
     canvas.width = outW;
     canvas.height = outH;
-    this.#applySize();
     const ctx = canvas.getContext('2d');
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(image, 0, 0, outW, outH);
@@ -71,64 +56,33 @@ class UpscalePreview extends HTMLElement {
     if (needsAlpha) this.#ctx.restore();
   }
 
-  cleanup() {
-    this.#clearCanvas();
-    this.#ctx = null;
-  }
-
-  show() { this.style.display = 'block'; }
-
   hide() {
     this.style.display = 'none';
-    this.style.maxWidth = '';
-    this.#clearCanvas();
-    this.#ctx = null;
-  }
-
-  setExpanded(expanded) {
-    const next = !!expanded;
-    if (this.#expanded === next) return;
-    this.#expanded = next;
-    if (this.style.display !== 'none') this.#applySize();
-  }
-
-  #applySize() {
-    const canvas = this.querySelector('canvas');
-    if (!canvas || !canvas.height) { this.style.maxWidth = ''; return; }
-    const maxH = this.#getViewportFitHeight();
-    const aspect = canvas.width / canvas.height;
-    const fittedW = Math.round(maxH * aspect);
-
-    if (this.#expanded) {
-      const naturalW = this.#naturalW || canvas.width || 0;
-      const minExpandedW = Math.max(naturalW, fittedW);
-      this.style.maxWidth = minExpandedW ? minExpandedW + 'px' : '';
-    } else {
-      this.style.maxWidth = Math.min(fittedW, this.#naturalW || Infinity) + 'px';
-    }
-  }
-
-  #getViewportFitHeight() {
-    const rect = this.getBoundingClientRect();
-    const parent = this.parentElement;
-    const parentPadBottom = parent ? (parseFloat(getComputedStyle(parent).paddingBottom) || 0) : 0;
-    const viewportGap = 8;
-    const top = Math.max(0, rect.top);
-    const available = window.innerHeight - top - parentPadBottom - viewportGap;
-    return Math.max(160, Math.round(available));
-  }
-
-  #clearCanvas() {
+    this.style.removeProperty('--ar');
+    this.style.removeProperty('--natural-w');
     const canvas = this.querySelector('canvas');
     if (canvas) { canvas.width = 0; canvas.height = 0; }
+    this.#ctx = null;
   }
 
   #render() {
     morph(this, `
       <style>
         .upscale-preview { display: none; position: relative; }
+        .upscale-preview:not(.expanded) {
+          width: auto;
+          max-width: min(100%, var(--natural-w, 100%));
+          max-height: 100vh;
+          aspect-ratio: var(--ar, auto);
+        }
+        .upscale-preview.expanded {
+          width: 100%;
+        }
         .upscale-preview canvas {
-          display: block; width: 100%; max-width: 100%; height: auto;
+          display: block;
+          width: 100%;
+          height: auto;
+          max-width: 100%;
           border: 1px solid var(--pico-muted-border-color, #333);
           border-radius: var(--pico-border-radius, 4px);
           background: #000;

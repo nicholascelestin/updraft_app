@@ -11,15 +11,14 @@ import {
   getCustomModelByUrl,
   getUploadCustomOptionHTML,
   listCustomModels,
-  saveCustomModel,
 } from './custom-model-store.js';
-import { inspectCustomModelFile } from './custom-model-inspector.js';
 import 'components/image-drop-zone';
 import 'components/status-bar';
 import 'components/image-cropper';
 import 'components/compare-slider';
 import './upscale-preview.js';
 import './perf-monitor.js';
+import './custom-model-upload-dialog.js';
 
 function escapeHtml(value) {
   return String(value)
@@ -32,12 +31,84 @@ function escapeHtml(value) {
 
 const UPLOAD_CUSTOM_VALUE = '__upload_custom__';
 
+// Single source of truth for localStorage <-> form control wiring.
+// `kind` is 'value' for inputs/selects, 'checked' for checkboxes.
+const PERSISTED_CONTROLS = [
+  { selector: '.runpod-endpoint',         key: 'upscaler_runpod_endpoint',         kind: 'value',   event: 'input' },
+  { selector: '.runpod-apikey',           key: 'upscaler_runpod_apikey',           kind: 'value',   event: 'input' },
+  { selector: '.tilesize-select',         key: 'upscaler_tilesize',                kind: 'value',   event: 'change' },
+  { selector: '.backend-select',          key: 'upscaler_backend',                 kind: 'value',   event: 'change' },
+  { selector: '.output-select',           key: 'upscaler_output',                  kind: 'value',   event: 'change' },
+  { selector: '.pass-all-enabled',        key: 'upscaler_pass_all_enabled',        kind: 'checked', event: 'change' },
+  { selector: '.pass-all-blend',          key: 'upscaler_pass_all_blend',          kind: 'value',   event: 'input' },
+  { selector: '.pass-all-model',          key: 'upscaler_pass_all_model',          kind: 'value',   event: 'change' },
+  { selector: '.detector-face-enabled',   key: 'upscaler_detector_face_enabled',   kind: 'checked', event: 'change' },
+  { selector: '.detector-face-padding',   key: 'upscaler_detector_face_padding_px', kind: 'value',   event: 'input' },
+  { selector: '.detector-face-score',     key: 'upscaler_detector_face_score',     kind: 'value',   event: 'input' },
+  { selector: '.detector-face-blend',     key: 'upscaler_detector_face_blend',     kind: 'value',   event: 'input' },
+  { selector: '.detector-face-model',     key: 'upscaler_detector_face_model',     kind: 'value',   event: 'change' },
+];
+
+function readControl(el, kind) {
+  return kind === 'checked' ? (el.checked ? '1' : '0') : el.value;
+}
+function writeControl(el, kind, saved) {
+  if (kind === 'checked') el.checked = saved === '1';
+  else el.value = saved;
+}
+
+/**
+ * Format a pipeline/inference error for end users.
+ * Detects the ONNX reshape-window-size failure and adds a remediation hint
+ * derived from the model's declared layout/multiple-of and any dimensions
+ * the runtime reported in the raw error. Pure: caller passes the relevant
+ * model facts so this function stays DOM-free and unit-testable.
+ */
+function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1 } = {}) {
+  const raw = error?.message || String(error || 'Unknown error');
+  const isReshapeWindowError =
+    /reshape_helper\.h/i.test(raw) ||
+    /input_shape_size == size/i.test(raw) ||
+    /cannot be reshaped to the requested shape/i.test(raw);
+  if (!isReshapeWindowError) return raw;
+
+  const upperLayout = String(layout).toUpperCase();
+  const altLayout = upperLayout === 'NHWC' ? 'NCHW' : 'NHWC';
+  const parseShape = (text) => String(text || '')
+    .split(',')
+    .map((v) => parseInt(v.trim(), 10))
+    .filter(Number.isFinite);
+  const shapeMatch = raw.match(/Input shape:\{([^}]*)\}.*requested shape:\{([^}]*)\}/i);
+  const inputDims = shapeMatch ? parseShape(shapeMatch[1]) : [];
+  const requestedDims = shapeMatch ? parseShape(shapeMatch[2]) : [];
+
+  let inferredMultiple = 0;
+  const pow2Requested = requestedDims.filter((d) => d > 1 && d <= 256 && (d & (d - 1)) === 0);
+  if (pow2Requested.length) {
+    inferredMultiple = Math.max(...pow2Requested);
+  }
+  if (inputDims.length > 0 && requestedDims.length > 1) {
+    const likelyGroup = requestedDims[1];
+    if (Number.isFinite(likelyGroup) && likelyGroup > 1 && inputDims[0] % likelyGroup !== 0) {
+      inferredMultiple = Math.max(inferredMultiple, likelyGroup);
+    }
+  }
+
+  const suggestedMultiple = Math.max(multipleOf > 1 ? multipleOf : 8, inferredMultiple || 0);
+  const specificHint = inferredMultiple > 8
+    ? ` Based on the reported reshape, try Multiple-of ${inferredMultiple} first.`
+    : '';
+  return `Model reshape failed (likely window-size constraint). Try setting Multiple-of to ${suggestedMultiple} (common values: 8/16/32/64) and/or switch Layout to ${altLayout}.${specificHint} Raw error: ${raw}`;
+}
+
 class UpscalerApp extends HTMLElement {
   #loadedImage = null;
   #running = false;
   #generation = 0;
   #viewState = { expanded: false, upscaledOnly: false };
   #customModels = [];
+  #previousModelValue = '';
+  #outputBaseLabels = null;
 
   #pipeline = new Pipeline();
   #abortController = null;
@@ -47,7 +118,6 @@ class UpscalerApp extends HTMLElement {
     this.#customModels = listCustomModels();
     this.#refreshModelSelectOptions(localStorage.getItem('upscaler_model') || undefined);
     this.#setupPersistence();
-    this.#setupModeSwitch();
     this.#setupViewStateSync();
     this.#setupUpscaleActions();
     this.#restoreSettings();
@@ -59,45 +129,6 @@ class UpscalerApp extends HTMLElement {
     const btn = this.#q('.viewsize-btn');
     if (!btn) return;
     btn.textContent = this.#viewState.expanded ? 'Fit to View' : 'Full Size';
-  }
-
-  #formatUpscaleErrorMessage(error) {
-    const raw = error?.message || String(error || 'Unknown error');
-    const isReshapeWindowError =
-      /reshape_helper\.h/i.test(raw) ||
-      /input_shape_size == size/i.test(raw) ||
-      /cannot be reshaped to the requested shape/i.test(raw);
-    if (!isReshapeWindowError) return raw;
-
-    const modelOpt = this.#q('.model-select')?.selectedOptions?.[0];
-    const layout = (modelOpt?.dataset?.layout || 'nchw').toUpperCase();
-    const multiple = parseInt(modelOpt?.dataset?.multipleof, 10) || 1;
-    const altLayout = layout === 'NHWC' ? 'NCHW' : 'NHWC';
-    const parseShape = (text) => String(text || '')
-      .split(',')
-      .map((v) => parseInt(v.trim(), 10))
-      .filter(Number.isFinite);
-    const shapeMatch = raw.match(/Input shape:\{([^}]*)\}.*requested shape:\{([^}]*)\}/i);
-    const inputDims = shapeMatch ? parseShape(shapeMatch[1]) : [];
-    const requestedDims = shapeMatch ? parseShape(shapeMatch[2]) : [];
-
-    let inferredMultiple = 0;
-    const pow2Requested = requestedDims.filter((d) => d > 1 && d <= 256 && (d & (d - 1)) === 0);
-    if (pow2Requested.length) {
-      inferredMultiple = Math.max(...pow2Requested);
-    }
-    if (inputDims.length > 0 && requestedDims.length > 1) {
-      const likelyGroup = requestedDims[1];
-      if (Number.isFinite(likelyGroup) && likelyGroup > 1 && inputDims[0] % likelyGroup !== 0) {
-        inferredMultiple = Math.max(inferredMultiple, likelyGroup);
-      }
-    }
-
-    const suggestedMultiple = Math.max(multiple > 1 ? multiple : 8, inferredMultiple || 0);
-    const specificHint = inferredMultiple > 8
-      ? ` Based on the reported reshape, try Multiple-of ${inferredMultiple} first.`
-      : '';
-    return `Model reshape failed (likely window-size constraint). Try setting Multiple-of to ${suggestedMultiple} (common values: 8/16/32/64) and/or switch Layout to ${altLayout}.${specificHint} Raw error: ${raw}`;
   }
 
   #getCustomModelOptionsHTML(selected) {
@@ -127,153 +158,6 @@ class UpscalerApp extends HTMLElement {
     ].filter(Boolean).join('\n              ');
     if (selected) modelEl.value = selected;
     if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
-  }
-
-  async #showCustomModelUploadModal(defaultScale = 4) {
-    const dialog = this.#q('.custom-model-dialog');
-    const form = this.#q('.custom-model-form');
-    const fileInput = this.#q('.custom-model-file');
-    const labelInput = this.#q('.custom-model-label');
-    const scaleInput = this.#q('.custom-model-scale');
-    const rangeInput = this.#q('.custom-model-range');
-    const layoutInput = this.#q('.custom-model-layout');
-    const multipleInput = this.#q('.custom-model-multiple');
-    const sizeLabel = this.#q('.custom-model-size');
-    const detectLabel = this.#q('.custom-model-detected');
-    const errorLabel = this.#q('.custom-model-error');
-    const saveBtn = this.#q('.custom-model-save-btn');
-    const cancelBtn = this.#q('.custom-model-cancel-btn');
-
-    if (!dialog || !form || !fileInput || !labelInput || !scaleInput || !rangeInput || !layoutInput || !multipleInput || !sizeLabel || !detectLabel || !errorLabel || !saveBtn || !cancelBtn) {
-      throw new Error('Custom model upload UI is unavailable.');
-    }
-
-    fileInput.value = '';
-    labelInput.value = '';
-    scaleInput.value = String(defaultScale);
-    rangeInput.value = '1';
-    layoutInput.value = 'nchw';
-    multipleInput.value = '1';
-    errorLabel.textContent = '';
-    sizeLabel.textContent = 'Model size: -';
-    detectLabel.textContent = 'Auto-detect: waiting for model file…';
-    saveBtn.disabled = false;
-
-    return new Promise((resolve) => {
-      let settled = false;
-      let inspectSeq = 0;
-      const cleanup = () => {
-        form.removeEventListener('submit', onSubmit);
-        fileInput.removeEventListener('change', onFileChange);
-        cancelBtn.removeEventListener('click', onCancel);
-        dialog.removeEventListener('cancel', onCancel);
-        dialog.removeEventListener('close', onClose);
-      };
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(result);
-      };
-      const onFileChange = () => {
-        const seq = ++inspectSeq;
-        const file = fileInput.files?.[0];
-        if (!file) {
-          sizeLabel.textContent = 'Model size: -';
-          detectLabel.textContent = 'Auto-detect: waiting for model file…';
-          return;
-        }
-        const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
-        sizeLabel.textContent = `Model size: ~${sizeMB} MB`;
-        errorLabel.textContent = '';
-        if (!labelInput.value.trim()) {
-          labelInput.value = file.name.replace(/\.onnx$/i, '');
-        }
-        detectLabel.textContent = 'Auto-detect: inspecting ONNX metadata…';
-        saveBtn.disabled = true;
-        inspectCustomModelFile(file, {
-          onProgress: (message) => {
-            if (seq !== inspectSeq || settled) return;
-            detectLabel.textContent = `Auto-detect: ${message}`;
-          },
-        }).then((result) => {
-          if (seq !== inspectSeq || settled) return;
-          if (Number.isFinite(result?.scale)) {
-            scaleInput.value = String(result.scale);
-          }
-          rangeInput.value = String(result?.range === 255 ? 255 : 1);
-          layoutInput.value = result?.layout === 'nhwc' ? 'nhwc' : 'nchw';
-          if (Number.isFinite(result?.multipleOf)) {
-            multipleInput.value = String(Math.max(1, result.multipleOf));
-          }
-          const parts = [];
-          if (result?.layout) parts.push(`layout ${result.layout.toUpperCase()}`);
-          if (Number.isFinite(result?.multipleOf)) {
-            const suffix = result?.multipleOfSource === 'probe' ? ' (probed)' : '';
-            parts.push(`multiple ${result.multipleOf}${suffix}`);
-          }
-          if (result?.inputType) parts.push(`input ${result.inputType}`);
-          if (Number.isFinite(result?.scale)) {
-            const suffix = result?.scaleSource === 'probe' ? ' (probed)' : result?.scaleSource === 'metadata' ? ' (metadata)' : ' (default)';
-            parts.push(`scale ${result.scale}x${suffix}`);
-          }
-          detectLabel.textContent = parts.length
-            ? `Auto-detected: ${parts.join(', ')}.`
-            : 'Auto-detect finished with defaults.';
-          if (Array.isArray(result?.notes) && result.notes.length) {
-            errorLabel.textContent = result.notes[0];
-          }
-          saveBtn.disabled = false;
-        }).catch((err) => {
-          if (seq !== inspectSeq || settled) return;
-          detectLabel.textContent = 'Auto-detect failed; using defaults.';
-          errorLabel.textContent = err?.message || 'Could not inspect model metadata.';
-          saveBtn.disabled = false;
-        });
-      };
-      const onCancel = (e) => {
-        e?.preventDefault?.();
-        if (dialog.open) dialog.close();
-        finish(null);
-      };
-      const onClose = () => finish(null);
-      const onSubmit = async (e) => {
-        e.preventDefault();
-        errorLabel.textContent = '';
-        const file = fileInput.files?.[0];
-        if (!file) {
-          errorLabel.textContent = 'Choose an ONNX model file first.';
-          return;
-        }
-        if (!/\.onnx$/i.test(file.name)) {
-          errorLabel.textContent = 'Only .onnx files are supported.';
-          return;
-        }
-        saveBtn.disabled = true;
-        try {
-          const model = await saveCustomModel({
-            file,
-            label: labelInput.value,
-            scale: scaleInput.value,
-            range: rangeInput.value,
-            layout: layoutInput.value,
-            multipleOf: multipleInput.value,
-          });
-          if (dialog.open) dialog.close();
-          finish(model);
-        } catch (err) {
-          errorLabel.textContent = err?.message || 'Failed to save model.';
-          saveBtn.disabled = false;
-        }
-      };
-
-      form.addEventListener('submit', onSubmit);
-      fileInput.addEventListener('change', onFileChange);
-      cancelBtn.addEventListener('click', onCancel);
-      dialog.addEventListener('cancel', onCancel);
-      dialog.addEventListener('close', onClose);
-      dialog.showModal();
-    });
   }
 
   // --- Pipeline helpers ---
@@ -308,61 +192,36 @@ class UpscalerApp extends HTMLElement {
   // --- Event setup ---
 
   #setupPersistence() {
-    const persist = (selector, key, event = 'change') => {
+    for (const { selector, key, kind, event } of PERSISTED_CONTROLS) {
       const el = this.#q(selector);
-      el.addEventListener(event, () => localStorage.setItem(key, el.value));
-    };
-    const persistChecked = (selector, key) => {
-      const el = this.#q(selector);
-      el.addEventListener('change', () => localStorage.setItem(key, el.checked ? '1' : '0'));
-    };
-
-    persist('.runpod-endpoint', 'upscaler_runpod_endpoint', 'input');
-    persist('.runpod-apikey', 'upscaler_runpod_apikey', 'input');
-    persist('.tilesize-select', 'upscaler_tilesize');
-    persist('.backend-select', 'upscaler_backend');
-    persist('.output-select', 'upscaler_output');
-    persistChecked('.pass-all-enabled', 'upscaler_pass_all_enabled');
-    persist('.pass-all-blend', 'upscaler_pass_all_blend', 'input');
-    persist('.pass-all-model', 'upscaler_pass_all_model');
-    persistChecked('.detector-face-enabled', 'upscaler_detector_face_enabled');
-    persist('.detector-face-padding', 'upscaler_detector_face_padding_px', 'input');
-    persist('.detector-face-score', 'upscaler_detector_face_score', 'input');
-    persist('.detector-face-blend', 'upscaler_detector_face_blend', 'input');
-    persist('.detector-face-model', 'upscaler_detector_face_model');
-  }
-
-  #setupModeSwitch() {
-    // Mode is locked to 'local' — RunPod UI hidden but code path preserved
+      el.addEventListener(event, () => localStorage.setItem(key, readControl(el, kind)));
+    }
   }
 
   #setupViewStateSync() {
-    const cropper = this.#q('image-cropper');
-    const preview = this.#q('upscale-preview');
-    const compareSlider = this.#q('compare-slider');
-    const viewSizeBtn = this.#q('.viewsize-btn');
-    const persistViewState = () => {
-      localStorage.setItem('upscaler_view_expanded', this.#viewState.expanded ? '1' : '0');
-      localStorage.setItem('upscaler_view_upscaled_only', this.#viewState.upscaledOnly ? '1' : '0');
-    };
-    const applyExpandedAcrossViews = () => {
-      cropper.setExpanded(this.#viewState.expanded);
-      preview.setExpanded(this.#viewState.expanded);
-      compareSlider.setExpanded(this.#viewState.expanded);
-    };
-    viewSizeBtn.addEventListener('click', () => {
+    this.#q('.viewsize-btn').addEventListener('click', () => {
       this.#viewState.expanded = !this.#viewState.expanded;
-      applyExpandedAcrossViews();
-      this.#syncViewSizeButtonLabel();
-      persistViewState();
+      this.#applyViewState();
+      this.#persistViewState();
     });
-    compareSlider.addEventListener('view-state-change', (e) => {
+    this.#q('compare-slider').addEventListener('view-state-change', (e) => {
       if (typeof e.detail.upscaledOnly === 'boolean') {
         this.#viewState.upscaledOnly = e.detail.upscaledOnly;
       }
-      persistViewState();
+      this.#persistViewState();
     });
-    applyExpandedAcrossViews();
+  }
+
+  #persistViewState() {
+    localStorage.setItem('upscaler_view_expanded', this.#viewState.expanded ? '1' : '0');
+    localStorage.setItem('upscaler_view_upscaled_only', this.#viewState.upscaledOnly ? '1' : '0');
+  }
+
+  #applyViewState() {
+    const expanded = this.#viewState.expanded;
+    this.#q('image-cropper').classList.toggle('expanded', expanded);
+    this.#q('upscale-preview').classList.toggle('expanded', expanded);
+    this.#q('compare-slider').classList.toggle('expanded', expanded);
     this.#syncViewSizeButtonLabel();
   }
 
@@ -376,15 +235,9 @@ class UpscalerApp extends HTMLElement {
     const upscaleBtn    = this.#q('.upscale-btn');
     const stopBtn       = this.#q('.stop-btn');
     const startOverBtn  = this.#q('.startover-btn');
+    const canvasToolbar = this.#q('.canvas-toolbar');
     const modelEl       = this.#q('.model-select');
     const deleteCustomBtn = this.#q('.delete-custom-model-btn');
-    const backendEl     = this.#q('.backend-select');
-    const tileSizeEl    = this.#q('.tilesize-select');
-    const outputEl      = this.#q('.output-select');
-    const outputLabelsByValue = new Map(Array.from(outputEl.options).map(opt => ([
-      opt.value,
-      opt.textContent.replace(/\s+\(no downscale\)$/i, ''),
-    ])));
 
     statusBar.message = 'Load an image to begin.';
 
@@ -406,8 +259,8 @@ class UpscalerApp extends HTMLElement {
       upscaleBtn.disabled = true;
       stopBtn.style.display = 'none';
       startOverBtn.style.display = 'none';
+      canvasToolbar.hidden = true;
       cropper.hide();
-      preview.cleanup();
       preview.hide();
       compareSlider.hide();
       dropZone.show();
@@ -418,9 +271,9 @@ class UpscalerApp extends HTMLElement {
     const showReady = () => {
       upscaleBtn.disabled = false;
       startOverBtn.style.display = 'inline-block';
+      canvasToolbar.hidden = false;
       compareSlider.hide();
       preview.hide();
-      preview.cleanup();
       dropZone.hide();
       cropper.show(this.#loadedImage);
       statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 ready to upscale.`;
@@ -449,64 +302,25 @@ class UpscalerApp extends HTMLElement {
       }
     });
 
-    const updateModelBoundControls = () => {
-      const scale = parseInt(modelEl.selectedOptions[0]?.dataset.scale, 10) || 4;
-      const verb = scale === 1 ? 'Enhance' : 'Upscale';
-      const maxOutputScale = Math.max(1, Math.min(scale, 4));
-      const isBuiltInResampler = this.#isBuiltInResampler(modelEl.selectedOptions[0]);
-      const previousOutputScale = parseInt(outputEl.value, 10);
-
-      upscaleBtn.innerHTML = `<i class="fas fa-wand-magic-sparkles"></i> ${verb} ${scale}x`;
-
-      for (const opt of outputEl.options) {
-        const optionScale = parseInt(opt.value, 10) || 1;
-        const baseLabel = outputLabelsByValue.get(opt.value) || `${optionScale}x`;
-        opt.textContent = !isBuiltInResampler && optionScale === maxOutputScale
-          ? `${baseLabel} (no downscale)`
-          : baseLabel;
-        opt.disabled = optionScale > maxOutputScale;
-      }
-
-      const preferredScale = Number.isFinite(previousOutputScale) ? previousOutputScale : maxOutputScale;
-      const nextOutputScale = Math.max(1, Math.min(maxOutputScale, preferredScale));
-      outputEl.value = String(nextOutputScale);
-      localStorage.setItem('upscaler_output', outputEl.value);
-      backendEl.disabled = isBuiltInResampler;
-      tileSizeEl.disabled = isBuiltInResampler;
-      this.#updateHangWarning();
-    };
-
-    const updateCustomDeleteVisibility = () => {
-      const selected = getCustomModelByUrl(modelEl.value);
-      deleteCustomBtn.hidden = !selected;
-      deleteCustomBtn.disabled = !selected || this.#running;
-      if (selected) {
-        deleteCustomBtn.title = `Delete custom model "${selected.label}"`;
-      } else {
-        deleteCustomBtn.title = 'Delete selected custom model';
-      }
-    };
-
-    let previousModelValue = modelEl.value;
     modelEl.addEventListener('change', async () => {
       if (modelEl.value === UPLOAD_CUSTOM_VALUE) {
-        const previousOption = Array.from(modelEl.options).find((opt) => opt.value === previousModelValue);
+        const previousOption = Array.from(modelEl.options).find((opt) => opt.value === this.#previousModelValue);
         const defaultScale = parseInt(previousOption?.dataset.scale, 10) || 4;
-        const customModel = await this.#showCustomModelUploadModal(defaultScale);
+        const customModel = await this.#q('custom-model-upload-dialog').open({ defaultScale });
         if (!customModel) {
-          modelEl.value = previousModelValue;
+          modelEl.value = this.#previousModelValue;
         } else {
           this.#customModels = listCustomModels();
           this.#refreshModelSelectOptions(customModel.url);
-          previousModelValue = customModel.url;
+          this.#previousModelValue = customModel.url;
           statusBar.message = `Custom model "${customModel.label}" added (${customModel.scale}x, ~${customModel.sizeMB}MB).`;
         }
       } else {
-        previousModelValue = modelEl.value;
+        this.#previousModelValue = modelEl.value;
       }
       localStorage.setItem('upscaler_model', modelEl.value);
-      updateModelBoundControls();
-      updateCustomDeleteVisibility();
+      this.#updateModelBoundControls();
+      this.#updateCustomDeleteVisibility();
     });
 
     deleteCustomBtn.addEventListener('click', async () => {
@@ -521,10 +335,10 @@ class UpscalerApp extends HTMLElement {
       if (modelEl.value === UPLOAD_CUSTOM_VALUE && modelEl.options.length > 1) {
         modelEl.selectedIndex = 0;
       }
-      previousModelValue = modelEl.value;
+      this.#previousModelValue = modelEl.value;
       localStorage.setItem('upscaler_model', modelEl.value);
-      updateModelBoundControls();
-      updateCustomDeleteVisibility();
+      this.#updateModelBoundControls();
+      this.#updateCustomDeleteVisibility();
       statusBar.message = `Deleted custom model "${selected.label}".`;
     });
 
@@ -532,15 +346,14 @@ class UpscalerApp extends HTMLElement {
       this.#updateHangWarning();
     });
 
-    this.#q('.pass-all-blend').addEventListener('input', (e) => {
-      this.#q('.pass-all-blend-val').textContent = e.target.value;
-    });
-    this.#q('.detector-face-score').addEventListener('input', (e) => {
-      this.#q('.detector-face-score-val').textContent = e.target.value;
-    });
-    this.#q('.detector-face-blend').addEventListener('input', (e) => {
-      this.#q('.detector-face-blend-val').textContent = e.target.value;
-    });
+    const wireMirror = (selector, mirrorSelector) => {
+      this.#q(selector).addEventListener('input', (e) => {
+        this.#q(mirrorSelector).textContent = e.target.value;
+      });
+    };
+    wireMirror('.pass-all-blend',      '.pass-all-blend-val');
+    wireMirror('.detector-face-score', '.detector-face-score-val');
+    wireMirror('.detector-face-blend', '.detector-face-blend-val');
 
     // --- Upscale pipeline ---
 
@@ -555,7 +368,6 @@ class UpscalerApp extends HTMLElement {
       stopBtn.style.display = 'inline-block';
       startOverBtn.style.display = 'none';
       compareSlider.hide();
-      preview.cleanup();
 
       try {
         statusBar.showProgress(0);
@@ -583,12 +395,12 @@ class UpscalerApp extends HTMLElement {
         const outH = inputImage.height * scale;
         statusBar.message = `Done \u2014 ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}.`;
 
-        compareSlider.style.maxWidth = outW + 'px';
         compareSlider.setAttribute('after-label', `${scale}x Upscaled`);
+        compareSlider.classList.toggle('expanded', this.#viewState.expanded);
         await compareSlider.show(beforeCanvas, afterCanvas, {
           downloadName: `upscaled_${scale}x.png`,
         });
-        compareSlider.setViewState(this.#viewState);
+        compareSlider.setUpscaledOnly(this.#viewState.upscaledOnly);
         preview.hide();
 
       } catch (e) {
@@ -596,7 +408,11 @@ class UpscalerApp extends HTMLElement {
           statusBar.message = 'Upscale cancelled.';
         } else {
           console.error(e);
-          statusBar.message = 'Error: ' + this.#formatUpscaleErrorMessage(e);
+          const opt = this.#q('.model-select')?.selectedOptions?.[0];
+          statusBar.message = 'Error: ' + formatUpscaleErrorMessage(e, {
+            layout: opt?.dataset?.layout,
+            multipleOf: parseInt(opt?.dataset?.multipleof, 10),
+          });
         }
         statusBar.hideProgress();
         perfMonitor.stop();
@@ -620,8 +436,61 @@ class UpscalerApp extends HTMLElement {
       if (this.#running) this.#abortController?.abort();
       resetToStart();
     });
+  }
 
-    updateCustomDeleteVisibility();
+  #updateModelBoundControls() {
+    const modelEl = this.#q('.model-select');
+    const outputEl = this.#q('.output-select');
+    const upscaleBtn = this.#q('.upscale-btn');
+
+    if (!this.#outputBaseLabels) {
+      this.#outputBaseLabels = new Map(Array.from(outputEl.options).map(opt => [
+        opt.value,
+        opt.textContent.replace(/\s+\(no downscale\)$/i, ''),
+      ]));
+    }
+
+    const scale = parseInt(modelEl.selectedOptions[0]?.dataset.scale, 10) || 4;
+    const verb = scale === 1 ? 'Enhance' : 'Upscale';
+    const maxOutputScale = Math.max(1, Math.min(scale, 4));
+    const isBuiltInResampler = this.#isBuiltInResampler(modelEl.selectedOptions[0]);
+    const previousOutputScale = parseInt(outputEl.value, 10);
+
+    upscaleBtn.innerHTML = `<i class="fas fa-wand-magic-sparkles"></i> ${verb} ${scale}x`;
+
+    for (const opt of outputEl.options) {
+      const optionScale = parseInt(opt.value, 10) || 1;
+      const baseLabel = this.#outputBaseLabels.get(opt.value) || `${optionScale}x`;
+      opt.textContent = !isBuiltInResampler && optionScale === maxOutputScale
+        ? `${baseLabel} (no downscale)`
+        : baseLabel;
+      opt.disabled = optionScale > maxOutputScale;
+    }
+
+    const preferredScale = Number.isFinite(previousOutputScale) ? previousOutputScale : maxOutputScale;
+    const nextOutputScale = Math.max(1, Math.min(maxOutputScale, preferredScale));
+    outputEl.value = String(nextOutputScale);
+    localStorage.setItem('upscaler_output', outputEl.value);
+    this.#q('.backend-select').disabled = isBuiltInResampler;
+    this.#q('.tilesize-select').disabled = isBuiltInResampler;
+    this.#updateHangWarning();
+  }
+
+  #updateCustomDeleteVisibility() {
+    const modelEl = this.#q('.model-select');
+    const deleteCustomBtn = this.#q('.delete-custom-model-btn');
+    const selected = getCustomModelByUrl(modelEl.value);
+    deleteCustomBtn.hidden = !selected;
+    deleteCustomBtn.disabled = !selected || this.#running;
+    deleteCustomBtn.title = selected
+      ? `Delete custom model "${selected.label}"`
+      : 'Delete selected custom model';
+  }
+
+  #updateInputMirrors() {
+    this.#q('.pass-all-blend-val').textContent = this.#q('.pass-all-blend').value;
+    this.#q('.detector-face-score-val').textContent = this.#q('.detector-face-score').value;
+    this.#q('.detector-face-blend-val').textContent = this.#q('.detector-face-blend').value;
   }
 
   #updateHangWarning() {
@@ -840,42 +709,23 @@ class UpscalerApp extends HTMLElement {
   // --- Settings ---
 
   #restoreSettings() {
-    this.#q('.runpod-endpoint').value = localStorage.getItem('upscaler_runpod_endpoint') || '';
-    this.#q('.runpod-apikey').value = localStorage.getItem('upscaler_runpod_apikey') || '';
-
-    const controls = [
-      ['.model-select', 'upscaler_model'],
-      ['.tilesize-select', 'upscaler_tilesize'],
-      ['.backend-select', 'upscaler_backend'],
-      ['.output-select', 'upscaler_output'],
-      ['.pass-all-blend', 'upscaler_pass_all_blend'],
-      ['.pass-all-model', 'upscaler_pass_all_model'],
-      ['.detector-face-padding', 'upscaler_detector_face_padding_px'],
-      ['.detector-face-score', 'upscaler_detector_face_score'],
-      ['.detector-face-blend', 'upscaler_detector_face_blend'],
-      ['.detector-face-model', 'upscaler_detector_face_model'],
-    ];
-    for (const [sel, key] of controls) {
+    for (const { selector, key, kind } of PERSISTED_CONTROLS) {
       const saved = localStorage.getItem(key);
-      if (saved !== null) this.#q(sel).value = saved;
+      if (saved === null) continue;
+      writeControl(this.#q(selector), kind, saved);
     }
     this.#viewState.expanded = localStorage.getItem('upscaler_view_expanded') === '1';
     this.#viewState.upscaledOnly = localStorage.getItem('upscaler_view_upscaled_only') === '1';
-    this.#q('.pass-all-enabled').checked = localStorage.getItem('upscaler_pass_all_enabled') === '1';
-    this.#q('.detector-face-enabled').checked = localStorage.getItem('upscaler_detector_face_enabled') === '1';
 
-    this.#q('image-cropper').setExpanded(this.#viewState.expanded);
-    this.#q('upscale-preview').setExpanded(this.#viewState.expanded);
-    this.#q('compare-slider').setViewState(this.#viewState);
-    this.#syncViewSizeButtonLabel();
     const modelEl = this.#q('.model-select');
     if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
+    this.#previousModelValue = modelEl.value;
 
-    this.#q('.model-select').dispatchEvent(new Event('change'));
-    this.#q('.pass-all-blend').dispatchEvent(new Event('input'));
-    this.#q('.detector-face-score').dispatchEvent(new Event('input'));
-    this.#q('.detector-face-blend').dispatchEvent(new Event('input'));
-    this.#updateHangWarning();
+    this.#applyViewState();
+    this.#q('compare-slider').setUpscaledOnly(this.#viewState.upscaledOnly);
+    this.#updateModelBoundControls();
+    this.#updateInputMirrors();
+    this.#updateCustomDeleteVisibility();
   }
 
   // --- Template ---
@@ -1053,65 +903,40 @@ class UpscalerApp extends HTMLElement {
         upscaler-app .hang-warn:hover .hang-warn-tip {
           display: block;
         }
-        upscaler-app .custom-model-dialog {
-          width: min(34rem, calc(100vw - 2rem));
+        upscaler-app .canvas-stack {
+          position: relative;
         }
-        upscaler-app .custom-model-form {
-          display: grid;
-          gap: 0.6rem;
-          margin: 0;
+        upscaler-app .canvas-toolbar-rail {
+          position: sticky;
+          top: 0.75rem;
+          height: 0;
+          z-index: 10;
+          pointer-events: none;
         }
-        upscaler-app .custom-model-form label {
-          display: grid;
-          gap: 0.25rem;
-          margin: 0;
+        upscaler-app .canvas-toolbar {
+          position: absolute;
+          top: 0;
+          right: 0.75rem;
+          display: inline-flex;
+          gap: 0.4rem;
+          padding: 0.35rem;
+          background: color-mix(in oklab, var(--pico-card-background-color, #1e1e2e) 82%, transparent);
+          border: 1px solid var(--pico-muted-border-color);
+          border-radius: var(--pico-border-radius);
+          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+          backdrop-filter: blur(6px);
+          -webkit-backdrop-filter: blur(6px);
+          pointer-events: auto;
+        }
+        upscaler-app .canvas-toolbar[hidden] {
+          display: none;
+        }
+        upscaler-app .canvas-toolbar button {
+          margin-bottom: 0;
+          padding: 0.4rem 0.8rem;
           font-size: 0.85rem;
-        }
-        upscaler-app .custom-model-row {
-          display: grid;
-          gap: 0.5rem;
-          grid-template-columns: minmax(0, 1fr) auto auto auto auto;
-          align-items: end;
-        }
-        upscaler-app .custom-model-scale {
-          width: 8ch;
-        }
-        upscaler-app .custom-model-range {
-          width: 9ch;
-        }
-        upscaler-app .custom-model-layout {
-          width: 9ch;
-        }
-        upscaler-app .custom-model-multiple {
-          width: 9ch;
-        }
-        @media (max-width: 900px) {
-          upscaler-app .custom-model-row {
-            grid-template-columns: minmax(0, 1fr) auto auto;
-          }
-        }
-        upscaler-app .custom-model-meta {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 0.5rem;
-          font-size: 0.8rem;
-          color: var(--pico-muted-color);
-        }
-        upscaler-app .custom-model-detected {
-          font-size: 0.8rem;
-          color: var(--pico-muted-color);
-        }
-        upscaler-app .custom-model-error {
-          color: var(--pico-del-color, #c62828);
-          min-height: 1.1rem;
-          font-size: 0.8rem;
-        }
-        upscaler-app .custom-model-actions {
-          display: flex;
-          justify-content: flex-end;
-          gap: 0.5rem;
-          margin-top: 0.4rem;
+          width: auto;
+          white-space: nowrap;
         }
       </style>
 
@@ -1172,16 +997,6 @@ class UpscalerApp extends HTMLElement {
           </label>
         </span>
 
-        <button class="upscale-btn" disabled>
-          <i class="fas fa-wand-magic-sparkles"></i> Upscale 4x
-        </button>
-        <button class="stop-btn secondary" style="display:none">
-          <i class="fas fa-stop"></i> Stop
-        </button>
-        <button class="startover-btn secondary outline" style="display:none">
-          <i class="fas fa-redo"></i> Start Over
-        </button>
-        <button class="viewsize-btn secondary outline" type="button">Full Size</button>
         <button class="perf-toggle-btn secondary outline" title="Toggle performance monitor">
           <i class="fas fa-gauge-high"></i>
         </button>
@@ -1250,58 +1065,29 @@ class UpscalerApp extends HTMLElement {
         </div>
       </details>
 
-      <dialog class="custom-model-dialog">
-        <form class="custom-model-form" method="dialog">
-          <h3 style="margin:0">Upload custom ONNX model</h3>
-          <label>
-            Model file
-            <input class="custom-model-file" type="file" accept=".onnx,application/octet-stream" required>
-          </label>
-          <div class="custom-model-row">
-            <label>
-              Label
-              <input class="custom-model-label" type="text" maxlength="80" placeholder="My custom model">
-            </label>
-            <label>
-              Scale
-              <input class="custom-model-scale" type="number" min="1" max="16" step="1" value="4" required>
-            </label>
-            <label>
-              Range
-              <select class="custom-model-range">
-                <option value="1">1</option>
-                <option value="255">255</option>
-              </select>
-            </label>
-            <label>
-              Layout
-              <select class="custom-model-layout">
-                <option value="nchw">NCHW</option>
-                <option value="nhwc">NHWC</option>
-              </select>
-            </label>
-            <label>
-              Multiple-of
-              <input class="custom-model-multiple" type="number" min="1" max="64" step="1" value="1">
-            </label>
-          </div>
-          <div class="custom-model-detected">Auto-detect: waiting for model file…</div>
-          <div class="custom-model-meta">
-            <span class="custom-model-size">Model size: -</span>
-          </div>
-          <div class="custom-model-error"></div>
-          <div class="custom-model-actions">
-            <button type="button" class="secondary custom-model-cancel-btn">Cancel</button>
-            <button type="submit" class="custom-model-save-btn">Save model</button>
-          </div>
-        </form>
-      </dialog>
+      <custom-model-upload-dialog></custom-model-upload-dialog>
 
       <status-bar></status-bar>
-      <image-drop-zone></image-drop-zone>
-      <image-cropper></image-cropper>
-      <upscale-preview></upscale-preview>
-      <compare-slider></compare-slider>
+      <div class="canvas-stack">
+        <div class="canvas-toolbar-rail" aria-hidden="true">
+          <div class="canvas-toolbar" hidden>
+            <button class="upscale-btn" disabled>
+              <i class="fas fa-wand-magic-sparkles"></i> Upscale 4x
+            </button>
+            <button class="stop-btn secondary" style="display:none">
+              <i class="fas fa-stop"></i> Stop
+            </button>
+            <button class="startover-btn secondary outline" style="display:none">
+              <i class="fas fa-redo"></i> Start Over
+            </button>
+            <button class="viewsize-btn secondary outline" type="button">Full Size</button>
+          </div>
+        </div>
+        <image-drop-zone></image-drop-zone>
+        <image-cropper></image-cropper>
+        <upscale-preview></upscale-preview>
+        <compare-slider></compare-slider>
+      </div>
       <perf-monitor></perf-monitor>
     `);
   }
