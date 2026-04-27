@@ -51,6 +51,22 @@ struct Params {
 const PARAMS_SIZE = 5 * 4; // 5 u32/f32 fields × 4 bytes, padded to 16-byte alignment
 const PARAMS_BUFFER_SIZE = Math.ceil(PARAMS_SIZE / 16) * 16;
 
+/**
+ * Thrown by GpuTileRenderer.configure() when the requested canvas/texture
+ * dimensions exceed the device's maxTextureDimension2D. Callers can catch
+ * this and fall back to a CPU readback path instead of silently producing
+ * a black canvas (which is what WebGPU does on validation failure).
+ */
+export class GpuOutputTooLargeError extends Error {
+  constructor(width, height, maxDim) {
+    super(`Output ${width}×${height} exceeds GPU max texture dimension (${maxDim}).`);
+    this.name = 'GpuOutputTooLargeError';
+    this.width = width;
+    this.height = height;
+    this.maxDim = maxDim;
+  }
+}
+
 export class GpuTileRenderer {
   #device;
   #pipeline = null;
@@ -75,7 +91,19 @@ export class GpuTileRenderer {
 
   get lost() { return this.#lost; }
 
+  /**
+   * @throws {GpuOutputTooLargeError} when width/height exceeds
+   *   device.limits.maxTextureDimension2D. Both the WebGPU canvas surface
+   *   and the persistent output texture are subject to that cap; exceeding
+   *   it causes WebGPU to silently produce a black canvas, so we surface
+   *   the failure up-front instead.
+   */
   configure(canvas, width, height) {
+    const maxDim = this.#device.limits?.maxTextureDimension2D ?? 8192;
+    if (width > maxDim || height > maxDim) {
+      throw new GpuOutputTooLargeError(width, height, maxDim);
+    }
+
     this.#canvasCtx = canvas.getContext('webgpu');
     this.#canvasCtx.configure({
       device: this.#device,

@@ -5,7 +5,7 @@
  */
 
 import { fetchWithProgress } from 'lib/fetch-progress';
-import { GpuTileRenderer } from './gpu-tile-renderer.js';
+import { GpuTileRenderer, GpuOutputTooLargeError } from './gpu-tile-renderer.js';
 import { GpuFrameExtractor } from './gpu-frame-extractor.js';
 import { buildTileGrid, pasteTileCropped, overlapCrop } from './tiling.js';
 
@@ -268,8 +268,24 @@ export class UpscalerEngine {
     const srcH = img.videoHeight ?? img.height;
     const outW = srcW * scale;
     const outH = srcH * scale;
-    const useGpu = this.#gpuRenderer !== null;
+    let useGpu = this.#gpuRenderer !== null;
     const useGpuInput = this.#gpuExtractor !== null;
+
+    // The WebGPU canvas surface and the renderer's persistent output texture
+    // are both bounded by maxTextureDimension2D (commonly 8192, sometimes
+    // 16384). Exceeding this cap doesn't throw — WebGPU pushes a validation
+    // error and the canvas stays black — so we proactively fall back to the
+    // CPU readback path whenever the destination is too big. ONNX inference
+    // continues to run on WebGPU; only the output rendering path changes.
+    if (useGpu) {
+      const maxDim = this.#device?.limits?.maxTextureDimension2D ?? 8192;
+      if (outW > maxDim || outH > maxDim) {
+        console.info(
+          `[UpscalerEngine] Output ${outW}\u00d7${outH} exceeds GPU max texture dimension ${maxDim}; using CPU readback path for this image.`,
+        );
+        useGpu = false;
+      }
+    }
 
     const srcData = this.#prepareSource(img, srcW, srcH, useGpuInput, perf);
 
@@ -279,8 +295,23 @@ export class UpscalerEngine {
 
     let outCtx = null;
     if (useGpu) {
-      this.#gpuRenderer.configure(outCanvas, outW, outH);
-    } else {
+      try {
+        this.#gpuRenderer.configure(outCanvas, outW, outH);
+      } catch (err) {
+        if (err instanceof GpuOutputTooLargeError) {
+          console.info(
+            `[UpscalerEngine] ${err.message} Using CPU readback path for this image.`,
+          );
+        } else {
+          console.warn(
+            '[UpscalerEngine] GPU canvas configure failed, falling back to CPU readback:',
+            err,
+          );
+        }
+        useGpu = false;
+      }
+    }
+    if (!useGpu) {
       outCtx = outCanvas.getContext('2d');
     }
 
@@ -296,7 +327,9 @@ export class UpscalerEngine {
     let yieldMs = 0;
     for (let i = 0; i < tiles.length; i++) {
       if (signal?.aborted) throw new DOMException('Upscale cancelled', 'AbortError');
-      if (useGpu && (this.#gpuRenderer?.lost || this.#gpuExtractor?.lost)) {
+      const rendererLost = useGpu && this.#gpuRenderer?.lost;
+      const extractorLost = useGpuInput && this.#gpuExtractor?.lost;
+      if (rendererLost || extractorLost) {
         throw new Error('GPU device was lost (browser or OS interrupted). Please retry or switch to the WASM backend.');
       }
 
@@ -342,7 +375,14 @@ export class UpscalerEngine {
       } else {
         const tReadback = performance.now();
         const outTensor = results[outputName];
-        const outData = outTensor.data;
+        // When the session was opened with preferredOutputLocation:'gpu-buffer'
+        // (gpu fast path enabled at load time) but we're falling back per-image
+        // because the destination canvas would exceed maxTextureDimension2D,
+        // the tensor lives on the GPU and `.data` is empty. getData(true)
+        // downloads the data and releases the GPU buffer in one step.
+        const outData = outTensor.location === 'gpu-buffer'
+          ? await outTensor.getData(true)
+          : outTensor.data;
         readbackMs = performance.now() - tReadback;
         perf.readback += readbackMs;
 
@@ -405,7 +445,13 @@ export class UpscalerEngine {
       ortProfile = this.#collectOrtProfile();
     }
 
-    const pipeline = useGpuInput ? 'gpu-gpu' : useGpu ? 'gpu' : 'cpu';
+    // 'gpu-gpu' = GPU input extract + GPU output render (zero readback).
+    // 'gpu'     = ONNX runs on GPU but at least one of input/output uses CPU
+    //             (e.g., per-image fallback when output exceeds maxTexDim).
+    // 'cpu'     = WASM/CPU end-to-end.
+    const pipeline = useGpu && useGpuInput
+      ? 'gpu-gpu'
+      : (useGpu || useGpuInput) ? 'gpu' : 'cpu';
     return {
       canvas: outCanvas,
       perf: { ...perf, tiles: tiles.length, tileSize, srcW, srcH, outW, outH, pipeline },
