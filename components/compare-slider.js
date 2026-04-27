@@ -191,9 +191,6 @@ class CompareSlider extends HTMLElement {
     this.#render();
     if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
     this.#syncModeClass();
-    this.title = this.#upscaledOnly
-      ? 'Click: Fullscreen Zoom \u00b7 Right-Click: Compare \u00b7 Shift+Scroll: Bubble Size \u00b7 Ctrl+Scroll: Zoom Factor'
-      : '';
   }
 
   toggleUpscaledView() {
@@ -564,11 +561,14 @@ class CompareSlider extends HTMLElement {
           width: 100vw;
           height: 100vh;
           border-radius: 0;
+          background: #000;
+          display: flex;
         }
         .compare.upscaled-only.pixel-zoom .compare-after {
           width: auto;
           max-width: none;
           height: auto;
+          margin: auto;
         }
         .compare.upscaled-only .compare-before-wrap,
         .compare.upscaled-only .compare-handle {

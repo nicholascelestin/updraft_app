@@ -60,11 +60,11 @@ function writeControl(el, kind, saved) {
 /**
  * Format a pipeline/inference error for end users.
  * Detects the ONNX reshape-window-size failure and adds a remediation hint
- * derived from the model's declared layout/multiple-of and any dimensions
- * the runtime reported in the raw error. Pure: caller passes the relevant
- * model facts so this function stays DOM-free and unit-testable.
+ * derived from the model's declared layout/multiple-of/maxTileSize and any
+ * dimensions the runtime reported in the raw error. Pure: caller passes the
+ * relevant model facts so this function stays DOM-free and unit-testable.
  */
-function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1 } = {}) {
+function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, maxTileSize = null } = {}) {
   const raw = error?.message || String(error || 'Unknown error');
   const isReshapeWindowError =
     /reshape_helper\.h/i.test(raw) ||
@@ -82,6 +82,14 @@ function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1 } = 
   const inputDims = shapeMatch ? parseShape(shapeMatch[1]) : [];
   const requestedDims = shapeMatch ? parseShape(shapeMatch[2]) : [];
 
+  // When the model is known to have a hard input-size cap (detected by the
+  // inspector or set manually), the right remediation is to reduce tile size,
+  // not to bump Multiple-of — bumping it would push padded edge tiles past
+  // the cap.
+  if (Number.isFinite(maxTileSize) && maxTileSize >= 1) {
+    return `Model reshape failed: this model only accepts inputs up to ${maxTileSize}\u00d7${maxTileSize}. Reduce Tile size to \u2264 ${maxTileSize} and set Multiple-of = ${maxTileSize} so edge tiles get padded back into range. Raw error: ${raw}`;
+  }
+
   let inferredMultiple = 0;
   const pow2Requested = requestedDims.filter((d) => d > 1 && d <= 256 && (d & (d - 1)) === 0);
   if (pow2Requested.length) {
@@ -98,7 +106,7 @@ function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1 } = 
   const specificHint = inferredMultiple > 8
     ? ` Based on the reported reshape, try Multiple-of ${inferredMultiple} first.`
     : '';
-  return `Model reshape failed (likely window-size constraint). Try setting Multiple-of to ${suggestedMultiple} (common values: 8/16/32/64) and/or switch Layout to ${altLayout}.${specificHint} Raw error: ${raw}`;
+  return `Model reshape failed (likely window-size constraint). Try setting Multiple-of to ${suggestedMultiple} (common values: 8/16/32/64) and/or switch Layout to ${altLayout}.${specificHint} If reducing the tile size below ~64 makes it work, the model may have a hard upper bound — set "Max tile" on the custom model. Raw error: ${raw}`;
 }
 
 class UpscalerApp extends HTMLElement {
@@ -128,7 +136,11 @@ class UpscalerApp extends HTMLElement {
   #syncViewSizeButtonLabel() {
     const btn = this.#q('.viewsize-btn');
     if (!btn) return;
-    btn.textContent = this.#viewState.expanded ? 'Fit to View' : 'Full Size';
+    const expanded = this.#viewState.expanded;
+    const icon = expanded ? 'fa-arrows-up-down' : 'fa-arrows-left-right-to-line';
+    const label = expanded ? 'Fit Height' : 'Fit Width';
+    btn.innerHTML = `<i class="fas ${icon}"></i> <span class="btn-label">${label}</span>`;
+    btn.title = label;
   }
 
   #getCustomModelOptionsHTML(selected) {
@@ -142,6 +154,9 @@ class UpscalerApp extends HTMLElement {
         `data-multipleof="${model.multipleOf || 1}"`,
         `data-sizemb="${model.sizeMB}"`,
       ];
+      if (Number.isFinite(model.maxTileSize)) {
+        attrs.push(`data-maxtilesize="${model.maxTileSize}"`);
+      }
       if (model.url === selected) attrs.push('selected');
       const sizeStr = model.sizeMB != null ? ` (~${model.sizeMB}MB)` : '';
       return `<option ${attrs.join(' ')}>${escapeHtml(model.label)}${sizeStr}</option>`;
@@ -158,6 +173,33 @@ class UpscalerApp extends HTMLElement {
     ].filter(Boolean).join('\n              ');
     if (selected) modelEl.value = selected;
     if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
+
+    // Pass selectors share the same custom-model list as the primary select.
+    // We only refresh their option lists — never their selection — so adding
+    // or editing a custom model from the main select doesn't disturb whatever
+    // the user has chosen for the all-pass / face-pass.
+    this.#refreshPassModelSelect('.pass-all-model');
+    this.#refreshPassModelSelect('.detector-face-model');
+  }
+
+  #refreshPassModelSelect(selector) {
+    const el = this.#q(selector);
+    if (!el) return;
+    const previousValue = el.value;
+    el.innerHTML = [
+      modelOptionsHTML(undefined, { selected: previousValue }),
+      this.#getCustomModelOptionsHTML(previousValue),
+    ].filter(Boolean).join('\n              ');
+    // Re-apply the previous selection if it still exists (covers the upload
+    // case where we want to keep the user's pass choice). If the previously
+    // selected custom model has just been deleted, fall back to the first
+    // option so the select is never left in an invalid state.
+    if (previousValue) {
+      el.value = previousValue;
+      if (!el.selectedOptions.length) el.selectedIndex = 0;
+    } else if (!el.selectedOptions.length) {
+      el.selectedIndex = 0;
+    }
   }
 
   // --- Pipeline helpers ---
@@ -262,7 +304,9 @@ class UpscalerApp extends HTMLElement {
     const downloadBtn   = this.#q('.download-btn');
     const toolbarLeft   = this.#q('.canvas-toolbar-left');
     const toolbarRight  = this.#q('.canvas-toolbar-right');
+    const zoomHint      = this.#q('.canvas-zoom-hint');
     const modelEl       = this.#q('.model-select');
+    const editCustomBtn = this.#q('.edit-custom-model-btn');
     const deleteCustomBtn = this.#q('.delete-custom-model-btn');
 
     const CROP_HINT = ' \u2014 drag to crop (optional).';
@@ -271,7 +315,9 @@ class UpscalerApp extends HTMLElement {
       const upscaledOnly = !!this.#viewState.upscaledOnly;
       const icon = upscaledOnly ? 'fa-arrows-left-right' : 'fa-magnifying-glass-plus';
       const label = upscaledOnly ? 'Use Slider' : 'Use Zoom';
-      zoomToggleBtn.innerHTML = `<i class="fas ${icon}"></i> ${label}`;
+      zoomToggleBtn.innerHTML = `<i class="fas ${icon}"></i> <span class="btn-label">${label}</span>`;
+      const compareShowing = zoomToggleBtn.style.display !== 'none';
+      zoomHint.hidden = !(upscaledOnly && compareShowing);
     };
     syncZoomToggleLabel();
 
@@ -283,6 +329,7 @@ class UpscalerApp extends HTMLElement {
     const hideCompareControls = () => {
       zoomToggleBtn.style.display = 'none';
       toolbarRight.hidden = true;
+      zoomHint.hidden = true;
     };
 
     statusBar.message = 'Load an image to begin.';
@@ -379,6 +426,21 @@ class UpscalerApp extends HTMLElement {
       this.#updateCustomDeleteVisibility();
     });
 
+    editCustomBtn.addEventListener('click', async () => {
+      if (this.#running) return;
+      const selected = getCustomModelByUrl(modelEl.value);
+      if (!selected) return;
+      const updated = await this.#q('custom-model-upload-dialog').open({ editModel: selected });
+      if (!updated) return;
+      this.#customModels = listCustomModels();
+      this.#refreshModelSelectOptions(updated.url);
+      this.#previousModelValue = updated.url;
+      localStorage.setItem('upscaler_model', updated.url);
+      this.#updateModelBoundControls();
+      this.#updateCustomDeleteVisibility();
+      statusBar.message = `Updated "${updated.label}".`;
+    });
+
     deleteCustomBtn.addEventListener('click', async () => {
       if (this.#running) return;
       const selected = getCustomModelByUrl(modelEl.value);
@@ -401,6 +463,19 @@ class UpscalerApp extends HTMLElement {
     this.#q('.tilesize-select').addEventListener('change', () => {
       this.#updateHangWarning();
     });
+
+    // The pass selectors can also carry a max-tile cap (custom DAT models
+    // etc.), so toggling a pass on/off or switching its model has to refresh
+    // the tile-size dropdown's enabled set the same way the main model
+    // change does.
+    for (const sel of [
+      '.pass-all-enabled',
+      '.pass-all-model',
+      '.detector-face-enabled',
+      '.detector-face-model',
+    ]) {
+      this.#q(sel)?.addEventListener('change', () => this.#updateModelBoundControls());
+    }
 
     const wireMirror = (selector, mirrorSelector) => {
       this.#q(selector).addEventListener('input', (e) => {
@@ -467,9 +542,11 @@ class UpscalerApp extends HTMLElement {
         } else {
           console.error(e);
           const opt = this.#q('.model-select')?.selectedOptions?.[0];
+          const parsedMaxTile = parseInt(opt?.dataset?.maxtilesize, 10);
           statusBar.message = 'Error: ' + formatUpscaleErrorMessage(e, {
             layout: opt?.dataset?.layout,
             multipleOf: parseInt(opt?.dataset?.multipleof, 10),
+            maxTileSize: Number.isFinite(parsedMaxTile) ? parsedMaxTile : null,
           });
         }
         statusBar.hideProgress();
@@ -513,6 +590,7 @@ class UpscalerApp extends HTMLElement {
   #updateModelBoundControls() {
     const modelEl = this.#q('.model-select');
     const outputEl = this.#q('.output-select');
+    const tileEl = this.#q('.tilesize-select');
     const upscaleBtn = this.#q('.upscale-btn');
 
     if (!this.#outputBaseLabels) {
@@ -522,13 +600,14 @@ class UpscalerApp extends HTMLElement {
       ]));
     }
 
-    const scale = parseInt(modelEl.selectedOptions[0]?.dataset.scale, 10) || 4;
+    const modelOpt = modelEl.selectedOptions[0];
+    const scale = parseInt(modelOpt?.dataset.scale, 10) || 4;
     const verb = scale === 1 ? 'Enhance' : 'Upscale';
     const maxOutputScale = Math.max(1, Math.min(scale, 4));
-    const isBuiltInResampler = this.#isBuiltInResampler(modelEl.selectedOptions[0]);
+    const isBuiltInResampler = this.#isBuiltInResampler(modelOpt);
     const previousOutputScale = parseInt(outputEl.value, 10);
 
-    upscaleBtn.innerHTML = `<i class="fas fa-wand-magic-sparkles"></i> ${verb} ${scale}x`;
+    upscaleBtn.innerHTML = `<i class="fas fa-wand-magic-sparkles"></i> <span class="btn-label">${verb} ${scale}x</span>`;
 
     for (const opt of outputEl.options) {
       const optionScale = parseInt(opt.value, 10) || 1;
@@ -544,12 +623,47 @@ class UpscalerApp extends HTMLElement {
     outputEl.value = String(nextOutputScale);
     localStorage.setItem('upscaler_output', outputEl.value);
     this.#q('.backend-select').disabled = isBuiltInResampler;
-    this.#q('.tilesize-select').disabled = isBuiltInResampler;
+    tileEl.disabled = isBuiltInResampler;
+
+    // Compute the strictest tile-size cap from the main model plus any
+    // enabled pass models — so picking a 64-cap custom model as the
+    // all-pass also disables tiles >64 in the dropdown, even if the main
+    // model has no cap.
+    const capCandidates = [modelOpt];
+    if (this.#q('.pass-all-enabled')?.checked) {
+      capCandidates.push(this.#q('.pass-all-model')?.selectedOptions[0]);
+    }
+    if (this.#q('.detector-face-enabled')?.checked) {
+      capCandidates.push(this.#q('.detector-face-model')?.selectedOptions[0]);
+    }
+    const caps = capCandidates
+      .map((o) => parseInt(o?.dataset?.maxtilesize, 10))
+      .filter((v) => Number.isFinite(v) && v >= 1);
+    const hasMaxTile = caps.length > 0;
+    const maxTileSize = hasMaxTile ? Math.min(...caps) : Infinity;
+    let largestEnabledTileVal = null;
+    for (const opt of tileEl.options) {
+      const optVal = parseInt(opt.value, 10);
+      const isFullImage = optVal === 0;
+      const exceeds = hasMaxTile && (isFullImage || optVal > maxTileSize);
+      opt.disabled = exceeds;
+      if (!opt.disabled && Number.isFinite(optVal) && optVal > 0) {
+        if (largestEnabledTileVal === null || optVal > largestEnabledTileVal) {
+          largestEnabledTileVal = optVal;
+        }
+      }
+    }
+    if (hasMaxTile && tileEl.selectedOptions[0]?.disabled && largestEnabledTileVal != null) {
+      tileEl.value = String(largestEnabledTileVal);
+      localStorage.setItem('upscaler_tilesize', tileEl.value);
+    }
+
     this.#updateHangWarning();
   }
 
   #updateCustomDeleteVisibility() {
     const modelEl = this.#q('.model-select');
+    const editCustomBtn = this.#q('.edit-custom-model-btn');
     const deleteCustomBtn = this.#q('.delete-custom-model-btn');
     const selected = getCustomModelByUrl(modelEl.value);
     deleteCustomBtn.hidden = !selected;
@@ -557,6 +671,11 @@ class UpscalerApp extends HTMLElement {
     deleteCustomBtn.title = selected
       ? `Delete custom model "${selected.label}"`
       : 'Delete selected custom model';
+    editCustomBtn.hidden = !selected;
+    editCustomBtn.disabled = !selected || this.#running;
+    editCustomBtn.title = selected
+      ? `Edit custom model "${selected.label}"`
+      : 'Edit selected custom model';
   }
 
   #updateInputMirrors() {
@@ -587,13 +706,19 @@ class UpscalerApp extends HTMLElement {
     const modelLayout = opt.dataset.layout || 'nchw';
     const modelInputMultiple = parseInt(opt.dataset.multipleof, 10) || 1;
     const backend = opt.dataset.backend || this.#q('.backend-select').value;
-    const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
+    let tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const profile = this.#q('perf-monitor').visible;
 
     const config = { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, backend, tileSize, profile };
 
+    // Track every option that contributes to the run, so the tile-size cap
+    // below covers the strictest model among the main + enabled passes —
+    // not just the primary one.
+    const optionsForClamp = [opt];
+
     if (this.#q('.pass-all-enabled').checked) {
       const aopt = this.#q('.pass-all-model').selectedOptions[0];
+      if (aopt) optionsForClamp.push(aopt);
       config.all = {
         modelUrl: aopt?.value || modelUrl,
         scale: parseInt(aopt?.dataset.scale, 10) || scale,
@@ -607,6 +732,7 @@ class UpscalerApp extends HTMLElement {
 
     if (this.#q('.detector-face-enabled').checked) {
       const fopt = this.#q('.detector-face-model').selectedOptions[0];
+      if (fopt) optionsForClamp.push(fopt);
       config.face = {
         modelUrl: fopt?.value || modelUrl,
         scale: parseInt(fopt?.dataset.scale, 10) || scale,
@@ -619,6 +745,21 @@ class UpscalerApp extends HTMLElement {
         blendOpacity: parseFloat(this.#q('.detector-face-blend').value),
         scoreThreshold: parseFloat(this.#q('.detector-face-score').value),
       };
+    }
+
+    // Models with a hard input-size cap (e.g. DAT exports with baked-in
+    // window counts) only accept tiles up to a fixed dim. We clamp the
+    // pipeline's shared tile size to the strictest selected model so the
+    // engine never feeds anything past any model's limit. Combined with
+    // each model's modelInputMultiple == maxTileSize, every padded tile
+    // lands at exactly the cap.
+    const caps = optionsForClamp
+      .map((o) => parseInt(o?.dataset?.maxtilesize, 10))
+      .filter((v) => Number.isFinite(v) && v >= 1);
+    if (caps.length) {
+      const minCap = Math.min(...caps);
+      if (tileSize <= 0 || tileSize > minCap) tileSize = minCap;
+      config.tileSize = tileSize;
     }
 
     return config;
@@ -819,7 +960,6 @@ class UpscalerApp extends HTMLElement {
           padding-inline-end: 2.25rem;
           background-position: center right 0.7rem;
           overflow: hidden;
-          text-overflow: ellipsis;
           white-space: nowrap;
         }
         upscaler-app select.model-select,
@@ -827,20 +967,22 @@ class UpscalerApp extends HTMLElement {
         upscaler-app select.detector-face-model {
           width: min(100%, 25em);
           max-width: 25em;
+          text-overflow: ellipsis;
         }
         upscaler-app select.output-select {
+          width: min(100%, calc(2ch + 0.7rem + 2.25rem));
+          max-width: calc(2ch + 0.7rem + 2.25rem);
+        }
+        upscaler-app select.tilesize-select {
+          width: min(100%, calc(3ch + 0.7rem + 2.25rem));
+          max-width: calc(3ch + 0.7rem + 2.25rem);
+        }
+        upscaler-app select.backend-select {
           width: min(100%, calc(4ch + 0.7rem + 2.25rem));
           max-width: calc(4ch + 0.7rem + 2.25rem);
         }
-        upscaler-app select.tilesize-select {
-          width: min(100%, calc(4.25ch + 0.7rem + 2.25rem));
-          max-width: calc(4.25ch + 0.7rem + 2.25rem);
-        }
-        upscaler-app select.backend-select {
-          width: min(100%, calc(5ch + 0.7rem + 2.25rem));
-          max-width: calc(5ch + 0.7rem + 2.25rem);
-        }
-        upscaler-app .delete-custom-model-btn {
+        upscaler-app .delete-custom-model-btn,
+        upscaler-app .edit-custom-model-btn {
           padding: 0.3rem 0.55rem;
           min-width: 2rem;
         }
@@ -1006,6 +1148,41 @@ class UpscalerApp extends HTMLElement {
         upscaler-app .canvas-toolbar[hidden] {
           display: none;
         }
+        upscaler-app .canvas-toolbar-stack-left {
+          position: absolute;
+          top: 0;
+          left: 0.75rem;
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 0.25rem;
+          max-width: calc(100% - 1.5rem);
+          pointer-events: none;
+        }
+        upscaler-app .canvas-toolbar-stack-left > * {
+          pointer-events: auto;
+        }
+        upscaler-app .canvas-toolbar-stack-left > .canvas-toolbar {
+          position: static;
+          left: auto;
+          top: auto;
+          max-width: 100%;
+        }
+        upscaler-app .canvas-zoom-hint {
+          font-size: 0.7rem;
+          line-height: 1.25;
+          padding: 0.15rem 0.5rem;
+          color: #fff;
+          background: color-mix(in oklab, var(--pico-card-background-color, #1e1e2e) 32%, transparent);
+          border: 1px solid color-mix(in oklab, var(--pico-muted-border-color) 45%, transparent);
+          border-radius: var(--pico-border-radius);
+          backdrop-filter: blur(10px) saturate(1.1);
+          -webkit-backdrop-filter: blur(10px) saturate(1.1);
+          max-width: 100%;
+        }
+        upscaler-app .canvas-zoom-hint[hidden] {
+          display: none;
+        }
         upscaler-app .canvas-toolbar button {
           margin-bottom: 0;
           padding: 0.25rem 0.5rem;
@@ -1036,6 +1213,17 @@ class UpscalerApp extends HTMLElement {
           font-size: 0.78em;
           margin-right: 0.15rem;
         }
+        upscaler-app .canvas-toolbar button .btn-label {
+          display: inline;
+        }
+        @media (max-width: 768px) {
+          upscaler-app .canvas-toolbar button .btn-label {
+            display: none;
+          }
+          upscaler-app .canvas-toolbar button .fas {
+            margin-right: 0;
+          }
+        }
         upscaler-app .canvas-toolbar status-bar {
           display: inline-flex;
           flex-direction: column;
@@ -1063,10 +1251,6 @@ class UpscalerApp extends HTMLElement {
         }
       </style>
 
-      <h2>
-        <i class="fas fa-expand"></i> Image Upscaler
-      </h2>
-
       <select class="mode-select" hidden>
         <option value="local" selected>Local (ONNX)</option>
         <option value="runpod">RunPod Serverless</option>
@@ -1080,6 +1264,9 @@ class UpscalerApp extends HTMLElement {
               ${getUploadCustomOptionHTML()}
             </select>
           </label>
+          <button class="secondary outline edit-custom-model-btn" type="button" hidden title="Edit selected custom model" aria-label="Edit selected custom model">
+            <i class="fas fa-pen"></i>
+          </button>
           <button class="secondary outline delete-custom-model-btn" type="button" hidden title="Delete selected custom model" aria-label="Delete selected custom model">
             <i class="fas fa-trash"></i>
           </button>
@@ -1192,31 +1379,38 @@ class UpscalerApp extends HTMLElement {
 
       <div class="canvas-stack">
         <div class="canvas-toolbar-rail" aria-hidden="true">
-          <div class="canvas-toolbar canvas-toolbar-left" hidden>
-            <button class="upscale-btn" disabled>
-              <i class="fas fa-wand-magic-sparkles"></i> Upscale 4x
-            </button>
-            <button class="stop-btn secondary" style="display:none">
-              <i class="fas fa-stop"></i> Stop
-            </button>
-            <button class="viewsize-btn secondary outline" type="button">Full Size</button>
-            <button class="zoom-toggle-btn secondary outline" type="button" style="display:none" title="Toggle between slider compare and upscaled-only inspection">
-              <i class="fas fa-magnifying-glass-plus"></i> Use Zoom
-            </button>
-            <button class="clear-crop-btn secondary outline" style="display:none" type="button" title="Clear the selected crop region">
-              <i class="fas fa-eraser"></i> Clear Selection
-            </button>
-            <button class="startover-btn secondary outline" style="display:none">
-              <i class="fas fa-redo"></i> Start Over
-            </button>
-            <status-bar></status-bar>
+          <div class="canvas-toolbar-stack-left">
+            <div class="canvas-toolbar canvas-toolbar-left" hidden>
+              <button class="upscale-btn" disabled title="Upscale image">
+                <i class="fas fa-wand-magic-sparkles"></i> <span class="btn-label">Upscale 4x</span>
+              </button>
+              <button class="stop-btn secondary" style="display:none" title="Stop upscale">
+                <i class="fas fa-stop"></i> <span class="btn-label">Stop</span>
+              </button>
+              <button class="viewsize-btn secondary outline" type="button" title="Fit Width">
+                <i class="fas fa-arrows-left-right-to-line"></i> <span class="btn-label">Fit Width</span>
+              </button>
+              <button class="zoom-toggle-btn secondary outline" type="button" style="display:none" title="Toggle between slider compare and upscaled-only inspection">
+                <i class="fas fa-magnifying-glass-plus"></i> <span class="btn-label">Use Zoom</span>
+              </button>
+              <button class="clear-crop-btn secondary outline" style="display:none" type="button" title="Clear the selected crop region">
+                <i class="fas fa-eraser"></i> <span class="btn-label">Clear Selection</span>
+              </button>
+              <button class="startover-btn secondary outline" style="display:none" title="Start over with a new image">
+                <i class="fas fa-redo"></i> <span class="btn-label">Start Over</span>
+              </button>
+              <status-bar></status-bar>
+            </div>
+            <div class="canvas-zoom-hint" hidden>
+              Click: Zoom \u00b7 Right-click: Compare \u00b7 Shift+Wheel: Bubble size \u00b7 Ctrl+Wheel: Zoom factor
+            </div>
           </div>
           <div class="canvas-toolbar canvas-toolbar-right" hidden>
             <button class="open-in-tab-btn secondary outline" type="button" title="Open the upscaled image in a new tab">
-              <i class="fas fa-up-right-from-square"></i> Open in Tab
+              <i class="fas fa-up-right-from-square"></i> <span class="btn-label">Open in Tab</span>
             </button>
             <button class="download-btn secondary outline" type="button" title="Download the upscaled image">
-              <i class="fas fa-download"></i> Download
+              <i class="fas fa-download"></i> <span class="btn-label">Download</span>
             </button>
           </div>
         </div>

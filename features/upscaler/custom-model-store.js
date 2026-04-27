@@ -24,7 +24,15 @@ function sanitizeLayout(layout) {
 function sanitizeMultipleOf(multipleOf) {
   const parsed = parseInt(multipleOf, 10);
   if (!Number.isFinite(parsed) || parsed < 1) return 1;
-  if (parsed > 64) return 64;
+  if (parsed > 256) return 256;
+  return parsed;
+}
+
+function sanitizeMaxTileSize(maxTileSize) {
+  if (maxTileSize == null || maxTileSize === '') return null;
+  const parsed = parseInt(maxTileSize, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return null;
+  if (parsed > 4096) return 4096;
   return parsed;
 }
 
@@ -40,6 +48,7 @@ function toModelRecord(raw = {}) {
   const range = sanitizeRange(raw.range);
   const layout = sanitizeLayout(raw.layout);
   const multipleOf = sanitizeMultipleOf(raw.multipleOf);
+  const maxTileSize = sanitizeMaxTileSize(raw.maxTileSize);
   const sizeBytes = Number.isFinite(raw.sizeBytes) ? Math.max(0, raw.sizeBytes) : 0;
   const sizeMB = Number((sizeBytes / (1024 * 1024)).toFixed(1));
   return {
@@ -50,6 +59,7 @@ function toModelRecord(raw = {}) {
     range,
     layout,
     multipleOf,
+    maxTileSize,
     sizeBytes,
     sizeMB,
     custom: true,
@@ -71,13 +81,14 @@ function readStoredRecords() {
 }
 
 function persistRecords(records) {
-  const payload = records.map(({ id, label, scale, range, layout, multipleOf, sizeBytes }) => ({
+  const payload = records.map(({ id, label, scale, range, layout, multipleOf, maxTileSize, sizeBytes }) => ({
     id,
     label,
     scale,
     range,
     layout,
     multipleOf,
+    maxTileSize,
     sizeBytes,
   }));
   localStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(payload));
@@ -96,7 +107,7 @@ export function getCustomModelByUrl(url) {
   return readStoredRecords().find((model) => model.url === url) || null;
 }
 
-export async function saveCustomModel({ file, label, scale, range, layout, multipleOf }) {
+export async function saveCustomModel({ file, label, scale, range, layout, multipleOf, maxTileSize }) {
   if (!(file instanceof File)) {
     throw new Error('Missing ONNX file for custom model upload.');
   }
@@ -105,6 +116,7 @@ export async function saveCustomModel({ file, label, scale, range, layout, multi
   const normalizedRange = sanitizeRange(range);
   const normalizedLayout = sanitizeLayout(layout);
   const normalizedMultipleOf = sanitizeMultipleOf(multipleOf);
+  const normalizedMaxTileSize = sanitizeMaxTileSize(maxTileSize);
   const idSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const id = `custom-${idSeed}`;
   const url = `${CUSTOM_MODEL_URL_PREFIX}${id}`;
@@ -129,11 +141,40 @@ export async function saveCustomModel({ file, label, scale, range, layout, multi
     range: normalizedRange,
     layout: normalizedLayout,
     multipleOf: normalizedMultipleOf,
+    maxTileSize: normalizedMaxTileSize,
     sizeBytes: bytes.byteLength,
   });
   records.unshift(model);
   persistRecords(records);
   return model;
+}
+
+/**
+ * Update an existing custom model's metadata (label / scale / range / layout /
+ * multipleOf). The cached ONNX file and id/url are preserved. Unspecified
+ * fields are left unchanged. Returns the updated model record, or `null` if
+ * no model matches `url`.
+ */
+export function updateCustomModelByUrl(url, updates = {}) {
+  if (!url || typeof url !== 'string') return null;
+  const records = readStoredRecords();
+  const index = records.findIndex((entry) => entry.url === url);
+  if (index === -1) return null;
+
+  const current = records[index];
+  const merged = toModelRecord({
+    id: current.id,
+    label: 'label' in updates ? updates.label : current.label,
+    scale: 'scale' in updates ? updates.scale : current.scale,
+    range: 'range' in updates ? updates.range : current.range,
+    layout: 'layout' in updates ? updates.layout : current.layout,
+    multipleOf: 'multipleOf' in updates ? updates.multipleOf : current.multipleOf,
+    maxTileSize: 'maxTileSize' in updates ? updates.maxTileSize : current.maxTileSize,
+    sizeBytes: current.sizeBytes,
+  });
+  records[index] = merged;
+  persistRecords(records);
+  return merged;
 }
 
 export async function deleteCustomModelByUrl(url) {

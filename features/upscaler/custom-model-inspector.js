@@ -97,6 +97,35 @@ function inferMultipleFromReshapeError(rawError) {
   return Math.max(...pow2);
 }
 
+/**
+ * Detect a hard upper bound on input size by probing at increasing sizes.
+ * Some ONNX exports (notably PyTorch traces of models with shape-dependent
+ * conditionals — e.g. DAT-style window attention) bake in window counts as
+ * Constants and only accept inputs near the trace size. The auto-detect
+ * sweet-spot probe at 64 alone can't catch this, so we sweep a few common
+ * tile sizes upward and report the largest size that still runs.
+ *
+ * Returns `null` if the model worked at every probed size (i.e. no upper
+ * bound was found within the tested range).
+ */
+async function probeMaxInputSize(session, ort, baseProbeArgs, knownWorkingSize, report) {
+  const candidates = [128, 256];
+  let lastWorking = knownWorkingSize;
+  let foundUpperBound = false;
+  for (const size of candidates) {
+    if (size <= lastWorking) continue;
+    report?.(`testing maximum tile size at ${size}\u00d7${size}…`);
+    const probe = await runProbe(session, ort, { ...baseProbeArgs, size });
+    if (probe.ok) {
+      lastWorking = size;
+    } else {
+      foundUpperBound = true;
+      break;
+    }
+  }
+  return foundUpperBound ? lastWorking : null;
+}
+
 async function runProbe(session, ort, { inputName, outputName, inputType, layout, size, range }) {
   const inputTensor = createProbeTensor(ort, inputType, layout, size, range);
   try {
@@ -127,6 +156,7 @@ export class CustomModelInspector {
         range: 1,
         layout: 'nchw',
         multipleOf: 1,
+        maxTileSize: null,
         inputType: 'float32',
         scaleSource: 'default',
         multipleOfSource: 'default',
@@ -134,7 +164,7 @@ export class CustomModelInspector {
       };
     }
 
-    report?.('Reading ONNX metadata…');
+    report?.('reading ONNX metadata and loading session…');
     const bytes = await file.arrayBuffer();
     const session = await ort.InferenceSession.create(bytes, {
       executionProviders: ['wasm'],
@@ -149,6 +179,7 @@ export class CustomModelInspector {
           range: 1,
           layout: 'nchw',
           multipleOf: 1,
+          maxTileSize: null,
           inputType: 'float32',
           scaleSource: 'default',
           multipleOfSource: 'default',
@@ -171,7 +202,7 @@ export class CustomModelInspector {
       let probeScale = null;
       let probeWorked = false;
       for (const candidateLayout of layoutCandidates) {
-        report?.(`Probing ${candidateLayout.toUpperCase()} layout…`);
+        report?.(`testing ${candidateLayout.toUpperCase()} layout at 64\u00d764…`);
         const probe = await runProbe(session, ort, {
           inputName,
           outputName,
@@ -196,10 +227,10 @@ export class CustomModelInspector {
       const scale = probeScale || staticScale || 4;
       const scaleSource = probeScale ? 'probe' : staticScale ? 'metadata' : 'default';
 
-      report?.('Probing window multiple constraint…');
       let multipleOf = 1;
       let multipleOfSource = 'default';
       if (probeWorked) {
+        report?.('checking window-size alignment at 60\u00d760…');
         const mismatchProbe = await runProbe(session, ort, {
           inputName,
           outputName,
@@ -217,11 +248,37 @@ export class CustomModelInspector {
         }
       }
 
+      let maxTileSize = null;
+      if (probeWorked) {
+        maxTileSize = await probeMaxInputSize(
+          session,
+          ort,
+          { inputName, outputName, inputType, layout: chosenLayout, range },
+          64,
+          report,
+        );
+        if (Number.isFinite(maxTileSize)) {
+          // Some exports (e.g. DAT with window-count constants baked in) only
+          // accept inputs in a narrow band around the trace size. To keep
+          // every padded edge tile inside that band, force the alignment to
+          // equal the discovered max — combined with a tile-size cap in the
+          // engine, every inference then runs at exactly maxTileSize.
+          if (maxTileSize > multipleOf) {
+            multipleOf = maxTileSize;
+            multipleOfSource = 'probe';
+          }
+          notes.push(
+            `Model rejected inputs larger than ${maxTileSize}\u00d7${maxTileSize}; tile size will be capped at ${maxTileSize}.`,
+          );
+        }
+      }
+
       return {
         scale,
         range,
         layout: chosenLayout,
         multipleOf,
+        maxTileSize,
         inputType,
         scaleSource,
         multipleOfSource,
