@@ -20,6 +20,8 @@ export const UPSCALER_MODELS = [
   { url: 'models/4x-UpdraftLightweight_PW_MACRO_2.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro 168k (SPAN-faithful)', sizeMB: 1.2 },
   { url: 'models/4x-UpdraftLightweight_PW_MACRO_3.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro 180k (SPAN-faithful)', sizeMB: 1.2 },
   { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 50k (SPAN-faithful)', sizeMB: 1.2 },
+  { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_2.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 82k (SPAN-faithful)', sizeMB: 1.2 },
+  { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_3.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 150k (SPAN-faithful)', sizeMB: 1.2 },
 
 
 

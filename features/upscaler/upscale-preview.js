@@ -8,7 +8,6 @@
 import { morph } from 'lib/morph';
 
 class UpscalePreview extends HTMLElement {
-  #labelText = '';
   #ctx = null;
 
   connectedCallback() {
@@ -20,8 +19,7 @@ class UpscalePreview extends HTMLElement {
    * Set up the canvas with a dimmed version of the source image,
    * indicating that upscaling is about to begin.
    */
-  showDimmedPreview(image, outW, outH, label) {
-    this.#labelText = label;
+  showDimmedPreview(image, outW, outH) {
     this.style.setProperty('--ar', `${outW} / ${outH}`);
     this.style.setProperty('--natural-w', `${outW}px`);
     this.#render();
@@ -72,11 +70,14 @@ class UpscalePreview extends HTMLElement {
         .upscale-preview:not(.expanded) {
           width: auto;
           max-width: min(100%, var(--natural-w, 100%));
-          max-height: 100vh;
+          max-height: calc(100vh - 2rem);
           aspect-ratio: var(--ar, auto);
+          margin-inline: auto;
         }
         .upscale-preview.expanded {
-          width: 100%;
+          width: auto;
+          max-width: min(100%, var(--natural-w, 100%));
+          margin-inline: auto;
         }
         .upscale-preview canvas {
           display: block;
@@ -87,13 +88,7 @@ class UpscalePreview extends HTMLElement {
           border-radius: var(--pico-border-radius, 4px);
           background: #000;
         }
-        .upscale-preview .upscale-preview-label {
-          font-size: 0.8rem;
-          color: var(--pico-muted-color, #888);
-          margin-bottom: 0.4rem;
-        }
       </style>
-      <h3 class="upscale-preview-label">${this.#labelText}</h3>
       <canvas></canvas>
     `);
   }

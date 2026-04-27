@@ -24,7 +24,6 @@ class ImageCropper extends HTMLElement {
     this.#render();
 
     this.addEventListener('mousedown', e => {
-      if (e.target.closest('.crop-clear')) { this.clearCrop(); return; }
       const canvas = e.target.closest('canvas');
       if (!canvas) return;
       this.#dragging = true;
@@ -192,24 +191,20 @@ class ImageCropper extends HTMLElement {
   }
 
   #render() {
-    const label = this.#crop
-      ? `${this.#crop.w}\u00d7${this.#crop.h} selected`
-      : 'Click and drag to select a region (optional)';
-    const clearBtn = this.#crop
-      ? '<button type="button" class="crop-clear">Clear Selection</button>'
-      : '';
-
     morph(this, `
       <style>
         .image-cropper { display: none; }
         .image-cropper:not(.expanded) {
           width: auto;
           max-width: min(100%, var(--natural-w, 100%));
-          max-height: 100vh;
+          max-height: calc(100vh - 2rem);
           aspect-ratio: var(--ar, auto);
+          margin-inline: auto;
         }
         .image-cropper.expanded {
-          width: 100%;
+          width: auto;
+          max-width: min(100%, var(--natural-w, 100%));
+          margin-inline: auto;
         }
         .image-cropper canvas {
           display: block;
@@ -220,32 +215,7 @@ class ImageCropper extends HTMLElement {
           border-radius: var(--pico-border-radius, 4px);
           cursor: crosshair;
         }
-        .image-cropper .crop-info {
-          display: flex; align-items: center; gap: 0.75rem;
-          font-size: 0.8rem; color: var(--pico-muted-color, #888); margin-bottom: 0.4rem;
-        }
-        .image-cropper .crop-info .crop-clear {
-          padding: 0.3rem 0.6rem;
-          font-size: 0.75rem;
-          background: rgba(0,0,0,0.65);
-          color: #eee;
-          border: 1px solid rgba(255,255,255,0.3);
-          border-radius: 4px;
-          cursor: pointer;
-          white-space: nowrap;
-          backdrop-filter: blur(4px);
-          width: auto;
-          margin: 0;
-        }
-        .image-cropper .crop-info .crop-clear:hover {
-          background: rgba(0,0,0,0.85);
-          border-color: rgba(255,255,255,0.5);
-        }
       </style>
-      <div class="crop-info">
-        <span>${label}</span>
-        ${clearBtn}
-      </div>
       <canvas></canvas>
     `);
   }

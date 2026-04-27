@@ -203,12 +203,33 @@ class UpscalerApp extends HTMLElement {
       this.#viewState.expanded = !this.#viewState.expanded;
       this.#applyViewState();
       this.#persistViewState();
+      if (!this.#viewState.expanded) this.#snapCenterVisibleCanvas();
     });
     this.#q('compare-slider').addEventListener('view-state-change', (e) => {
       if (typeof e.detail.upscaledOnly === 'boolean') {
         this.#viewState.upscaledOnly = e.detail.upscaledOnly;
       }
       this.#persistViewState();
+    });
+  }
+
+  #getVisibleCanvasElement() {
+    for (const sel of ['compare-slider', 'upscale-preview', 'image-cropper', 'image-drop-zone']) {
+      const el = this.#q(sel);
+      if (el && el.offsetParent !== null) return el;
+    }
+    return null;
+  }
+
+  #snapCenterVisibleCanvas() {
+    const el = this.#getVisibleCanvasElement();
+    if (!el) return;
+    requestAnimationFrame(() => {
+      const rect = el.getBoundingClientRect();
+      const vh = window.innerHeight;
+      const fullyVisible = rect.top >= 0 && rect.bottom <= vh;
+      if (fullyVisible) return;
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     });
   }
 
@@ -235,9 +256,34 @@ class UpscalerApp extends HTMLElement {
     const upscaleBtn    = this.#q('.upscale-btn');
     const stopBtn       = this.#q('.stop-btn');
     const startOverBtn  = this.#q('.startover-btn');
-    const canvasToolbar = this.#q('.canvas-toolbar');
+    const clearCropBtn  = this.#q('.clear-crop-btn');
+    const zoomToggleBtn = this.#q('.zoom-toggle-btn');
+    const openInTabBtn  = this.#q('.open-in-tab-btn');
+    const downloadBtn   = this.#q('.download-btn');
+    const toolbarLeft   = this.#q('.canvas-toolbar-left');
+    const toolbarRight  = this.#q('.canvas-toolbar-right');
     const modelEl       = this.#q('.model-select');
     const deleteCustomBtn = this.#q('.delete-custom-model-btn');
+
+    const CROP_HINT = ' \u2014 drag to crop (optional).';
+
+    const syncZoomToggleLabel = () => {
+      const upscaledOnly = !!this.#viewState.upscaledOnly;
+      const icon = upscaledOnly ? 'fa-arrows-left-right' : 'fa-magnifying-glass-plus';
+      const label = upscaledOnly ? 'Use Slider' : 'Use Zoom';
+      zoomToggleBtn.innerHTML = `<i class="fas ${icon}"></i> ${label}`;
+    };
+    syncZoomToggleLabel();
+
+    const showCompareControls = () => {
+      zoomToggleBtn.style.display = 'inline-block';
+      toolbarRight.hidden = false;
+      syncZoomToggleLabel();
+    };
+    const hideCompareControls = () => {
+      zoomToggleBtn.style.display = 'none';
+      toolbarRight.hidden = true;
+    };
 
     statusBar.message = 'Load an image to begin.';
 
@@ -248,7 +294,7 @@ class UpscalerApp extends HTMLElement {
     this.#q('.clear-cache-btn').addEventListener('click', () => {
       if (this.#running) return;
       this.#pipeline.destroy();
-      statusBar.message = 'Model cache cleared — models will reload on next upscale.';
+      statusBar.message = 'Model cache cleared.';
     });
 
     const resetToStart = () => {
@@ -259,7 +305,9 @@ class UpscalerApp extends HTMLElement {
       upscaleBtn.disabled = true;
       stopBtn.style.display = 'none';
       startOverBtn.style.display = 'none';
-      canvasToolbar.hidden = true;
+      clearCropBtn.style.display = 'none';
+      hideCompareControls();
+      toolbarLeft.hidden = true;
       cropper.hide();
       preview.hide();
       compareSlider.hide();
@@ -271,12 +319,14 @@ class UpscalerApp extends HTMLElement {
     const showReady = () => {
       upscaleBtn.disabled = false;
       startOverBtn.style.display = 'inline-block';
-      canvasToolbar.hidden = false;
+      clearCropBtn.style.display = 'none';
+      hideCompareControls();
+      toolbarLeft.hidden = false;
       compareSlider.hide();
       preview.hide();
       dropZone.hide();
       cropper.show(this.#loadedImage);
-      statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 ready to upscale.`;
+      statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height}${CROP_HINT}`;
       statusBar.hideProgress();
     };
 
@@ -296,10 +346,16 @@ class UpscalerApp extends HTMLElement {
     cropper.addEventListener('crop-changed', (e) => {
       const crop = e.detail.crop;
       if (crop) {
-        statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${crop.w}\u00d7${crop.h} selected \u2014 ready to upscale.`;
+        clearCropBtn.style.display = 'inline-block';
+        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${crop.w}\u00d7${crop.h}.`;
       } else {
-        statusBar.message = `Loaded ${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 ready to upscale.`;
+        clearCropBtn.style.display = 'none';
+        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height}${CROP_HINT}`;
       }
+    });
+
+    clearCropBtn.addEventListener('click', () => {
+      cropper.clearCrop();
     });
 
     modelEl.addEventListener('change', async () => {
@@ -313,7 +369,7 @@ class UpscalerApp extends HTMLElement {
           this.#customModels = listCustomModels();
           this.#refreshModelSelectOptions(customModel.url);
           this.#previousModelValue = customModel.url;
-          statusBar.message = `Custom model "${customModel.label}" added (${customModel.scale}x, ~${customModel.sizeMB}MB).`;
+          statusBar.message = `Added "${customModel.label}" (${customModel.scale}x, ~${customModel.sizeMB}MB).`;
         }
       } else {
         this.#previousModelValue = modelEl.value;
@@ -339,7 +395,7 @@ class UpscalerApp extends HTMLElement {
       localStorage.setItem('upscaler_model', modelEl.value);
       this.#updateModelBoundControls();
       this.#updateCustomDeleteVisibility();
-      statusBar.message = `Deleted custom model "${selected.label}".`;
+      statusBar.message = `Deleted "${selected.label}".`;
     });
 
     this.#q('.tilesize-select').addEventListener('change', () => {
@@ -367,6 +423,8 @@ class UpscalerApp extends HTMLElement {
       this.#q('.clear-cache-btn').disabled = true;
       stopBtn.style.display = 'inline-block';
       startOverBtn.style.display = 'none';
+      clearCropBtn.style.display = 'none';
+      hideCompareControls();
       compareSlider.hide();
 
       try {
@@ -393,19 +451,19 @@ class UpscalerApp extends HTMLElement {
         statusBar.hideProgress();
         const outW = inputImage.width * scale;
         const outH = inputImage.height * scale;
-        statusBar.message = `Done \u2014 ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}.`;
+        statusBar.message = `Done: ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}.`;
 
-        compareSlider.setAttribute('after-label', `${scale}x Upscaled`);
         compareSlider.classList.toggle('expanded', this.#viewState.expanded);
         await compareSlider.show(beforeCanvas, afterCanvas, {
           downloadName: `upscaled_${scale}x.png`,
         });
         compareSlider.setUpscaledOnly(this.#viewState.upscaledOnly);
         preview.hide();
+        showCompareControls();
 
       } catch (e) {
         if (e.name === 'AbortError') {
-          statusBar.message = 'Upscale cancelled.';
+          statusBar.message = 'Cancelled.';
         } else {
           console.error(e);
           const opt = this.#q('.model-select')?.selectedOptions?.[0];
@@ -435,6 +493,20 @@ class UpscalerApp extends HTMLElement {
     startOverBtn.addEventListener('click', () => {
       if (this.#running) this.#abortController?.abort();
       resetToStart();
+    });
+
+    zoomToggleBtn.addEventListener('click', () => {
+      compareSlider.toggleUpscaledView();
+    });
+    openInTabBtn.addEventListener('click', () => {
+      compareSlider.openInTab();
+    });
+    downloadBtn.addEventListener('click', () => {
+      compareSlider.download();
+    });
+
+    compareSlider.addEventListener('view-state-change', () => {
+      syncZoomToggleLabel();
     });
   }
 
@@ -561,14 +633,9 @@ class UpscalerApp extends HTMLElement {
     const outW = inputImage.width * scale;
     const outH = inputImage.height * scale;
 
-    preview.showDimmedPreview(
-      inputImage,
-      outW,
-      outH,
-      `Upscaling ${inputImage.width}\u00d7${inputImage.height} via ${methodLabel}\u2026`,
-    );
+    preview.showDimmedPreview(inputImage, outW, outH);
     statusBar.showProgress(0.25);
-    statusBar.message = `Applying ${methodLabel} resample\u2026`;
+    statusBar.message = `${methodLabel} resampling\u2026`;
 
     const resultCanvas = document.createElement('canvas');
     resultCanvas.width = outW;
@@ -604,18 +671,16 @@ class UpscalerApp extends HTMLElement {
     const config = this.#extractConfig();
     if (perfMonitor.visible) perfMonitor.start(config.backend);
     const stepLabel = {
-      tiledUpscale: 'Base pass',
-      blendAll: 'All-pass blend',
-      detectFaces: 'Face detection',
-      enhanceFaces: 'Face enhance',
+      tiledUpscale: 'Upscaling',
+      blendAll: 'All-pass',
+      detectFaces: 'Detecting',
+      enhanceFaces: 'Faces',
     };
 
     const outW = inputImage.width * config.scale;
     const outH = inputImage.height * config.scale;
-    preview.showDimmedPreview(
-      inputImage, outW, outH,
-      `Upscaling ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}\u2026`,
-    );
+    preview.showDimmedPreview(inputImage, outW, outH);
+    statusBar.message = `Upscaling ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}\u2026`;
 
     const result = await this.#pipeline.run(inputImage, config, {
       onProgress(frac, msg) {
@@ -642,16 +707,16 @@ class UpscalerApp extends HTMLElement {
         const label = stepLabel[info.step] || info.step || 'Pass';
         if (info.step === 'enhanceFaces') {
           if (info.composited) {
-            statusBar.message = `${label}: composited face ${(info.faceIndex ?? 0) + 1}/${info.faceTotal ?? '?'}`;
+            statusBar.message = `${label}: face ${(info.faceIndex ?? 0) + 1}/${info.faceTotal ?? '?'} done`;
           } else {
             const faceN = Number.isFinite(info.faceIndex) ? info.faceIndex + 1 : null;
             const faceTotal = Number.isFinite(info.faceTotal) ? info.faceTotal : null;
             const facePrefix = faceN && faceTotal ? `face ${faceN}/${faceTotal}, ` : '';
             const faceTileTotal = Number.isFinite(info.faceTileTotal) ? info.faceTileTotal : info.total;
-            statusBar.message = `${label}: ${facePrefix}tile ${info.index + 1} / ${faceTileTotal}`;
+            statusBar.message = `${label}: ${facePrefix}tile ${info.index + 1}/${faceTileTotal}`;
           }
         } else {
-          statusBar.message = `${label}: tile ${info.index + 1} / ${info.total}`;
+          statusBar.message = `${label}: tile ${info.index + 1}/${info.total}`;
         }
         if (perfMonitor.visible) perfMonitor.update({
           step: info.step,
@@ -691,8 +756,8 @@ class UpscalerApp extends HTMLElement {
 
     const outW = inputImage.width * 4;
     const outH = inputImage.height * 4;
-    preview.showDimmedPreview(inputImage, outW, outH, `Upscaling ${inputImage.width}\u00d7${inputImage.height} via RunPod\u2026`);
-
+    preview.showDimmedPreview(inputImage, outW, outH);
+    statusBar.message = `Upscaling ${inputImage.width}\u00d7${inputImage.height} via RunPod\u2026`;
     statusBar.showIndeterminate();
 
     const { canvas: resultCanvas, scale: actualScale } = await engine.upscale(
@@ -905,6 +970,9 @@ class UpscalerApp extends HTMLElement {
         }
         upscaler-app .canvas-stack {
           position: relative;
+          background: rgba(0, 0, 0, 0.4);
+          border-radius: var(--pico-border-radius);
+          padding: 0.5rem;
         }
         upscaler-app .canvas-toolbar-rail {
           position: sticky;
@@ -916,27 +984,73 @@ class UpscalerApp extends HTMLElement {
         upscaler-app .canvas-toolbar {
           position: absolute;
           top: 0;
-          right: 0.75rem;
           display: inline-flex;
-          gap: 0.4rem;
-          padding: 0.35rem;
-          background: color-mix(in oklab, var(--pico-card-background-color, #1e1e2e) 82%, transparent);
-          border: 1px solid var(--pico-muted-border-color);
+          gap: 0.25rem;
+          align-items: center;
+          padding: 0.25rem 0.3rem;
+          background: color-mix(in oklab, var(--pico-card-background-color, #1e1e2e) 32%, transparent);
+          border: 1px solid color-mix(in oklab, var(--pico-muted-border-color) 45%, transparent);
           border-radius: var(--pico-border-radius);
-          box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
-          backdrop-filter: blur(6px);
-          -webkit-backdrop-filter: blur(6px);
+          box-shadow: 0 4px 18px rgba(0, 0, 0, 0.28);
+          backdrop-filter: blur(10px) saturate(1.1);
+          -webkit-backdrop-filter: blur(10px) saturate(1.1);
           pointer-events: auto;
+          max-width: calc(100% - 1.5rem);
+        }
+        upscaler-app .canvas-toolbar-left {
+          left: 0.75rem;
+        }
+        upscaler-app .canvas-toolbar-right {
+          right: 0.75rem;
         }
         upscaler-app .canvas-toolbar[hidden] {
           display: none;
         }
         upscaler-app .canvas-toolbar button {
           margin-bottom: 0;
-          padding: 0.4rem 0.8rem;
-          font-size: 0.85rem;
+          padding: 0.25rem 0.5rem;
+          font-size: 0.72rem;
+          line-height: 1.2;
           width: auto;
           white-space: nowrap;
+        }
+        upscaler-app .canvas-toolbar button.secondary,
+        upscaler-app .canvas-toolbar button.outline {
+          opacity: 0.78;
+          transition: opacity 0.15s ease;
+        }
+        upscaler-app .canvas-toolbar button.secondary:hover,
+        upscaler-app .canvas-toolbar button.outline:hover,
+        upscaler-app .canvas-toolbar button.secondary:focus-visible,
+        upscaler-app .canvas-toolbar button.outline:focus-visible {
+          opacity: 1;
+        }
+        upscaler-app .canvas-toolbar button .fas {
+          font-size: 0.78em;
+          margin-right: 0.15rem;
+        }
+        upscaler-app .canvas-toolbar status-bar {
+          display: inline-flex;
+          flex-direction: column;
+          align-items: stretch;
+          justify-content: center;
+          gap: 0.15rem;
+          margin-left: 0.3rem;
+          min-width: 0;
+          max-width: 20rem;
+        }
+        upscaler-app .canvas-toolbar status-bar .status-text {
+          font-size: 0.68rem;
+          line-height: 1.25;
+          min-height: 0;
+          margin-bottom: 0;
+          color: var(--pico-muted-color, #aaa);
+        }
+        upscaler-app .canvas-toolbar status-bar .progress-track {
+          width: 100%;
+          max-width: 180px;
+          height: 3px;
+          margin-bottom: 0;
         }
       </style>
 
@@ -1067,20 +1181,34 @@ class UpscalerApp extends HTMLElement {
 
       <custom-model-upload-dialog></custom-model-upload-dialog>
 
-      <status-bar></status-bar>
       <div class="canvas-stack">
         <div class="canvas-toolbar-rail" aria-hidden="true">
-          <div class="canvas-toolbar" hidden>
+          <div class="canvas-toolbar canvas-toolbar-left" hidden>
             <button class="upscale-btn" disabled>
               <i class="fas fa-wand-magic-sparkles"></i> Upscale 4x
             </button>
             <button class="stop-btn secondary" style="display:none">
               <i class="fas fa-stop"></i> Stop
             </button>
+            <button class="viewsize-btn secondary outline" type="button">Full Size</button>
+            <button class="zoom-toggle-btn secondary outline" type="button" style="display:none" title="Toggle between slider compare and upscaled-only inspection">
+              <i class="fas fa-magnifying-glass-plus"></i> Use Zoom
+            </button>
+            <button class="clear-crop-btn secondary outline" style="display:none" type="button" title="Clear the selected crop region">
+              <i class="fas fa-eraser"></i> Clear Selection
+            </button>
             <button class="startover-btn secondary outline" style="display:none">
               <i class="fas fa-redo"></i> Start Over
             </button>
-            <button class="viewsize-btn secondary outline" type="button">Full Size</button>
+            <status-bar></status-bar>
+          </div>
+          <div class="canvas-toolbar canvas-toolbar-right" hidden>
+            <button class="open-in-tab-btn secondary outline" type="button" title="Open the upscaled image in a new tab">
+              <i class="fas fa-up-right-from-square"></i> Open in Tab
+            </button>
+            <button class="download-btn secondary outline" type="button" title="Download the upscaled image">
+              <i class="fas fa-download"></i> Download
+            </button>
           </div>
         </div>
         <image-drop-zone></image-drop-zone>
