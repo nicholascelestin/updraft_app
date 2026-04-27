@@ -186,6 +186,7 @@ class CompareSlider extends HTMLElement {
     this.#upscaledOnly = !!upscaledOnly;
     this.#pixelZoomed = false;
     this.#probeCompareHeld = false;
+    this.#lastProbePoint = null;
     this.#hidePixelProbe();
     this.#render();
     if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);

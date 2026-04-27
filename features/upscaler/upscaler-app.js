@@ -825,8 +825,8 @@ class UpscalerApp extends HTMLElement {
         upscaler-app select.model-select,
         upscaler-app select.pass-all-model,
         upscaler-app select.detector-face-model {
-          width: min(100%, 17em);
-          max-width: 17em;
+          width: min(100%, 25em);
+          max-width: 25em;
         }
         upscaler-app select.output-select {
           width: min(100%, calc(4ch + 0.7rem + 2.25rem));
@@ -1018,12 +1018,19 @@ class UpscalerApp extends HTMLElement {
         upscaler-app .canvas-toolbar button.outline {
           opacity: 0.78;
           transition: opacity 0.15s ease;
+          background: transparent;
+          border-color: currentColor;
+          color: #fff;
+          mix-blend-mode: difference;
         }
         upscaler-app .canvas-toolbar button.secondary:hover,
         upscaler-app .canvas-toolbar button.outline:hover,
         upscaler-app .canvas-toolbar button.secondary:focus-visible,
         upscaler-app .canvas-toolbar button.outline:focus-visible {
           opacity: 1;
+          background: transparent;
+          border-color: currentColor;
+          color: #fff;
         }
         upscaler-app .canvas-toolbar button .fas {
           font-size: 0.78em;
@@ -1044,13 +1051,15 @@ class UpscalerApp extends HTMLElement {
           line-height: 1.25;
           min-height: 0;
           margin-bottom: 0;
-          color: var(--pico-muted-color, #aaa);
+          color: #fff;
+          mix-blend-mode: difference;
         }
         upscaler-app .canvas-toolbar status-bar .progress-track {
           width: 100%;
           max-width: 180px;
           height: 3px;
           margin-bottom: 0;
+          mix-blend-mode: difference;
         }
       </style>
 
