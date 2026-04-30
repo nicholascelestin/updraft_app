@@ -42,6 +42,8 @@ const PERSISTED_CONTROLS = [
   { selector: '.pass-all-enabled',        key: 'upscaler_pass_all_enabled',        kind: 'checked', event: 'change' },
   { selector: '.pass-all-blend',          key: 'upscaler_pass_all_blend',          kind: 'value',   event: 'input' },
   { selector: '.pass-all-model',          key: 'upscaler_pass_all_model',          kind: 'value',   event: 'change' },
+  { selector: '.pass-compare-enabled',    key: 'upscaler_pass_compare_enabled',    kind: 'checked', event: 'change' },
+  { selector: '.pass-compare-model',      key: 'upscaler_pass_compare_model',      kind: 'value',   event: 'change' },
   { selector: '.detector-face-enabled',   key: 'upscaler_detector_face_enabled',   kind: 'checked', event: 'change' },
   { selector: '.detector-face-padding',   key: 'upscaler_detector_face_padding_px', kind: 'value',   event: 'input' },
   { selector: '.detector-face-score',     key: 'upscaler_detector_face_score',     kind: 'value',   event: 'input' },
@@ -179,6 +181,7 @@ class UpscalerApp extends HTMLElement {
     // or editing a custom model from the main select doesn't disturb whatever
     // the user has chosen for the all-pass / face-pass.
     this.#refreshPassModelSelect('.pass-all-model');
+    this.#refreshPassModelSelect('.pass-compare-model');
     this.#refreshPassModelSelect('.detector-face-model');
   }
 
@@ -204,22 +207,25 @@ class UpscalerApp extends HTMLElement {
 
   // --- Pipeline helpers ---
 
-  #createComparisonCanvases(resultCanvas, image, outputScale) {
-    const targetScale = Math.max(1, outputScale || Math.round(resultCanvas.width / image.width) || 1);
+  #scaleCanvasToOutput(srCanvas, image, outputScale) {
+    const targetScale = Math.max(1, outputScale || Math.round(srCanvas.width / image.width) || 1);
     const w = image.width * targetScale;
     const h = image.height * targetScale;
-    const needsDownscale = resultCanvas.width !== w || resultCanvas.height !== h;
+    if (srCanvas.width === w && srCanvas.height === h) return srCanvas;
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(srCanvas, 0, 0, w, h);
+    return out;
+  }
 
-    let afterCanvas = resultCanvas;
-    if (needsDownscale) {
-      afterCanvas = document.createElement('canvas');
-      afterCanvas.width = w;
-      afterCanvas.height = h;
-      const afterCtx = afterCanvas.getContext('2d');
-      afterCtx.imageSmoothingEnabled = true;
-      afterCtx.imageSmoothingQuality = 'high';
-      afterCtx.drawImage(resultCanvas, 0, 0, w, h);
-    }
+  #createComparisonCanvases(resultCanvas, image, outputScale) {
+    const afterCanvas = this.#scaleCanvasToOutput(resultCanvas, image, outputScale);
+    const w = afterCanvas.width;
+    const h = afterCanvas.height;
 
     const beforeCanvas = document.createElement('canvas');
     beforeCanvas.width = w;
@@ -229,6 +235,16 @@ class UpscalerApp extends HTMLElement {
     bCtx.drawImage(image, 0, 0, w, h);
 
     return { beforeCanvas, afterCanvas };
+  }
+
+  // For Comparison mode: both layers are SR canvases of the same size, so the
+  // before slot is the base SR (no pixelated LR upscale) and the after slot
+  // is the comparison SR. We still honor the user's Final Output downscale.
+  #createComparisonPairCanvases(baseSR, comparisonSR, image, outputScale) {
+    return {
+      beforeCanvas: this.#scaleCanvasToOutput(baseSR, image, outputScale),
+      afterCanvas: this.#scaleCanvasToOutput(comparisonSR, image, outputScale),
+    };
   }
 
   // --- Event setup ---
@@ -471,11 +487,17 @@ class UpscalerApp extends HTMLElement {
     for (const sel of [
       '.pass-all-enabled',
       '.pass-all-model',
+      '.pass-compare-enabled',
+      '.pass-compare-model',
       '.detector-face-enabled',
       '.detector-face-model',
     ]) {
       this.#q(sel)?.addEventListener('change', () => this.#updateModelBoundControls());
     }
+
+    this.#q('.pass-compare-enabled')?.addEventListener('change', () => {
+      this.#syncComparisonExclusion();
+    });
 
     const wireMirror = (selector, mirrorSelector) => {
       this.#q(selector).addEventListener('input', (e) => {
@@ -511,14 +533,14 @@ class UpscalerApp extends HTMLElement {
         const parsedOutputScale = parseInt(this.#q('.output-select').value, 10);
         const requestedOutputScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : 4;
 
-        let beforeCanvas, afterCanvas, scale;
+        let beforeCanvas, afterCanvas, scale, comparison;
 
         if (this.#q('.mode-select').value === 'runpod') {
-          ({ beforeCanvas, afterCanvas, scale } = await this.#runRunPodUpscale(
+          ({ beforeCanvas, afterCanvas, scale, comparison } = await this.#runRunPodUpscale(
             inputImage, signal, statusBar, preview,
           ));
         } else {
-          ({ beforeCanvas, afterCanvas, scale } = await this.#runLocalUpscale(
+          ({ beforeCanvas, afterCanvas, scale, comparison } = await this.#runLocalUpscale(
             inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor,
           ));
         }
@@ -530,7 +552,7 @@ class UpscalerApp extends HTMLElement {
 
         compareSlider.classList.toggle('expanded', this.#viewState.expanded);
         await compareSlider.show(beforeCanvas, afterCanvas, {
-          downloadName: `upscaled_${scale}x.png`,
+          downloadName: comparison ? `comparison_${scale}x.png` : `upscaled_${scale}x.png`,
         });
         compareSlider.setUpscaledOnly(this.#viewState.upscaledOnly);
         preview.hide();
@@ -633,6 +655,9 @@ class UpscalerApp extends HTMLElement {
     if (this.#q('.pass-all-enabled')?.checked) {
       capCandidates.push(this.#q('.pass-all-model')?.selectedOptions[0]);
     }
+    if (this.#q('.pass-compare-enabled')?.checked) {
+      capCandidates.push(this.#q('.pass-compare-model')?.selectedOptions[0]);
+    }
     if (this.#q('.detector-face-enabled')?.checked) {
       capCandidates.push(this.#q('.detector-face-model')?.selectedOptions[0]);
     }
@@ -684,6 +709,21 @@ class UpscalerApp extends HTMLElement {
     this.#q('.detector-face-blend-val').textContent = this.#q('.detector-face-blend').value;
   }
 
+  // When Comparison is on, the All/Faces passes are mutually exclusive — they
+  // would muddy what the slider is showing. We disable their controls and dim
+  // the rows, but we leave the underlying values untouched so toggling
+  // Comparison off restores the user's prior pass setup verbatim.
+  #syncComparisonExclusion() {
+    const compareOn = !!this.#q('.pass-compare-enabled')?.checked;
+    const otherRows = this.querySelectorAll('.detector-row:not(.pass-compare-row)');
+    for (const row of otherRows) {
+      row.classList.toggle('passes-disabled', compareOn);
+      for (const ctrl of row.querySelectorAll('input, select')) {
+        ctrl.disabled = compareOn;
+      }
+    }
+  }
+
   #updateHangWarning() {
     const modelOpt = this.#q('.model-select').selectedOptions[0];
     if (this.#isBuiltInResampler(modelOpt)) {
@@ -716,35 +756,55 @@ class UpscalerApp extends HTMLElement {
     // not just the primary one.
     const optionsForClamp = [opt];
 
-    if (this.#q('.pass-all-enabled').checked) {
-      const aopt = this.#q('.pass-all-model').selectedOptions[0];
-      if (aopt) optionsForClamp.push(aopt);
-      config.all = {
-        modelUrl: aopt?.value || modelUrl,
-        scale: parseInt(aopt?.dataset.scale, 10) || scale,
-        modelValueRange: parseInt(aopt?.dataset.range, 10) || 1,
-        modelLayout: aopt?.dataset.layout || 'nchw',
-        modelInputMultiple: parseInt(aopt?.dataset.multipleof, 10) || 1,
-        backend: aopt?.dataset.backend || backend,
-        blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
-      };
-    }
+    // Comparison runs the base + a second SR pass and shows them side-by-
+    // side; All/Faces would mutate the base canvas the slider is supposed to
+    // expose, so we suppress them entirely whenever Comparison is on. The UI
+    // already disables those rows — this is the matching defensive guard at
+    // the config layer.
+    const compareOn = this.#q('.pass-compare-enabled').checked;
 
-    if (this.#q('.detector-face-enabled').checked) {
-      const fopt = this.#q('.detector-face-model').selectedOptions[0];
-      if (fopt) optionsForClamp.push(fopt);
-      config.face = {
-        modelUrl: fopt?.value || modelUrl,
-        scale: parseInt(fopt?.dataset.scale, 10) || scale,
-        modelValueRange: parseInt(fopt?.dataset.range, 10) || 1,
-        modelLayout: fopt?.dataset.layout || 'nchw',
-        modelInputMultiple: parseInt(fopt?.dataset.multipleof, 10) || 1,
-        backend: fopt?.dataset.backend || backend,
-        paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
-        featherPx: 16,
-        blendOpacity: parseFloat(this.#q('.detector-face-blend').value),
-        scoreThreshold: parseFloat(this.#q('.detector-face-score').value),
+    if (compareOn) {
+      const copt = this.#q('.pass-compare-model').selectedOptions[0];
+      if (copt) optionsForClamp.push(copt);
+      config.comparison = {
+        modelUrl: copt?.value || modelUrl,
+        scale: parseInt(copt?.dataset.scale, 10) || scale,
+        modelValueRange: parseInt(copt?.dataset.range, 10) || 1,
+        modelLayout: copt?.dataset.layout || 'nchw',
+        modelInputMultiple: parseInt(copt?.dataset.multipleof, 10) || 1,
+        backend: copt?.dataset.backend || backend,
       };
+    } else {
+      if (this.#q('.pass-all-enabled').checked) {
+        const aopt = this.#q('.pass-all-model').selectedOptions[0];
+        if (aopt) optionsForClamp.push(aopt);
+        config.all = {
+          modelUrl: aopt?.value || modelUrl,
+          scale: parseInt(aopt?.dataset.scale, 10) || scale,
+          modelValueRange: parseInt(aopt?.dataset.range, 10) || 1,
+          modelLayout: aopt?.dataset.layout || 'nchw',
+          modelInputMultiple: parseInt(aopt?.dataset.multipleof, 10) || 1,
+          backend: aopt?.dataset.backend || backend,
+          blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
+        };
+      }
+
+      if (this.#q('.detector-face-enabled').checked) {
+        const fopt = this.#q('.detector-face-model').selectedOptions[0];
+        if (fopt) optionsForClamp.push(fopt);
+        config.face = {
+          modelUrl: fopt?.value || modelUrl,
+          scale: parseInt(fopt?.dataset.scale, 10) || scale,
+          modelValueRange: parseInt(fopt?.dataset.range, 10) || 1,
+          modelLayout: fopt?.dataset.layout || 'nchw',
+          modelInputMultiple: parseInt(fopt?.dataset.multipleof, 10) || 1,
+          backend: fopt?.dataset.backend || backend,
+          paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
+          featherPx: 16,
+          blendOpacity: parseFloat(this.#q('.detector-face-blend').value),
+          scoreThreshold: parseFloat(this.#q('.detector-face-score').value),
+        };
+      }
     }
 
     // Models with a hard input-size cap (e.g. DAT exports with baked-in
@@ -813,6 +873,7 @@ class UpscalerApp extends HTMLElement {
     if (perfMonitor.visible) perfMonitor.start(config.backend);
     const stepLabel = {
       tiledUpscale: 'Upscaling',
+      comparison: 'Comparison',
       blendAll: 'All-pass',
       detectFaces: 'Detecting',
       enhanceFaces: 'Faces',
@@ -838,6 +899,8 @@ class UpscalerApp extends HTMLElement {
       },
       onTile(info) {
         if (info.step === 'tiledUpscale') {
+          preview.drawTile(info);
+        } else if (info.step === 'comparison') {
           preview.drawTile(info);
         } else if (info.step === 'blendAll') {
           preview.drawTile(info, { opacity: config.all?.blendOpacity ?? 1 });
@@ -873,8 +936,14 @@ class UpscalerApp extends HTMLElement {
     }
 
     const outputScale = Math.max(1, Math.min(requestedOutputScale, result.scale));
+    if (config.comparison && result.comparisonImage) {
+      const canvases = this.#createComparisonPairCanvases(
+        result.image, result.comparisonImage, inputImage, outputScale,
+      );
+      return { ...canvases, scale: outputScale, comparison: true };
+    }
     const canvases = this.#createComparisonCanvases(result.image, inputImage, outputScale);
-    return { ...canvases, scale: outputScale };
+    return { ...canvases, scale: outputScale, comparison: false };
   }
 
   async #runRunPodUpscale(inputImage, signal, statusBar, preview) {
@@ -909,7 +978,7 @@ class UpscalerApp extends HTMLElement {
 
     const scale = Math.min(finalScale, actualScale);
     const canvases = this.#createComparisonCanvases(resultCanvas, inputImage, scale);
-    return { ...canvases, scale };
+    return { ...canvases, scale, comparison: false };
   }
 
   // --- Settings ---
@@ -929,6 +998,7 @@ class UpscalerApp extends HTMLElement {
 
     this.#applyViewState();
     this.#q('compare-slider').setUpscaledOnly(this.#viewState.upscaledOnly);
+    this.#syncComparisonExclusion();
     this.#updateModelBoundControls();
     this.#updateInputMirrors();
     this.#updateCustomDeleteVisibility();
@@ -964,6 +1034,7 @@ class UpscalerApp extends HTMLElement {
         }
         upscaler-app select.model-select,
         upscaler-app select.pass-all-model,
+        upscaler-app select.pass-compare-model,
         upscaler-app select.detector-face-model {
           width: min(100%, 25em);
           max-width: 25em;
@@ -1023,6 +1094,9 @@ class UpscalerApp extends HTMLElement {
         }
         upscaler-app .detector-row:first-of-type {
           margin-top: 0;
+        }
+        upscaler-app .detector-row.passes-disabled {
+          opacity: 0.5;
         }
         upscaler-app .detector-row label {
           margin-bottom: 0;
@@ -1326,7 +1400,18 @@ class UpscalerApp extends HTMLElement {
 
       <details class="passes-panel">
         <summary><i class="fas fa-user-check"></i> Additional Passes</summary>
-        <div class="detector-row">
+        <div class="detector-row pass-compare-row">
+          <label class="check-control">
+            <input class="pass-compare-enabled" type="checkbox">
+            Comparison
+          </label>
+          <label class="model-control">
+            <select class="pass-compare-model" aria-label="Comparison pass model">
+              ${modelOptionsHTML()}
+            </select>
+          </label>
+        </div>
+        <div class="detector-row pass-all-row">
           <label class="check-control">
             <input class="pass-all-enabled" type="checkbox">
             All (full image blend)
@@ -1344,7 +1429,7 @@ class UpscalerApp extends HTMLElement {
             </span>
           </label>
         </div>
-        <div class="detector-row">
+        <div class="detector-row pass-faces-row">
           <label class="check-control">
             <input class="detector-face-enabled" type="checkbox">
             Faces (YuNet)

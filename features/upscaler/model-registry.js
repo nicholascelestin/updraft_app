@@ -10,10 +10,15 @@ export const UPSCALER_MODELS = [
   { url: 'models/4x-UpdraftTiny.onnx', scale: 4, range: 255, label: 'Updraft Tiny (RMBN)', sizeMB: 0.6 },
   { url: 'models/4x-UpdraftLightweight.onnx', scale: 4, range: 255, label: 'Updraft Lightweight (SPAN-like)', sizeMB: 0.8 },
   { url: 'models/4x-UpdraftMidweight.onnx', scale: 4, range: 255, label: 'Updraft Midweight (SPAN-like)', sizeMB: 1.2 },
-  // { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_4.onnx', scale: 4, range: 1, label: 'Updraft Lightweight Macro More 180k (SPAN-faithful)', sizeMB: 1.2 },
+  // { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_16.onnx', scale: 4, range: 1, label: 'Updraft Midweight V3 650k Conv (SPAN-like)', sizeMB: 1.4 },
+  // { url: 'models/4x-UpdraftLightweight_PW_MACRO_MORE_17.onnx', scale: 4, range: 1, label: 'Updraft Midweight V3 680k Conv (SPAN-like)', sizeMB: 1.4 },
+
+
 
   { url: 'models/4x-ClearRealityV1.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.8 },
   { url: 'models/4xPurePhoto-Span.onnx', scale: 4, label: 'PurePhoto (SPAN)', sizeMB: 1.7 },
+  { url: 'models/DAT_light_x4_dyn.onnx', scale: 4, label: 'DAT Light Official (DAT-Light)', sizeMB: 5 },
+
   { url: 'models/4xPurePhoto-RealPLSKR.onnx', scale: 4, label: 'PurePhoto (RealPLKSR)', sizeMB: 30 },
   { url: 'models/4x-UltraSharpV2_Lite.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)', sizeMB: 28 },
   { url: 'models/4x-UltraSharpV2.onnx', scale: 4, label: 'UltraSharp V2 (DAT)', sizeMB: 49 },

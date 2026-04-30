@@ -132,6 +132,40 @@ const tiledUpscaleStep = {
   },
 };
 
+const comparisonStep = {
+  name: 'comparison',
+  shouldRun: (ctx) => !!ctx.config.comparison,
+  async run(ctx, cb) {
+    const { comparison, backend, tileSize } = ctx.config;
+    const passBackend = comparison.backend || backend;
+    const engine = ctx.pool.getUpscaler('comparison-upscaler', {
+      modelUrl: comparison.modelUrl,
+      scale: comparison.scale,
+      modelValueRange: comparison.modelValueRange,
+      modelLayout: comparison.modelLayout,
+      modelInputMultiple: comparison.modelInputMultiple,
+      backend: passBackend,
+    });
+    emitStage(cb, 'comparison', 'loading', { message: 'Loading comparison model…' });
+    const tLoad = performance.now();
+    await engine.loadModel(passBackend, (progress, message) => {
+      emitStage(cb, 'comparison', 'loading', { progress, message });
+    });
+    const modelLoadMs = Number((performance.now() - tLoad).toFixed(1));
+    emitStage(cb, 'comparison', 'running', { message: 'Running comparison upscale pass…' });
+
+    const { canvas, perf } = await engine.upscale(ctx.source, tileSize, {
+      onTile: (info) => cb.onTile?.({ ...info, step: 'comparison' }),
+      signal: cb.signal,
+    });
+    return {
+      ...ctx,
+      comparisonImage: canvas,
+      stepPerf: { ...(ctx.stepPerf || {}), comparison: { ...perf, modelLoadMs } },
+    };
+  },
+};
+
 const blendAllStep = {
   name: 'blendAll',
   shouldRun: (ctx) => !!ctx.config.all,
@@ -339,7 +373,7 @@ const enhanceFacesStep = {
 // Step runner
 // ---------------------------------------------------------------------------
 
-const STEPS = [tiledUpscaleStep, blendAllStep, detectFacesStep, enhanceFacesStep];
+const STEPS = [tiledUpscaleStep, comparisonStep, blendAllStep, detectFacesStep, enhanceFacesStep];
 
 function getImageSize(image) {
   if (!image) return null;
