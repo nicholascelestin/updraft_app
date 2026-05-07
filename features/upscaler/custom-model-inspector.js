@@ -3,6 +3,34 @@ function normalizeDims(dims) {
   return dims.map((d) => (typeof d === 'number' ? d : Number.NaN));
 }
 
+/**
+ * ORT-Web 1.18+ exposes `session.inputMetadata` / `outputMetadata` as a
+ * readonly array of ValueMetadata, ordered to match `inputNames` /
+ * `outputNames`. Older versions exposed it as a Record keyed by tensor
+ * name. We support both shapes so the inspector keeps working across ORT
+ * upgrades, with a name-keyed fallback to the positional entry.
+ */
+function readMetaEntry(metaCollection, name, index = 0) {
+  if (!metaCollection) return null;
+  if (Array.isArray(metaCollection)) {
+    if (name) {
+      const byName = metaCollection.find((m) => m?.name === name);
+      if (byName) return byName;
+    }
+    return metaCollection[index] || null;
+  }
+  return (name && metaCollection[name]) || null;
+}
+
+/**
+ * The ValueMetadata shape array is `shape` in ORT-Web 1.20+; older
+ * versions called the same field `dimensions`. Read either and let the
+ * caller handle the array of (number | string) entries.
+ */
+function readMetaShape(meta) {
+  return meta?.shape ?? meta?.dimensions ?? null;
+}
+
 function detectLayout(dims) {
   if (dims.length !== 4) return 'unknown';
   const cAt1 = dims[1];
@@ -39,6 +67,12 @@ function rangeFromInputType(inputType) {
   if (typeof inputType !== 'string') return 1;
   if (inputType.includes('uint8') || inputType.includes('int8')) return 255;
   return 1;
+}
+
+function precisionFromInputType(inputType) {
+  return typeof inputType === 'string' && inputType.toLowerCase().includes('float16')
+    ? 'fp16'
+    : 'fp32';
 }
 
 function createProbeTensor(ort, inputType, layout, size, range) {
@@ -158,6 +192,7 @@ export class CustomModelInspector {
         multipleOf: 1,
         maxTileSize: null,
         inputType: 'float32',
+        precision: 'fp32',
         scaleSource: 'default',
         multipleOfSource: 'default',
         notes: ['ONNX Runtime not loaded yet; using defaults (4x, range 1).'],
@@ -166,10 +201,32 @@ export class CustomModelInspector {
 
     report?.('reading ONNX metadata and loading session…');
     const bytes = await file.arrayBuffer();
-    const session = await ort.InferenceSession.create(bytes, {
-      executionProviders: ['wasm'],
-      graphOptimizationLevel: 'all',
-    });
+    // Probe on WebGPU first when available — fp16 models will only run there,
+    // and fp32 models work fine on either EP, so WebGPU is the right default.
+    // Fall back to WASM when WebGPU is unavailable or session creation fails.
+    const hasWebGpu = !!(navigator.gpu && ort.env?.webgpu);
+    let session = null;
+    let probeBackend = null;
+    if (hasWebGpu) {
+      try {
+        report?.('loading session on WebGPU…');
+        session = await ort.InferenceSession.create(bytes, {
+          executionProviders: [{ name: 'webgpu', preferredLayout: 'NCHW' }],
+          graphOptimizationLevel: 'all',
+        });
+        probeBackend = 'webgpu';
+      } catch (err) {
+        console.warn('[CustomModelInspector] WebGPU probe session failed, falling back to WASM:', err);
+      }
+    }
+    if (!session) {
+      report?.('loading session on CPU/WASM…');
+      session = await ort.InferenceSession.create(bytes, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+      });
+      probeBackend = 'wasm';
+    }
     try {
       const inputName = session.inputNames?.[0];
       const outputName = session.outputNames?.[0];
@@ -181,19 +238,24 @@ export class CustomModelInspector {
           multipleOf: 1,
           maxTileSize: null,
           inputType: 'float32',
+          precision: 'fp32',
           scaleSource: 'default',
           multipleOfSource: 'default',
           notes: ['Model has no detectable input tensor; using defaults.'],
         };
       }
-      const inMeta = inputName ? session.inputMetadata?.[inputName] : null;
-      const outMeta = outputName ? session.outputMetadata?.[outputName] : null;
-      const inDims = normalizeDims(inMeta?.dimensions);
-      const outDims = normalizeDims(outMeta?.dimensions);
+      const inMeta = readMetaEntry(session.inputMetadata, inputName, 0);
+      const outMeta = readMetaEntry(session.outputMetadata, outputName, 0);
+      const inDims = normalizeDims(readMetaShape(inMeta));
+      const outDims = normalizeDims(readMetaShape(outMeta));
       const layout = detectLayout(inDims);
       const inputType = inMeta?.type || 'float32';
       const range = rangeFromInputType(inputType);
+      const precision = precisionFromInputType(inputType);
       const notes = [];
+      if (precision === 'fp16' && probeBackend !== 'webgpu') {
+        notes.push('This model is fp16 but probing fell back to CPU/WASM, which has limited fp16 op coverage. Probe results may be unreliable; the model itself will require WebGPU at run time.');
+      }
       const layoutCandidates = layout === 'unknown'
         ? ['nchw', 'nhwc']
         : [layout, layout === 'nchw' ? 'nhwc' : 'nchw'];
@@ -280,6 +342,7 @@ export class CustomModelInspector {
         multipleOf,
         maxTileSize,
         inputType,
+        precision,
         scaleSource,
         multipleOfSource,
         notes,

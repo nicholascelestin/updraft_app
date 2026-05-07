@@ -43,6 +43,14 @@ class CompareSlider extends HTMLElement {
     this.#dragging = false;
     this.classList.remove('dragging');
   };
+  #onKeyDown = (e) => {
+    // Esc is the only universal exit from fullscreen pixel-zoom — click-to-
+    // exit only works in upscaled-only mode (where clicks aren't slider drags).
+    if (e.key !== 'Escape') return;
+    if (!this.#pixelZoomed) return;
+    e.preventDefault();
+    this.#togglePixelZoom();
+  };
   #onWheel = (e) => {
     if (!(this.#upscaledOnly && !this.#pixelZoomed)) return;
     if (e.ctrlKey) {
@@ -82,6 +90,7 @@ class CompareSlider extends HTMLElement {
     window.addEventListener('touchmove', this.#onWindowTouchMove, { passive: true });
     window.addEventListener('mouseup', this.#onWindowMouseUp);
     window.addEventListener('touchend', this.#onWindowTouchEnd);
+    window.addEventListener('keydown', this.#onKeyDown);
 
     this.addEventListener('click', e => {
       if (this.#upscaledOnly) {
@@ -113,6 +122,7 @@ class CompareSlider extends HTMLElement {
     window.removeEventListener('touchmove', this.#onWindowTouchMove);
     window.removeEventListener('mouseup', this.#onWindowMouseUp);
     window.removeEventListener('touchend', this.#onWindowTouchEnd);
+    window.removeEventListener('keydown', this.#onKeyDown);
     this.removeEventListener('wheel', this.#onWheel);
   }
 
@@ -166,6 +176,7 @@ class CompareSlider extends HTMLElement {
   }
 
   hide() {
+    const wasPixelZoomed = this.#pixelZoomed;
     this.style.display = 'none';
     this.style.removeProperty('--ar');
     this.style.removeProperty('--natural-w');
@@ -180,16 +191,23 @@ class CompareSlider extends HTMLElement {
       this.#lazyBlobURL = '';
       this.#downloadSrc = '';
     }
+    // Notify listeners that pixel-zoom (fullscreen) has been torn down so
+    // host-level UI synced to that state (e.g. fullscreen toolbar overlay)
+    // doesn't get stranded after a reset / new image / re-run.
+    if (wasPixelZoomed) this.#emitViewState();
   }
 
   setUpscaledOnly(upscaledOnly) {
     this.#upscaledOnly = !!upscaledOnly;
-    this.#pixelZoomed = false;
+    // Intentionally do NOT clear #pixelZoomed: the fullscreen overlay now
+    // hosts both the upscaled-only zoom view and the slider view, so the
+    // toolbar's Use Zoom / Use Slider toggle should switch between them
+    // without dropping the user out of fullscreen.
     this.#probeCompareHeld = false;
     this.#lastProbePoint = null;
     this.#hidePixelProbe();
     this.#render();
-    if (!this.#upscaledOnly) this.#setPosition(this.#positionFrac);
+    this.#setPosition(this.#positionFrac);
     this.#syncModeClass();
   }
 
@@ -213,7 +231,11 @@ class CompareSlider extends HTMLElement {
   }
 
   #togglePixelZoom() {
-    if (!this.#upscaledOnly) return;
+    // Entry into pixel-zoom is gated to upscaled-only (it's reached via
+    // click-on-canvas in zoom-inspect mode), but exit must work from any
+    // mode — once in fullscreen the user might have toggled to the slider
+    // view and pressed Esc.
+    if (!this.#pixelZoomed && !this.#upscaledOnly) return;
     this.#pixelZoomed = !this.#pixelZoomed;
     this.#probeCompareHeld = false;
     if (!this.#pixelZoomed) {
@@ -256,7 +278,14 @@ class CompareSlider extends HTMLElement {
   }
 
   #getFrac(e) {
-    const rect = this.getBoundingClientRect();
+    // Use the stage rect (the natural-size box that wraps the after canvas
+    // and the before-wrap clip) instead of the host. In normal modes the
+    // stage fills the host so this is equivalent, but in pixel-zoom mode
+    // the host is the viewport-sized scrollable container while the stage
+    // is at the canvas's natural pixel size — only the stage rect tracks
+    // the actual image coordinates the slider divides.
+    const stage = this.querySelector('.compare-stage');
+    const rect = (stage || this).getBoundingClientRect();
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
   }
@@ -273,7 +302,11 @@ class CompareSlider extends HTMLElement {
 
   #syncModeClass() {
     this.classList.toggle('upscaled-only', this.#upscaledOnly);
-    this.classList.toggle('pixel-zoom', this.#upscaledOnly && this.#pixelZoomed);
+    // .pixel-zoom drives the fullscreen-overlay layout independently of
+    // .upscaled-only — the slider works inside fullscreen too, so this
+    // class is set whenever pixel-zoom is active regardless of which
+    // sub-mode (zoom-inspect or slider) is currently visible.
+    this.classList.toggle('pixel-zoom', this.#pixelZoomed);
     if (!(this.#upscaledOnly && !this.#pixelZoomed)) this.#hidePixelProbe();
   }
 
@@ -509,6 +542,17 @@ class CompareSlider extends HTMLElement {
           margin-inline: auto;
         }
         .compare img, .compare canvas { display: block; width: 100%; height: auto; pointer-events: none; }
+        /* compare-stage is the natural-size containing block for the after
+           canvas, the before-wrap clip and the slider handle. In normal modes
+           it just fills the host (width: 100%); in pixel-zoom (fullscreen) it
+           shrinks to the canvas's native dimensions so before-wrap's
+           percentage width / handle's percentage left line up with the same
+           native pixels the after canvas is showing. */
+        .compare .compare-stage {
+          position: relative;
+          display: block;
+          width: 100%;
+        }
         .compare .compare-before-wrap {
           position: absolute; top: 0; left: 0; height: 100%; overflow: hidden;
           width: 50%; border-right: 2px solid rgba(255,255,255,0.35);
@@ -550,11 +594,15 @@ class CompareSlider extends HTMLElement {
           font-size: 9px; line-height: 1;
         }
         .compare.upscaled-only { cursor: crosshair; }
-        .compare.upscaled-only.pixel-zoom {
+        /* pixel-zoom is the fullscreen-overlay layout. It used to be tied to
+           upscaled-only (zoom-only inspection), but the slider works inside
+           it too — so the host sizing / scroll behavior lives on .pixel-zoom
+           alone, and the per-mode tweaks (cursor, hidden slider parts) layer
+           on top via .upscaled-only.pixel-zoom or :not(.upscaled-only). */
+        .compare.pixel-zoom {
           position: fixed;
           inset: 0;
           z-index: 1000;
-          cursor: zoom-out;
           overflow: auto;
           max-width: none;
           max-height: none;
@@ -563,13 +611,21 @@ class CompareSlider extends HTMLElement {
           border-radius: 0;
           background: #000;
           display: flex;
+          aspect-ratio: auto;
         }
-        .compare.upscaled-only.pixel-zoom .compare-after {
+        .compare.pixel-zoom .compare-stage {
+          margin: auto;
+          width: max-content;
+          height: max-content;
+          flex: 0 0 auto;
+        }
+        .compare.pixel-zoom .compare-after {
           width: auto;
           max-width: none;
           height: auto;
-          margin: auto;
+          display: block;
         }
+        .compare.upscaled-only.pixel-zoom { cursor: zoom-out; }
         .compare.upscaled-only .compare-before-wrap,
         .compare.upscaled-only .compare-handle {
           display: none;
@@ -607,20 +663,22 @@ class CompareSlider extends HTMLElement {
           display: block;
         }
       </style>
-      ${afterTag}
-      <div class="compare-before-wrap">
-        ${beforeTag}
-      </div>
-      <div class="compare-handle" aria-hidden="true">
-        <div class="handle-knob">
-          <span class="handle-side handle-side-before" aria-label="Original">
-            <i class="fas fa-eye-low-vision"></i>
-            <span class="handle-arrow">\u25C0</span>
-          </span>
-          <span class="handle-side handle-side-after" aria-label="Enhanced">
-            <span class="handle-arrow">\u25B6</span>
-            <i class="fas fa-eye"></i>
-          </span>
+      <div class="compare-stage">
+        ${afterTag}
+        <div class="compare-before-wrap">
+          ${beforeTag}
+        </div>
+        <div class="compare-handle" aria-hidden="true">
+          <div class="handle-knob">
+            <span class="handle-side handle-side-before" aria-label="Original">
+              <i class="fas fa-eye-low-vision"></i>
+              <span class="handle-arrow">\u25C0</span>
+            </span>
+            <span class="handle-side handle-side-after" aria-label="Enhanced">
+              <span class="handle-arrow">\u25B6</span>
+              <i class="fas fa-eye"></i>
+            </span>
+          </div>
         </div>
       </div>
       <div class="compare-pixel-probe" aria-hidden="true">

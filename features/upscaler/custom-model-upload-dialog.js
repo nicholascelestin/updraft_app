@@ -45,6 +45,7 @@ class CustomModelUploadDialog extends HTMLElement {
     const layoutInput   = this.querySelector('.custom-model-layout');
     const multipleInput = this.querySelector('.custom-model-multiple');
     const maxTileInput  = this.querySelector('.custom-model-maxtile');
+    const precisionInput = this.querySelector('.custom-model-precision');
     const sizeLabel     = this.querySelector('.custom-model-size');
     const detectLabel   = this.querySelector('.custom-model-detected');
     const errorLabel    = this.querySelector('.custom-model-error');
@@ -70,6 +71,7 @@ class CustomModelUploadDialog extends HTMLElement {
       layoutInput.value = editModel.layout === 'nhwc' ? 'nhwc' : 'nchw';
       multipleInput.value = String(Math.max(1, editModel.multipleOf || 1));
       maxTileInput.value = editModel.maxTileSize != null ? String(editModel.maxTileSize) : '';
+      precisionInput.value = editModel.precision === 'fp16' ? 'fp16' : 'fp32';
       sizeLabel.textContent = editModel.sizeMB != null
         ? `Model size: ~${editModel.sizeMB} MB`
         : 'Model size: -';
@@ -80,6 +82,7 @@ class CustomModelUploadDialog extends HTMLElement {
       layoutInput.value = 'nchw';
       multipleInput.value = '1';
       maxTileInput.value = '';
+      precisionInput.value = 'fp32';
       sizeLabel.textContent = 'Model size: -';
     }
     errorLabel.textContent = '';
@@ -139,7 +142,7 @@ class CustomModelUploadDialog extends HTMLElement {
         analyzeBtn.disabled = true;
         analyzeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analyzing…';
         saveBtn.disabled = true;
-        detectLabel.textContent = 'Auto-detect: starting — running CPU inference probes (no GPU); this can take a while on large models.';
+        detectLabel.textContent = 'Auto-detect: starting — running inference probes (WebGPU when available, otherwise CPU/WASM); this can take a while on large models.';
         inspectCustomModelFile(file, {
           onProgress: (message) => {
             if (seq !== inspectSeq || settled) return;
@@ -158,6 +161,7 @@ class CustomModelUploadDialog extends HTMLElement {
           maxTileInput.value = Number.isFinite(result?.maxTileSize)
             ? String(result.maxTileSize)
             : '';
+          precisionInput.value = result?.precision === 'fp16' ? 'fp16' : 'fp32';
           const parts = [];
           if (result?.layout) parts.push(`layout ${result.layout.toUpperCase()}`);
           if (Number.isFinite(result?.multipleOf)) {
@@ -209,6 +213,7 @@ class CustomModelUploadDialog extends HTMLElement {
               layout: layoutInput.value,
               multipleOf: multipleInput.value,
               maxTileSize: maxTileInput.value,
+              precision: precisionInput.value,
             });
             if (!model) {
               errorLabel.textContent = 'Model not found; it may have been removed.';
@@ -242,6 +247,7 @@ class CustomModelUploadDialog extends HTMLElement {
             layout: layoutInput.value,
             multipleOf: multipleInput.value,
             maxTileSize: maxTileInput.value,
+            precision: precisionInput.value,
           });
           if (dialog.open) dialog.close();
           finish(model);
@@ -283,7 +289,7 @@ class CustomModelUploadDialog extends HTMLElement {
         .custom-model-upload-dialog .custom-model-row {
           display: grid;
           gap: 0.5rem;
-          grid-template-columns: minmax(0, 1fr) auto auto auto auto auto;
+          grid-template-columns: minmax(0, 1fr) auto auto auto auto auto auto;
           align-items: end;
         }
         .custom-model-upload-dialog .custom-model-scale { width: 8ch; }
@@ -291,6 +297,7 @@ class CustomModelUploadDialog extends HTMLElement {
         .custom-model-upload-dialog .custom-model-layout { width: 9ch; }
         .custom-model-upload-dialog .custom-model-multiple { width: 9ch; }
         .custom-model-upload-dialog .custom-model-maxtile { width: 9ch; }
+        .custom-model-upload-dialog .custom-model-precision { width: 9ch; }
         @media (max-width: 900px) {
           .custom-model-upload-dialog .custom-model-row {
             grid-template-columns: minmax(0, 1fr) auto auto;
@@ -356,7 +363,7 @@ class CustomModelUploadDialog extends HTMLElement {
               <i class="fas fa-flask"></i> Analyze model
             </button>
             <span class="custom-model-analyze-hint">
-              Runs CPU inference probes on the ONNX file to auto-fill scale, layout, multiple-of, and max-tile-size. Optional — you can also fill in the fields manually.
+              Runs inference probes on the ONNX file (WebGPU when available, otherwise CPU/WASM) to auto-fill scale, layout, multiple-of, max-tile-size, and precision. Optional — you can also fill in the fields manually.
             </span>
           </div>
           <div class="custom-model-row">
@@ -389,6 +396,13 @@ class CustomModelUploadDialog extends HTMLElement {
             <label title="Hard upper bound on input tile size accepted by the model. Leave blank if the model is fully dynamic.">
               Max tile
               <input class="custom-model-maxtile" type="number" min="1" max="4096" step="1" placeholder="auto">
+            </label>
+            <label title="Tensor element precision. fp16 models require WebGPU; CPU/WASM has very limited fp16 op coverage and will usually fail.">
+              Precision
+              <select class="custom-model-precision">
+                <option value="fp32">fp32</option>
+                <option value="fp16">fp16</option>
+              </select>
             </label>
           </div>
           <div class="custom-model-detected">Auto-detect: waiting for model file…</div>

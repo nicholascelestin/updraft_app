@@ -66,8 +66,29 @@ function writeControl(el, kind, saved) {
  * dimensions the runtime reported in the raw error. Pure: caller passes the
  * relevant model facts so this function stays DOM-free and unit-testable.
  */
-function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, maxTileSize = null } = {}) {
+function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, maxTileSize = null, precision = 'fp32', backend = null } = {}) {
   const raw = error?.message || String(error || 'Unknown error');
+
+  // fp16-on-CPU class of failures: ORT throws either an input-dtype mismatch
+  // (when the engine sends fp32 but the model declares fp16) or a kernel-
+  // not-found from the WASM EP for an op with no fp16 implementation. Both
+  // mean the same thing for the user when on CPU: the model needs WebGPU.
+  // When already on WebGPU, the dtype error means the engine's configured
+  // precision metadata was stale (typically a custom model uploaded before
+  // fp16 support existed) — the engine now self-corrects on next load, so
+  // simply running again should fix it.
+  const isFp16DtypeError =
+    /Unexpected input data type/i.test(raw) && /tensor\(float16\)/i.test(raw);
+  const isFp16KernelMissing =
+    precision === 'fp16' && backend !== 'webgpu' &&
+    (/kernel.*not.*found/i.test(raw) || /not.*supported/i.test(raw) || /no kernel/i.test(raw));
+  if (isFp16DtypeError && backend === 'webgpu') {
+    return `Model precision metadata was stale: this model declares fp16 inputs but the engine had it tagged as fp32. The engine has now corrected itself — try running again. (If the error persists, open the model from the Edit pencil and set Precision = fp16, or re-upload it.) Raw error: ${raw}`;
+  }
+  if (isFp16DtypeError || isFp16KernelMissing) {
+    return `This model uses fp16 (16-bit) precision, which the CPU/WASM backend does not fully support. Switch Backend to "GPU (WebGPU)" and run again. Raw error: ${raw}`;
+  }
+
   const isReshapeWindowError =
     /reshape_helper\.h/i.test(raw) ||
     /input_shape_size == size/i.test(raw) ||
@@ -159,6 +180,7 @@ class UpscalerApp extends HTMLElement {
       if (Number.isFinite(model.maxTileSize)) {
         attrs.push(`data-maxtilesize="${model.maxTileSize}"`);
       }
+      if (model.precision === 'fp16') attrs.push(`data-precision="fp16"`);
       if (model.url === selected) attrs.push('selected');
       const sizeStr = model.sizeMB != null ? ` (~${model.sizeMB}MB)` : '';
       return `<option ${attrs.join(' ')}>${escapeHtml(model.label)}${sizeStr}</option>`;
@@ -267,6 +289,9 @@ class UpscalerApp extends HTMLElement {
       if (typeof e.detail.upscaledOnly === 'boolean') {
         this.#viewState.upscaledOnly = e.detail.upscaledOnly;
       }
+      if (typeof e.detail.pixelZoomed === 'boolean') {
+        this.classList.toggle('canvas-fullscreen', e.detail.pixelZoomed);
+      }
       this.#persistViewState();
     });
   }
@@ -315,6 +340,7 @@ class UpscalerApp extends HTMLElement {
     const stopBtn       = this.#q('.stop-btn');
     const startOverBtn  = this.#q('.startover-btn');
     const clearCropBtn  = this.#q('.clear-crop-btn');
+    const backToCropBtn = this.#q('.back-to-crop-btn');
     const zoomToggleBtn = this.#q('.zoom-toggle-btn');
     const openInTabBtn  = this.#q('.open-in-tab-btn');
     const downloadBtn   = this.#q('.download-btn');
@@ -339,11 +365,13 @@ class UpscalerApp extends HTMLElement {
 
     const showCompareControls = () => {
       zoomToggleBtn.style.display = 'inline-block';
+      backToCropBtn.style.display = 'inline-block';
       toolbarRight.hidden = false;
       syncZoomToggleLabel();
     };
     const hideCompareControls = () => {
       zoomToggleBtn.style.display = 'none';
+      backToCropBtn.style.display = 'none';
       toolbarRight.hidden = true;
       zoomHint.hidden = true;
     };
@@ -382,14 +410,23 @@ class UpscalerApp extends HTMLElement {
     const showReady = () => {
       upscaleBtn.disabled = false;
       startOverBtn.style.display = 'inline-block';
-      clearCropBtn.style.display = 'none';
       hideCompareControls();
       toolbarLeft.hidden = false;
       compareSlider.hide();
       preview.hide();
       dropZone.hide();
+      // The cropper preserves an existing crop selection across re-show
+      // when given the same image reference, so this is the round-trip
+      // path used by the Edit Crop button after an upscale.
       cropper.show(this.#loadedImage);
-      statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height}${CROP_HINT}`;
+      const existingCrop = cropper.crop;
+      if (existingCrop) {
+        clearCropBtn.style.display = 'inline-block';
+        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${existingCrop.w}\u00d7${existingCrop.h}.`;
+      } else {
+        clearCropBtn.style.display = 'none';
+        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height}${CROP_HINT}`;
+      }
       statusBar.hideProgress();
     };
 
@@ -480,6 +517,12 @@ class UpscalerApp extends HTMLElement {
       this.#updateHangWarning();
     });
 
+    // The fp16-on-WASM warning is backend-dependent, so refresh whenever the
+    // user toggles the active backend.
+    this.#q('.backend-select')?.addEventListener('change', () => {
+      this.#updateHangWarning();
+    });
+
     // The pass selectors can also carry a max-tile cap (custom DAT models
     // etc.), so toggling a pass on/off or switching its model has to refresh
     // the tile-size dropdown's enabled set the same way the main model
@@ -565,10 +608,13 @@ class UpscalerApp extends HTMLElement {
           console.error(e);
           const opt = this.#q('.model-select')?.selectedOptions?.[0];
           const parsedMaxTile = parseInt(opt?.dataset?.maxtilesize, 10);
+          const activeBackend = opt?.dataset?.backend || this.#q('.backend-select')?.value;
           statusBar.message = 'Error: ' + formatUpscaleErrorMessage(e, {
             layout: opt?.dataset?.layout,
             multipleOf: parseInt(opt?.dataset?.multipleof, 10),
             maxTileSize: Number.isFinite(parsedMaxTile) ? parsedMaxTile : null,
+            precision: opt?.dataset?.precision === 'fp16' ? 'fp16' : 'fp32',
+            backend: activeBackend,
           });
         }
         statusBar.hideProgress();
@@ -592,6 +638,11 @@ class UpscalerApp extends HTMLElement {
     startOverBtn.addEventListener('click', () => {
       if (this.#running) this.#abortController?.abort();
       resetToStart();
+    });
+
+    backToCropBtn.addEventListener('click', () => {
+      if (this.#running || !this.#loadedImage) return;
+      showReady();
     });
 
     zoomToggleBtn.addEventListener('click', () => {
@@ -725,15 +776,39 @@ class UpscalerApp extends HTMLElement {
   }
 
   #updateHangWarning() {
+    const warnEl = this.#q('.hang-warn');
+    const tipEl = this.#q('.hang-warn-tip');
     const modelOpt = this.#q('.model-select').selectedOptions[0];
     if (this.#isBuiltInResampler(modelOpt)) {
-      this.#q('.hang-warn').classList.remove('visible');
+      warnEl.classList.remove('visible');
       return;
     }
     const sizeMB = parseFloat(modelOpt?.dataset.sizemb) || 0;
     const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
-    const show = sizeMB > 10 && tileSize > 128;
-    this.#q('.hang-warn').classList.toggle('visible', show);
+    const isLargeOnBigTile = sizeMB > 10 && tileSize > 128;
+
+    // fp16 inference effectively requires WebGPU — ORT-Web's WASM EP has very
+    // limited fp16 op coverage so most fp16 models throw a kernel-not-found
+    // or input-dtype error. Surface this before the user runs.
+    const backend = modelOpt?.dataset.backend || this.#q('.backend-select').value;
+    const isFp16OnCpu = modelOpt?.dataset.precision === 'fp16' && backend !== 'webgpu';
+
+    const show = isLargeOnBigTile || isFp16OnCpu;
+    warnEl.classList.toggle('visible', show);
+    if (!show) return;
+
+    const messages = [];
+    if (isFp16OnCpu) {
+      messages.push(
+        `<strong>fp16 model on CPU backend:</strong> this model uses 16-bit precision, which ONNX Runtime's WASM backend has very limited support for. Inference will almost certainly fail with an "unexpected input data type" or "kernel not found" error. Switch <em>Backend</em> to <em>GPU (WebGPU)</em>.`,
+      );
+    }
+    if (isLargeOnBigTile) {
+      messages.push(
+        `<strong>Large model with big tiles:</strong> models &gt;10 MB combined with tile sizes above 128 can block the browser's main thread for extended periods, causing the UI to freeze. You may not be able to click Stop until the current tile finishes. Consider reducing the tile size or using a smaller model.`,
+      );
+    }
+    tipEl.innerHTML = messages.join('<br><br>');
   }
 
   // --- Config extraction ---
@@ -745,11 +820,12 @@ class UpscalerApp extends HTMLElement {
     const modelValueRange = parseInt(opt.dataset.range, 10) || 1;
     const modelLayout = opt.dataset.layout || 'nchw';
     const modelInputMultiple = parseInt(opt.dataset.multipleof, 10) || 1;
+    const modelPrecision = opt.dataset.precision === 'fp16' ? 'fp16' : 'fp32';
     const backend = opt.dataset.backend || this.#q('.backend-select').value;
     let tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const profile = this.#q('perf-monitor').visible;
 
-    const config = { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, backend, tileSize, profile };
+    const config = { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, backend, tileSize, profile };
 
     // Track every option that contributes to the run, so the tile-size cap
     // below covers the strictest model among the main + enabled passes —
@@ -772,6 +848,7 @@ class UpscalerApp extends HTMLElement {
         modelValueRange: parseInt(copt?.dataset.range, 10) || 1,
         modelLayout: copt?.dataset.layout || 'nchw',
         modelInputMultiple: parseInt(copt?.dataset.multipleof, 10) || 1,
+        modelPrecision: copt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
         backend: copt?.dataset.backend || backend,
       };
     } else {
@@ -784,6 +861,7 @@ class UpscalerApp extends HTMLElement {
           modelValueRange: parseInt(aopt?.dataset.range, 10) || 1,
           modelLayout: aopt?.dataset.layout || 'nchw',
           modelInputMultiple: parseInt(aopt?.dataset.multipleof, 10) || 1,
+          modelPrecision: aopt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
           backend: aopt?.dataset.backend || backend,
           blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
         };
@@ -798,6 +876,7 @@ class UpscalerApp extends HTMLElement {
           modelValueRange: parseInt(fopt?.dataset.range, 10) || 1,
           modelLayout: fopt?.dataset.layout || 'nchw',
           modelInputMultiple: parseInt(fopt?.dataset.multipleof, 10) || 1,
+          modelPrecision: fopt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
           backend: fopt?.dataset.backend || backend,
           paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
           featherPx: 16,
@@ -1197,6 +1276,18 @@ class UpscalerApp extends HTMLElement {
           z-index: 10;
           pointer-events: none;
         }
+        /* When the compare-slider is in pixel-zoom (fullscreen) mode it covers
+           the page at z-index 1000, hiding the toolbars. Promote the rail to
+           a fixed-position overlay above it so the canvas controls (Stop,
+           Start Over, Use Slider, Open in Tab, Download, etc.) stay reachable
+           without leaving fullscreen. */
+        upscaler-app.canvas-fullscreen .canvas-toolbar-rail {
+          position: fixed;
+          top: 0.75rem;
+          left: 0;
+          right: 0;
+          z-index: 1001;
+        }
         upscaler-app .canvas-toolbar {
           position: absolute;
           top: 0;
@@ -1466,6 +1557,9 @@ class UpscalerApp extends HTMLElement {
         <div class="canvas-toolbar-rail" aria-hidden="true">
           <div class="canvas-toolbar-stack-left">
             <div class="canvas-toolbar canvas-toolbar-left" hidden>
+              <button class="back-to-crop-btn secondary outline" style="display:none" type="button" title="Back to crop / change selection">
+                <i class="fas fa-arrow-left"></i><i class="fas fa-crop-simple"></i> <span class="btn-label">Edit Crop</span>
+              </button>
               <button class="upscale-btn" disabled title="Upscale image">
                 <i class="fas fa-wand-magic-sparkles"></i> <span class="btn-label">Upscale 4x</span>
               </button>

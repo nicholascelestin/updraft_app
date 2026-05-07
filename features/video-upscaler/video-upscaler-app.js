@@ -131,6 +131,9 @@ class VideoUpscalerApp extends HTMLElement {
       const modelUrl = selectedModel.value;
       const scale = parseInt(selectedModel.dataset.scale, 10);
       const modelValueRange = parseInt(selectedModel.dataset.range, 10) || 1;
+      const modelLayout = selectedModel.dataset.layout || 'nchw';
+      const modelInputMultiple = parseInt(selectedModel.dataset.multipleof, 10) || 1;
+      const modelPrecision = selectedModel.dataset.precision === 'fp16' ? 'fp16' : 'fp32';
       const tileSize = parseInt(tileSizeEl.value, 10);
       const backend = selectedModel.dataset.backend || backendEl.value;
       const fps = parseInt(fpsEl.value, 10);
@@ -140,7 +143,7 @@ class VideoUpscalerApp extends HTMLElement {
 
       const engine = new VideoUpscalerEngine({
         pipeline: this.#pipeline,
-        config: { modelUrl, scale, modelValueRange, tileSize, backend },
+        config: { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, tileSize, backend },
         fps,
         outputScale,
         maxFrames,

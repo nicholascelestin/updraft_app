@@ -56,8 +56,12 @@ class ImageCropper extends HTMLElement {
   }
 
   show(image) {
+    // Preserve the existing crop selection when re-shown with the same image
+    // reference (e.g. when the upscaler navigates back to crop mode from the
+    // compare view). A genuinely new image still resets the crop.
+    const sameImage = image === this.#image;
     this.#image = image;
-    this.#crop = null;
+    if (!sameImage) this.#crop = null;
     this.style.setProperty('--ar', `${image.width} / ${image.height}`);
     this.style.setProperty('--natural-w', `${image.width}px`);
     this.#render();
