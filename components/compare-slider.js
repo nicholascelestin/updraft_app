@@ -1,120 +1,97 @@
 /**
  * <compare-slider> — before/after image comparison slider.
+ *
+ * The slider is always on. Left-click / drag positions the divider. Right-click
+ * snaps the divider to whichever extreme it isn't currently nearer to (left
+ * or right edge), so a single right-click flips between the before-only and
+ * after-only views.
  */
 
 import { morph } from 'lib/morph';
-
-const PROBE_PREFS_KEY = 'upscaler_compare_probe_prefs_v1';
 
 class CompareSlider extends HTMLElement {
   #dragging = false;
   #beforeSrc = '';
   #afterSrc = '';
-  #upscaledOnly = false;
-  #pixelZoomed = false;
   #positionFrac = 0.5;
   #downloadSrc = '';
   #downloadName = '';
   #beforeCanvas = null;
   #afterCanvas = null;
   #lazyBlobURL = '';
-  #probeRadius = 57;
-  #probeRadiusMin = 16;
-  #probeRadiusMax = 140;
-  #probeRadiusStep = 4;
-  #probeZoomLevel = 1;
-  #probeZoomLevelMin = 0;
-  #probeZoomLevelMax = 1;
-  #probeZoomStep = 0.08;
-  #probeCompareHeld = false;
-  #lastProbePoint = null;
 
   #onWindowMouseMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
   #onWindowTouchMove = (e) => { if (this.#dragging) this.#setPosition(this.#getFrac(e)); };
   #onWindowMouseUp = () => {
     this.#dragging = false;
     this.classList.remove('dragging');
-    if (this.#probeCompareHeld) {
-      this.#probeCompareHeld = false;
-      this.#refreshPixelProbe();
-    }
   };
   #onWindowTouchEnd = () => {
     this.#dragging = false;
     this.classList.remove('dragging');
   };
-  #onKeyDown = (e) => {
-    // Esc is the only universal exit from fullscreen pixel-zoom — click-to-
-    // exit only works in upscaled-only mode (where clicks aren't slider drags).
-    if (e.key !== 'Escape') return;
-    if (!this.#pixelZoomed) return;
-    e.preventDefault();
-    this.#togglePixelZoom();
+
+  #knobScheduled = false;
+  #knobFullWidth = 0;
+  #resizeObserver = null;
+  #scheduleKnobUpdate = () => {
+    if (this.#knobScheduled) return;
+    this.#knobScheduled = true;
+    requestAnimationFrame(() => {
+      this.#knobScheduled = false;
+      this.#updateKnobPosition();
+    });
   };
-  #onWheel = (e) => {
-    if (!(this.#upscaledOnly && !this.#pixelZoomed)) return;
-    if (e.ctrlKey) {
-      e.preventDefault();
-      const nextZoom = this.#probeZoomLevel + (e.deltaY < 0 ? this.#probeZoomStep : -this.#probeZoomStep);
-      this.#setProbeZoomLevel(nextZoom);
-      this.#updatePixelProbe(e);
-      return;
-    }
-    if (e.shiftKey) {
-      e.preventDefault();
-      const nextRadius = this.#probeRadius + (e.deltaY < 0 ? this.#probeRadiusStep : -this.#probeRadiusStep);
-      this.#setProbeRadius(nextRadius);
-      this.#updatePixelProbe(e);
-      return;
-    }
-    requestAnimationFrame(() => this.#refreshPixelProbe());
+  #onResize = () => {
+    // Knob's measured full width may change with font-metric / DPR shifts.
+    this.#knobFullWidth = 0;
+    this.#scheduleKnobUpdate();
   };
 
   connectedCallback() {
-    this.#loadProbePrefs();
     this.classList.add('compare');
+    // Belt-and-suspenders: also set display:none inline so the slider is
+    // definitely hidden before show() has been called. The class CSS rule
+    // does this too, but it lives inside our own <style> block — there's a
+    // brief window between when the host is added to the DOM (with the
+    // class but no inner content) and when #render() lands the style tag,
+    // during which the absolutely-positioned handle would render.
+    this.style.display = 'none';
     this.#render();
 
     this.addEventListener('mousedown', e => {
-      if (this.#upscaledOnly) return;
+      if (e.button !== 0) return; // left-button only — right-click handled below
       e.preventDefault(); this.#dragging = true; this.classList.add('dragging');
       this.#setPosition(this.#getFrac(e));
     });
     this.addEventListener('touchstart', e => {
-      if (this.#upscaledOnly) return;
       this.#dragging = true; this.classList.add('dragging');
       this.#setPosition(this.#getFrac(e));
     }, { passive: true });
+
+    this.addEventListener('contextmenu', (e) => {
+      // Right-click flips the divider to whichever extreme it's currently
+      // farther from — single click toggles between full-before and full-after.
+      e.preventDefault();
+      this.#setPosition(this.#positionFrac < 0.5 ? 1 : 0);
+    });
 
     window.addEventListener('mousemove', this.#onWindowMouseMove);
     window.addEventListener('touchmove', this.#onWindowTouchMove, { passive: true });
     window.addEventListener('mouseup', this.#onWindowMouseUp);
     window.addEventListener('touchend', this.#onWindowTouchEnd);
-    window.addEventListener('keydown', this.#onKeyDown);
-
-    this.addEventListener('click', e => {
-      if (this.#upscaledOnly) {
-        this.#togglePixelZoomAtPoint(e.clientX, e.clientY);
-      }
-    });
-    this.addEventListener('mousemove', (e) => {
-      this.#updatePixelProbe(e);
-    });
-    this.addEventListener('mousedown', (e) => {
-      if (!(this.#upscaledOnly && !this.#pixelZoomed)) return;
-      if (e.button !== 2) return;
-      e.preventDefault();
-      this.#probeCompareHeld = true;
-      this.#updatePixelProbe(e);
-    });
-    this.addEventListener('contextmenu', (e) => {
-      if (!(this.#upscaledOnly && !this.#pixelZoomed)) return;
-      e.preventDefault();
-    });
-    this.addEventListener('mouseleave', () => {
-      this.#hidePixelProbe();
-    });
-    this.addEventListener('wheel', this.#onWheel, { passive: false });
+    // Keep the (fixed-position) knob aligned as the user scrolls / resizes.
+    window.addEventListener('scroll', this.#scheduleKnobUpdate, { passive: true });
+    window.addEventListener('resize', this.#onResize);
+    // native-size mode scrolls inside the slider itself, not the page.
+    this.addEventListener('scroll', this.#scheduleKnobUpdate, { passive: true });
+    // Catch view-mode swaps (e.g. .expanded ↔ .native-size) where the host
+    // class flips but no scroll/resize fires — without this the knob keeps
+    // its previous logical position until the next drag.
+    if (typeof ResizeObserver !== 'undefined') {
+      this.#resizeObserver = new ResizeObserver(this.#scheduleKnobUpdate);
+      this.#resizeObserver.observe(this);
+    }
   }
 
   disconnectedCallback() {
@@ -122,13 +99,15 @@ class CompareSlider extends HTMLElement {
     window.removeEventListener('touchmove', this.#onWindowTouchMove);
     window.removeEventListener('mouseup', this.#onWindowMouseUp);
     window.removeEventListener('touchend', this.#onWindowTouchEnd);
-    window.removeEventListener('keydown', this.#onKeyDown);
-    this.removeEventListener('wheel', this.#onWheel);
+    window.removeEventListener('scroll', this.#scheduleKnobUpdate);
+    window.removeEventListener('resize', this.#onResize);
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = null;
   }
 
   /**
-   * @param {string} beforeSrc
-   * @param {string} afterSrc
+   * @param {string|HTMLCanvasElement} beforeSrc
+   * @param {string|HTMLCanvasElement} afterSrc
    * @param {{ downloadSrc?: string, downloadName?: string }} [opts]
    */
   async show(beforeSrc, afterSrc, opts = {}) {
@@ -147,7 +126,6 @@ class CompareSlider extends HTMLElement {
       this.#downloadSrc = opts.downloadSrc || afterSrc;
     }
     this.#downloadName = opts.downloadName || 'download.png';
-    this.#pixelZoomed = false;
     this.#render();
 
     if (!canvasMode) {
@@ -166,54 +144,35 @@ class CompareSlider extends HTMLElement {
       : (afterEl?.naturalHeight || 0);
     if (natW && natH) {
       this.style.setProperty('--ar', `${natW} / ${natH}`);
+      // --ar-num is a plain number (w/h) used by calc() to derive the host
+      // width in fit-height mode. Block elements with width:auto +
+      // aspect-ratio don't reliably derive width from the aspect — the
+      // "stretch to containing block" default often wins. Computing the
+      // width explicitly via calc avoids that ambiguity.
+      this.style.setProperty('--ar-num', `${natW / natH}`);
       this.style.setProperty('--natural-w', `${natW}px`);
     }
 
     this.style.display = 'block';
     this.#setPosition(this.#positionFrac);
-    this.#syncModeClass();
+    this.#updateKnobPosition();
     if (canvasMode) this.#prepareLazyDownload();
   }
 
   hide() {
-    const wasPixelZoomed = this.#pixelZoomed;
     this.style.display = 'none';
+    const knob = this.querySelector('.handle-knob');
+    if (knob) knob.style.visibility = 'hidden';
     this.style.removeProperty('--ar');
+    this.style.removeProperty('--ar-num');
     this.style.removeProperty('--natural-w');
-    this.#hidePixelProbe();
     this.#beforeCanvas = null;
     this.#afterCanvas = null;
-    this.#pixelZoomed = false;
-    this.#probeCompareHeld = false;
-    this.#lastProbePoint = null;
     if (this.#lazyBlobURL) {
       URL.revokeObjectURL(this.#lazyBlobURL);
       this.#lazyBlobURL = '';
       this.#downloadSrc = '';
     }
-    // Notify listeners that pixel-zoom (fullscreen) has been torn down so
-    // host-level UI synced to that state (e.g. fullscreen toolbar overlay)
-    // doesn't get stranded after a reset / new image / re-run.
-    if (wasPixelZoomed) this.#emitViewState();
-  }
-
-  setUpscaledOnly(upscaledOnly) {
-    this.#upscaledOnly = !!upscaledOnly;
-    // Intentionally do NOT clear #pixelZoomed: the fullscreen overlay now
-    // hosts both the upscaled-only zoom view and the slider view, so the
-    // toolbar's Use Zoom / Use Slider toggle should switch between them
-    // without dropping the user out of fullscreen.
-    this.#probeCompareHeld = false;
-    this.#lastProbePoint = null;
-    this.#hidePixelProbe();
-    this.#render();
-    this.#setPosition(this.#positionFrac);
-    this.#syncModeClass();
-  }
-
-  toggleUpscaledView() {
-    this.setUpscaledOnly(!this.#upscaledOnly);
-    this.#emitViewState();
   }
 
   async openInTab() {
@@ -230,60 +189,13 @@ class CompareSlider extends HTMLElement {
     a.click();
   }
 
-  #togglePixelZoom() {
-    // Entry into pixel-zoom is gated to upscaled-only (it's reached via
-    // click-on-canvas in zoom-inspect mode), but exit must work from any
-    // mode — once in fullscreen the user might have toggled to the slider
-    // view and pressed Esc.
-    if (!this.#pixelZoomed && !this.#upscaledOnly) return;
-    this.#pixelZoomed = !this.#pixelZoomed;
-    this.#probeCompareHeld = false;
-    if (!this.#pixelZoomed) {
-      this.scrollLeft = 0;
-      this.scrollTop = 0;
-    }
-    this.#hidePixelProbe();
-    this.#syncModeClass();
-    this.#emitViewState();
-  }
-
-  #togglePixelZoomAtPoint(clientX, clientY) {
-    if (!this.#upscaledOnly || this.#pixelZoomed) {
-      this.#togglePixelZoom();
-      return;
-    }
-    const afterEl = this.querySelector('.compare-after');
-    if (!afterEl) {
-      this.#togglePixelZoom();
-      return;
-    }
-    const rect = afterEl.getBoundingClientRect();
-    if (!rect.width || !rect.height) {
-      this.#togglePixelZoom();
-      return;
-    }
-    const fracX = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const fracY = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-    this.#togglePixelZoom();
-    requestAnimationFrame(() => {
-      const zoomedAfter = this.querySelector('.compare-after');
-      if (!zoomedAfter || !this.#pixelZoomed) return;
-      const targetX = fracX * zoomedAfter.clientWidth;
-      const targetY = fracY * zoomedAfter.clientHeight;
-      const maxScrollLeft = Math.max(0, this.scrollWidth - this.clientWidth);
-      const maxScrollTop = Math.max(0, this.scrollHeight - this.clientHeight);
-      this.scrollLeft = Math.max(0, Math.min(maxScrollLeft, targetX - this.clientWidth / 2));
-      this.scrollTop = Math.max(0, Math.min(maxScrollTop, targetY - this.clientHeight / 2));
-    });
-  }
-
   #getFrac(e) {
     // Use the stage rect (the natural-size box that wraps the after canvas
     // and the before-wrap clip) instead of the host. In normal modes the
-    // stage fills the host so this is equivalent, but in pixel-zoom mode
-    // the host is the viewport-sized scrollable container while the stage
-    // is at the canvas's natural pixel size — only the stage rect tracks
-    // the actual image coordinates the slider divides.
+    // stage fills the host so this is equivalent, but in native-size mode
+    // the host is a scrollable container while the stage is at the canvas's
+    // natural pixel size — only the stage rect tracks the actual image
+    // coordinates the slider divides.
     const stage = this.querySelector('.compare-stage');
     const rect = (stage || this).getBoundingClientRect();
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -298,25 +210,75 @@ class CompareSlider extends HTMLElement {
     const handle = this.querySelector('.compare-handle');
     if (wrap) wrap.style.width = pct;
     if (handle) handle.style.left = pct;
+    this.#updateKnobPosition();
   }
 
-  #syncModeClass() {
-    this.classList.toggle('upscaled-only', this.#upscaledOnly);
-    // .pixel-zoom drives the fullscreen-overlay layout independently of
-    // .upscaled-only — the slider works inside fullscreen too, so this
-    // class is set whenever pixel-zoom is active regardless of which
-    // sub-mode (zoom-inspect or slider) is currently visible.
-    this.classList.toggle('pixel-zoom', this.#pixelZoomed);
-    if (!(this.#upscaledOnly && !this.#pixelZoomed)) this.#hidePixelProbe();
-  }
+  /**
+   * Position the (fixed) knob inside the visible portion of the slider's
+   * stage — i.e. the image area, which is the "workspace" the divider
+   * actually lives in. The knob follows the user vertically (target =
+   * viewport center) but is clamped to the stage's visible rect on both
+   * axes. When clamped to a horizontal edge, only the icon for the side
+   * currently in view is shown, matching the "icon-clipped-by-canvas"
+   * behavior the slider had at extreme drag positions when the image fit
+   * the workspace.
+   */
+  #updateKnobPosition() {
+    const knob = this.querySelector('.handle-knob');
+    if (!knob) return;
+    if (getComputedStyle(this).display === 'none') {
+      knob.style.visibility = 'hidden';
+      return;
+    }
+    const stage = this.querySelector('.compare-stage');
+    if (!stage) return;
+    const stageRect = stage.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    // Visible stage = intersection of stage bounds and viewport.
+    const visLeft = Math.max(stageRect.left, 0);
+    const visRight = Math.min(stageRect.right, vw);
+    const visTop = Math.max(stageRect.top, 0);
+    const visBottom = Math.min(stageRect.bottom, vh);
+    if (visRight <= visLeft || visBottom <= visTop ||
+        stageRect.width === 0 || stageRect.height === 0) {
+      knob.style.visibility = 'hidden';
+      return;
+    }
+    knob.style.visibility = '';
 
-  #emitViewState() {
-    this.dispatchEvent(new CustomEvent('view-state-change', {
-      detail: {
-        upscaledOnly: this.#upscaledOnly,
-        pixelZoomed: this.#pixelZoomed,
-      },
-    }));
+    // Cache the knob's full (unclipped) width. The clip classes hide one
+    // half of the knob, which would otherwise shrink offsetWidth and cause
+    // the would-clip threshold to oscillate as the user drags near an edge.
+    if (this.#knobFullWidth === 0) {
+      const hadClipLeft = knob.classList.contains('clip-at-left');
+      const hadClipRight = knob.classList.contains('clip-at-right');
+      if (hadClipLeft) knob.classList.remove('clip-at-left');
+      if (hadClipRight) knob.classList.remove('clip-at-right');
+      this.#knobFullWidth = knob.offsetWidth;
+      if (hadClipLeft) knob.classList.add('clip-at-left');
+      if (hadClipRight) knob.classList.add('clip-at-right');
+    }
+    const halfKnob = this.#knobFullWidth / 2;
+
+    const logicalX = stageRect.left + this.#positionFrac * stageRect.width;
+    // The knob clips when its bounding box (not just its centerline) would
+    // extend past the visible stage. Before the knob was position:fixed it
+    // got this for free from the slider's overflow:hidden; now we have to
+    // detect it ourselves.
+    const wouldClipLeft = logicalX - halfKnob < visLeft;
+    const wouldClipRight = logicalX + halfKnob > visRight && !wouldClipLeft;
+    knob.classList.toggle('clip-at-left', wouldClipLeft);
+    knob.classList.toggle('clip-at-right', wouldClipRight);
+
+    let leftPx;
+    if (wouldClipLeft) leftPx = visLeft;
+    else if (wouldClipRight) leftPx = visRight;
+    else leftPx = logicalX;
+    const targetY = vh / 2;
+    const clampedY = Math.max(visTop, Math.min(visBottom, targetY));
+    knob.style.left = leftPx + 'px';
+    knob.style.top = clampedY + 'px';
   }
 
   #drawCanvasSources() {
@@ -348,171 +310,6 @@ class CompareSlider extends HTMLElement {
     this.#downloadSrc = this.#lazyBlobURL;
   }
 
-  #hidePixelProbe() {
-    const probe = this.querySelector('.compare-pixel-probe');
-    if (probe) {
-      probe.classList.remove('visible');
-      probe.classList.remove('no-content');
-    }
-  }
-
-  #setProbeRadius(nextRadius) {
-    const clamped = Math.max(this.#probeRadiusMin, Math.min(this.#probeRadiusMax, Math.round(nextRadius)));
-    const changed = this.#probeRadius !== clamped;
-    this.#probeRadius = clamped;
-    const diameter = this.#probeRadius * 2 + 1;
-    const probe = this.querySelector('.compare-pixel-probe');
-    const probeCanvas = this.querySelector('.compare-pixel-probe-canvas');
-    if (probe) {
-      probe.style.width = `${diameter}px`;
-      probe.style.height = `${diameter}px`;
-    }
-    if (probeCanvas) {
-      probeCanvas.style.width = `${diameter}px`;
-      probeCanvas.style.height = `${diameter}px`;
-    }
-    if (changed) this.#persistProbePrefs();
-    this.#refreshPixelProbe();
-  }
-
-  #setProbeZoomLevel(nextLevel) {
-    const clamped = Math.max(this.#probeZoomLevelMin, Math.min(this.#probeZoomLevelMax, nextLevel));
-    const changed = this.#probeZoomLevel !== clamped;
-    this.#probeZoomLevel = clamped;
-    if (changed) this.#persistProbePrefs();
-    this.#refreshPixelProbe();
-  }
-
-  #loadProbePrefs() {
-    try {
-      const raw = localStorage.getItem(PROBE_PREFS_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== 'object') return;
-      if (Number.isFinite(parsed.radius)) {
-        this.#probeRadius = Math.max(this.#probeRadiusMin, Math.min(this.#probeRadiusMax, Math.round(parsed.radius)));
-      }
-      if (Number.isFinite(parsed.zoomLevel)) {
-        this.#probeZoomLevel = Math.max(this.#probeZoomLevelMin, Math.min(this.#probeZoomLevelMax, parsed.zoomLevel));
-      }
-    } catch {
-      // Ignore malformed or unavailable localStorage.
-    }
-  }
-
-  #persistProbePrefs() {
-    try {
-      localStorage.setItem(PROBE_PREFS_KEY, JSON.stringify({
-        radius: this.#probeRadius,
-        zoomLevel: Number(this.#probeZoomLevel.toFixed(3)),
-      }));
-    } catch {
-      // Ignore storage write failures.
-    }
-  }
-
-  #refreshPixelProbe() {
-    if (!this.#lastProbePoint) return;
-    this.#updatePixelProbe({
-      clientX: this.#lastProbePoint.clientX,
-      clientY: this.#lastProbePoint.clientY,
-      target: this,
-    });
-  }
-
-  #updatePixelProbe(e) {
-    if (!(this.#upscaledOnly && !this.#pixelZoomed)) {
-      this.#hidePixelProbe();
-      return;
-    }
-    const afterEl = this.querySelector('.compare-after');
-    const beforeEl = this.querySelector('.compare-before-wrap img, .compare-before-wrap canvas');
-    const probe = this.querySelector('.compare-pixel-probe');
-    const probeCanvas = this.querySelector('.compare-pixel-probe-canvas');
-    if (!afterEl || !probe || !probeCanvas) return;
-
-    const rect = afterEl.getBoundingClientRect();
-    const relX = e.clientX - rect.left;
-    const relY = e.clientY - rect.top;
-    if (relX < 0 || relY < 0 || relX > rect.width || relY > rect.height) {
-      this.#hidePixelProbe();
-      return;
-    }
-    this.#lastProbePoint = { clientX: e.clientX, clientY: e.clientY };
-
-    const sourceEl = (this.#probeCompareHeld && beforeEl) ? beforeEl : afterEl;
-    const natW = sourceEl.naturalWidth || sourceEl.width || 0;
-    const natH = sourceEl.naturalHeight || sourceEl.height || 0;
-    if (!natW || !natH || !rect.width || !rect.height) return;
-
-    // Keep srcX/srcY in floating point so the bubble contents track the cursor
-    // smoothly instead of stepping in integer source-pixel jumps.
-    const srcX = (relX / rect.width) * natW;
-    const srcY = (relY / rect.height) * natH;
-
-    const diameter = this.#probeRadius * 2 + 1;
-    const ctx = probeCanvas.getContext('2d');
-    if (probeCanvas.width !== diameter || probeCanvas.height !== diameter) {
-      probeCanvas.width = diameter;
-      probeCanvas.height = diameter;
-    }
-    const noZoom = this.#probeZoomLevel <= this.#probeZoomLevelMin + 0.0001;
-    const hideBubbleContent = noZoom && !this.#probeCompareHeld;
-    probe.classList.toggle('no-content', hideBubbleContent);
-    ctx.clearRect(0, 0, diameter, diameter);
-    if (!hideBubbleContent) {
-      ctx.imageSmoothingEnabled = false;
-      const baseScaleX = rect.width ? (natW / rect.width) : 1;
-      const baseScaleY = rect.height ? (natH / rect.height) : 1;
-      const mixX = 1 + (1 - this.#probeZoomLevel) * (Math.max(1, baseScaleX) - 1);
-      const mixY = 1 + (1 - this.#probeZoomLevel) * (Math.max(1, baseScaleY) - 1);
-      const fSampleW = Math.max(1, diameter * mixX);
-      const fSampleH = Math.max(1, diameter * mixY);
-
-      // Float sample rect centered on the cursor, clamped to source bounds.
-      const fSx = Math.max(0, Math.min(natW - fSampleW, srcX - fSampleW / 2));
-      const fSy = Math.max(0, Math.min(natH - fSampleH, srcY - fSampleH / 2));
-
-      // Magnification (display px per source px) — kept stable across frames
-      // since fSampleW/H only change when radius/zoom change.
-      const magX = diameter / fSampleW;
-      const magY = diameter / fSampleH;
-
-      // Snap the source sample rect outward to the integer pixel grid so
-      // drawImage's nearest-neighbor sampling gets a stable source. Then
-      // shift the destination by the rounding remainder * magnification so
-      // the visible content slides smoothly with sub-pixel cursor motion.
-      const sxInt = Math.floor(fSx);
-      const syInt = Math.floor(fSy);
-      const swInt = Math.min(natW - sxInt, Math.ceil(fSx + fSampleW) - sxInt);
-      const shInt = Math.min(natH - syInt, Math.ceil(fSy + fSampleH) - syInt);
-      const dx = -(fSx - sxInt) * magX;
-      const dy = -(fSy - syInt) * magY;
-      const dw = swInt * magX;
-      const dh = shInt * magY;
-
-      if (swInt > 0 && shInt > 0 && dw > 0 && dh > 0) {
-        ctx.drawImage(sourceEl, sxInt, syInt, swInt, shInt, dx, dy, dw, dh);
-      }
-    }
-
-    const bubbleSize = diameter + 2;
-    const half = bubbleSize / 2;
-    const intendedLeft = e.clientX - half;
-    const intendedTop = e.clientY - half;
-    const hostRect = this.getBoundingClientRect();
-    const minLeft = hostRect.left;
-    const minTop = hostRect.top;
-    const maxLeft = hostRect.right - bubbleSize;
-    const maxTop = hostRect.bottom - bubbleSize;
-    let left = intendedLeft;
-    let top = intendedTop;
-    left = Math.max(minLeft, Math.min(maxLeft, left));
-    top = Math.max(minTop, Math.min(maxTop, top));
-    probe.style.transform = `translate3d(${left}px, ${top}px, 0)`;
-    probe.classList.add('visible');
-  }
-
   #render() {
     const cm = !!this.#afterCanvas;
     const afterTag = cm
@@ -529,25 +326,25 @@ class CompareSlider extends HTMLElement {
           border-radius: var(--pico-border-radius, 4px);
           cursor: col-resize; user-select: none; max-width: 100%;
         }
-        .compare:not(.expanded) {
-          width: auto;
-          max-width: min(100%, var(--natural-w, 100%));
-          max-height: calc(100vh - 2rem);
+        .compare:not(.expanded):not(.native-size) {
+          width: 100%;
+          max-width: 100%;
           aspect-ratio: var(--ar, auto);
           margin-inline: auto;
         }
         .compare.expanded {
-          width: auto;
-          max-width: min(100%, var(--natural-w, 100%));
+          height: calc(100vh - 1rem);
+          width: calc((100vh - 1rem) * var(--ar-num, 1));
+          max-width: none;
           margin-inline: auto;
         }
         .compare img, .compare canvas { display: block; width: 100%; height: auto; pointer-events: none; }
         /* compare-stage is the natural-size containing block for the after
            canvas, the before-wrap clip and the slider handle. In normal modes
-           it just fills the host (width: 100%); in pixel-zoom (fullscreen) it
-           shrinks to the canvas's native dimensions so before-wrap's
-           percentage width / handle's percentage left line up with the same
-           native pixels the after canvas is showing. */
+           it just fills the host (width: 100%); in native-size it shrinks to
+           the canvas's natural dimensions so before-wrap's percentage width
+           / handle's percentage left line up with the same native pixels the
+           after canvas is showing. */
         .compare .compare-stage {
           position: relative;
           display: block;
@@ -565,15 +362,20 @@ class CompareSlider extends HTMLElement {
         .compare .compare-before-wrap canvas { width: auto; height: 100%; max-width: none; }
         .compare .compare-handle {
           position: absolute; top: 0; bottom: 0; width: 2px; background: #fff;
-          left: 50%; transform: translateX(-1px); z-index: 2; pointer-events: none;
+          left: 50%; margin-left: -1px; z-index: 2; pointer-events: none;
           opacity: 0.35;
           transition: opacity 0.2s ease;
         }
         .compare.dragging .compare-handle {
           opacity: 1;
         }
+        /* The knob is positioned in viewport coordinates (position: fixed)
+           and re-placed on scroll/resize/drag by #updateKnobPosition. JS
+           sets its top/left; transform anchors the box around that point
+           (centered by default, left-anchored when clamped to the viewport's
+           left edge, right-anchored when clamped to the right edge). */
         .compare .compare-handle .handle-knob {
-          position: absolute; top: 50%; left: 50%;
+          position: fixed; top: 50%; left: 50%;
           transform: translate(-50%, -50%);
           display: inline-flex; align-items: center; gap: 8px;
           padding: 4px 8px;
@@ -583,6 +385,23 @@ class CompareSlider extends HTMLElement {
           box-shadow: 0 0 6px rgba(0,0,0,0.5);
           color: #333;
           white-space: nowrap;
+          z-index: 3;
+          pointer-events: none;
+        }
+        .compare .compare-handle .handle-knob.clip-at-left {
+          transform: translate(0, -50%);
+        }
+        .compare .compare-handle .handle-knob.clip-at-right {
+          transform: translate(-100%, -50%);
+        }
+        /* When clamped to a viewport edge, drop the icon for the side the
+           user *isn't* looking at so the knob unambiguously labels what's
+           currently in view. */
+        .compare .compare-handle .handle-knob.clip-at-left .handle-side-before {
+          display: none;
+        }
+        .compare .compare-handle .handle-knob.clip-at-right .handle-side-after {
+          display: none;
         }
         .compare .compare-handle .handle-side {
           display: inline-flex; align-items: center; gap: 3px;
@@ -593,73 +412,31 @@ class CompareSlider extends HTMLElement {
         .compare .compare-handle .handle-arrow {
           font-size: 9px; line-height: 1;
         }
-        .compare.upscaled-only { cursor: crosshair; }
-        /* pixel-zoom is the fullscreen-overlay layout. It used to be tied to
-           upscaled-only (zoom-only inspection), but the slider works inside
-           it too — so the host sizing / scroll behavior lives on .pixel-zoom
-           alone, and the per-mode tweaks (cursor, hidden slider parts) layer
-           on top via .upscaled-only.pixel-zoom or :not(.upscaled-only). */
-        .compare.pixel-zoom {
-          position: fixed;
-          inset: 0;
-          z-index: 1000;
-          overflow: auto;
-          max-width: none;
-          max-height: none;
-          width: 100vw;
-          height: 100vh;
-          border-radius: 0;
-          background: #000;
-          display: flex;
+        /* native-size renders content at native pixel dimensions inline.
+           The host stays in normal flow but scrolls internally when content
+           exceeds its bounds. Flex + margin:auto centers the stage when the
+           image is smaller than the host and keeps it scrollable when
+           larger. */
+        .compare.native-size {
+          width: 100%;
+          max-width: 100%;
+          height: calc(100vh - 1rem);
+          max-height: calc(100vh - 1rem);
           aspect-ratio: auto;
+          overflow: auto;
+          cursor: default;
+          display: flex;
         }
-        .compare.pixel-zoom .compare-stage {
+        .compare.native-size .compare-stage {
           margin: auto;
           width: max-content;
           height: max-content;
           flex: 0 0 auto;
         }
-        .compare.pixel-zoom .compare-after {
+        .compare.native-size .compare-after {
           width: auto;
           max-width: none;
           height: auto;
-          display: block;
-        }
-        .compare.upscaled-only.pixel-zoom { cursor: zoom-out; }
-        .compare.upscaled-only .compare-before-wrap,
-        .compare.upscaled-only .compare-handle {
-          display: none;
-        }
-        .compare .compare-pixel-probe {
-          position: fixed;
-          top: 0;
-          left: 0;
-          width: 115px;
-          height: 115px;
-          border-radius: 50%;
-          border: 1px solid rgba(255,255,255,0.9);
-          box-shadow: 0 2px 10px rgba(0,0,0,0.45);
-          overflow: hidden;
-          pointer-events: none;
-          z-index: 2;
-          display: none;
-          background: #111;
-          transform: translate3d(0, 0, 0);
-          will-change: transform;
-        }
-        .compare .compare-pixel-probe.no-content {
-          background: transparent;
-        }
-        .compare .compare-pixel-probe.no-content .compare-pixel-probe-canvas {
-          display: none;
-        }
-        .compare .compare-pixel-probe.visible {
-          display: block;
-        }
-        .compare .compare-pixel-probe-canvas {
-          width: 115px;
-          height: 115px;
-          image-rendering: pixelated;
           display: block;
         }
       </style>
@@ -672,20 +449,16 @@ class CompareSlider extends HTMLElement {
           <div class="handle-knob">
             <span class="handle-side handle-side-before" aria-label="Original">
               <i class="fas fa-eye-low-vision"></i>
-              <span class="handle-arrow">\u25C0</span>
+              <span class="handle-arrow">◀</span>
             </span>
             <span class="handle-side handle-side-after" aria-label="Enhanced">
-              <span class="handle-arrow">\u25B6</span>
+              <span class="handle-arrow">▶</span>
               <i class="fas fa-eye"></i>
             </span>
           </div>
         </div>
       </div>
-      <div class="compare-pixel-probe" aria-hidden="true">
-        <canvas class="compare-pixel-probe-canvas" width="${this.#probeRadius * 2 + 1}" height="${this.#probeRadius * 2 + 1}"></canvas>
-      </div>
     `);
-    this.#setProbeRadius(this.#probeRadius);
     if (cm) this.#drawCanvasSources();
   }
 }

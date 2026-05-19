@@ -21,6 +21,7 @@ class UpscalePreview extends HTMLElement {
    */
   showDimmedPreview(image, outW, outH) {
     this.style.setProperty('--ar', `${outW} / ${outH}`);
+    this.style.setProperty('--ar-num', `${outW / outH}`);
     this.style.setProperty('--natural-w', `${outW}px`);
     this.#render();
     this.style.display = 'block';
@@ -57,6 +58,7 @@ class UpscalePreview extends HTMLElement {
   hide() {
     this.style.display = 'none';
     this.style.removeProperty('--ar');
+    this.style.removeProperty('--ar-num');
     this.style.removeProperty('--natural-w');
     const canvas = this.querySelector('canvas');
     if (canvas) { canvas.width = 0; canvas.height = 0; }
@@ -68,16 +70,34 @@ class UpscalePreview extends HTMLElement {
       <style>
         .upscale-preview { display: none; position: relative; }
         .upscale-preview:not(.expanded) {
-          width: auto;
-          max-width: min(100%, var(--natural-w, 100%));
-          max-height: calc(100vh - 2rem);
+          width: 100%;
+          max-width: 100%;
           aspect-ratio: var(--ar, auto);
           margin-inline: auto;
         }
         .upscale-preview.expanded {
-          width: auto;
-          max-width: min(100%, var(--natural-w, 100%));
+          height: calc(100vh - 1rem);
+          width: calc((100vh - 1rem) * var(--ar-num, 1));
+          max-width: none;
           margin-inline: auto;
+        }
+        /* native-size: canvas at its natural pixel dimensions, centered in
+           a workspace-sized scroll container. Mirrors the compare-slider. */
+        .upscale-preview.native-size {
+          width: 100%;
+          max-width: 100%;
+          height: calc(100vh - 1rem);
+          max-height: calc(100vh - 1rem);
+          overflow: auto;
+          display: flex;
+          margin-inline: auto;
+        }
+        .upscale-preview.native-size canvas {
+          margin: auto;
+          width: auto;
+          height: auto;
+          max-width: none;
+          flex: 0 0 auto;
         }
         .upscale-preview canvas {
           display: block;

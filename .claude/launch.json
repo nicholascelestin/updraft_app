@@ -4,9 +4,9 @@
     {
       "name": "dev",
       "runtimeExecutable": "npx",
-      "runtimeArgs": ["http-server", "-p", "8081", "--cors", "-c-1", "--header", "Cross-Origin-Opener-Policy: same-origin", "--header", "Cross-Origin-Embedder-Policy: require-corp"],
-      "port": 8081,
-      "autoPort": false
+      "runtimeArgs": ["http-server", "-p", "8091", "--cors", "-c-1", "--header", "Cross-Origin-Opener-Policy: same-origin", "--header", "Cross-Origin-Embedder-Policy: require-corp"],
+      "port": 8091,
+      "autoPort": true
     }
   ]
 }

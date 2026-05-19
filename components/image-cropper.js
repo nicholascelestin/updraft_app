@@ -63,6 +63,7 @@ class ImageCropper extends HTMLElement {
     this.#image = image;
     if (!sameImage) this.#crop = null;
     this.style.setProperty('--ar', `${image.width} / ${image.height}`);
+    this.style.setProperty('--ar-num', `${image.width / image.height}`);
     this.style.setProperty('--natural-w', `${image.width}px`);
     this.#render();
     this.style.display = 'block';
@@ -73,6 +74,7 @@ class ImageCropper extends HTMLElement {
   hide() {
     this.style.display = 'none';
     this.style.removeProperty('--ar');
+    this.style.removeProperty('--ar-num');
     this.style.removeProperty('--natural-w');
     this.#image = null;
     this.#crop = null;
@@ -199,16 +201,34 @@ class ImageCropper extends HTMLElement {
       <style>
         .image-cropper { display: none; }
         .image-cropper:not(.expanded) {
-          width: auto;
-          max-width: min(100%, var(--natural-w, 100%));
-          max-height: calc(100vh - 2rem);
+          width: 100%;
+          max-width: 100%;
           aspect-ratio: var(--ar, auto);
           margin-inline: auto;
         }
         .image-cropper.expanded {
-          width: auto;
-          max-width: min(100%, var(--natural-w, 100%));
+          height: calc(100vh - 1rem);
+          width: calc((100vh - 1rem) * var(--ar-num, 1));
+          max-width: none;
           margin-inline: auto;
+        }
+        /* native-size: canvas at its natural pixel dimensions, centered in
+           a workspace-sized scroll container. Mirrors the compare-slider. */
+        .image-cropper.native-size {
+          width: 100%;
+          max-width: 100%;
+          height: calc(100vh - 1rem);
+          max-height: calc(100vh - 1rem);
+          overflow: auto;
+          display: flex;
+          margin-inline: auto;
+        }
+        .image-cropper.native-size canvas {
+          margin: auto;
+          width: auto;
+          height: auto;
+          max-width: none;
+          flex: 0 0 auto;
         }
         .image-cropper canvas {
           display: block;

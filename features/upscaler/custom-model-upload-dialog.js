@@ -86,9 +86,7 @@ class CustomModelUploadDialog extends HTMLElement {
       sizeLabel.textContent = 'Model size: -';
     }
     errorLabel.textContent = '';
-    detectLabel.innerHTML = isEdit
-      ? ''
-      : 'Auto-detect: <em>pick an ONNX file, then click <strong>Analyze model</strong> to probe it.</em>';
+    detectLabel.innerHTML = '';
     saveBtn.disabled = false;
 
     return new Promise((resolve) => {
@@ -117,7 +115,7 @@ class CustomModelUploadDialog extends HTMLElement {
         errorLabel.textContent = '';
         if (!file) {
           sizeLabel.textContent = 'Model size: -';
-          detectLabel.innerHTML = 'Auto-detect: <em>pick an ONNX file, then click <strong>Analyze model</strong> to probe it.</em>';
+          detectLabel.innerHTML = '';
           analyzeBtn.disabled = true;
           analyzeBtn.innerHTML = ANALYZE_BTN_HTML;
           return;
@@ -319,6 +317,16 @@ class CustomModelUploadDialog extends HTMLElement {
           font-style: normal;
           opacity: 0.85;
         }
+        .custom-model-upload-dialog .custom-model-file-header {
+          display: flex;
+          justify-content: space-between;
+          align-items: baseline;
+          gap: 0.5rem;
+        }
+        .custom-model-upload-dialog .custom-model-download-link {
+          font-size: 0.78rem;
+          font-weight: normal;
+        }
         .custom-model-upload-dialog .custom-model-analyze-row {
           display: flex;
           align-items: center;
@@ -355,7 +363,12 @@ class CustomModelUploadDialog extends HTMLElement {
         <form class="custom-model-form" method="dialog">
           <h3 class="custom-model-title" style="margin:0">Upload custom ONNX model</h3>
           <label class="custom-model-file-label">
-            Model file
+            <span class="custom-model-file-header">
+              Model file
+              <a class="custom-model-download-link" href="https://huggingface.co/notaneimu/onnx-image-models/tree/main" target="_blank" rel="noopener noreferrer">
+                <i class="fas fa-arrow-up-right-from-square"></i> Download More Models
+              </a>
+            </span>
             <input class="custom-model-file" type="file" accept=".onnx,application/octet-stream" required>
           </label>
           <div class="custom-model-analyze-row">
@@ -363,7 +376,7 @@ class CustomModelUploadDialog extends HTMLElement {
               <i class="fas fa-flask"></i> Analyze model
             </button>
             <span class="custom-model-analyze-hint">
-              Runs inference probes on the ONNX file (WebGPU when available, otherwise CPU/WASM) to auto-fill scale, layout, multiple-of, max-tile-size, and precision. Optional — you can also fill in the fields manually.
+              Probe model to auto-fill values.
             </span>
           </div>
           <div class="custom-model-row">

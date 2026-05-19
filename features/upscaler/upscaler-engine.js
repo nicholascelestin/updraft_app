@@ -213,6 +213,68 @@ function unpackFloat16BitsToFloat32(u16) {
   return out;
 }
 
+// ── ORT-Web WebGPU dispatch-overflow workaround ─────────────────────────
+// ORT-Web's program-manager.normalizeDispatchGroupSize reshuffles
+// dispatch shape (X, 1, 1) into (sqrt(X), sqrt(X), 1) whenever X exceeds
+// maxComputeWorkgroupsPerDimension (65535). The Conv2DMatMul and MatMul
+// shaders, though, interpret workgroupId.x as a column tile and
+// workgroupId.y as a row tile with hardcoded multipliers. After the
+// reshuffle they treat the synthesised Y as a row-tile index and the
+// row-bounds guard rejects ~99% of the writes, leaving most of the
+// output buffer uninitialised — visible as scrambled image content for
+// any model whose post-PixelShuffle activation has H*W > ~2.1M pixels.
+// Fix recovers the effective column from both workgroup ids when
+// dim_a_outer is small enough that the original dispatch Y was 1.
+// Upstream: program-manager.ts normalizeDispatchGroupSize is a lossy
+// rewrite that violates the (X=col, Y=row) contract Conv/MatMul shaders
+// expect; removable once a fix lands there.
+
+const WGPU_DISPATCH_FIX_INSTALLED = Symbol.for('updraft.wgslDispatchOverflowFix');
+
+const CONV2D_MM_FIND =
+  'let globalRowStart = i32(workgroupId.y) * 32;\n' +
+  '    let globalColStart = i32(workgroupId.x) * 32;';
+const CONV2D_MM_REPLACE =
+  'let p_isSmallA = uniforms.dim_a_outer <= 32;\n' +
+  '    let p_totalCols = (u32(uniforms.dim_b_outer) + 31u) / 32u;\n' +
+  '    let p_dispatchX = u32(ceil(sqrt(f32(p_totalCols))));\n' +
+  '    let p_effectiveCol = workgroupId.x + workgroupId.y * p_dispatchX;\n' +
+  '    let globalRowStart = select(i32(workgroupId.y) * 32, 0, p_isSmallA);\n' +
+  '    let globalColStart = select(i32(workgroupId.x) * 32, i32(p_effectiveCol) * 32, p_isSmallA);';
+
+const MATMUL_FIND =
+  'let globalRow =i32(globalId.y) * rowPerThread;\n' +
+  '  let globalCol = i32(globalId.x);';
+const MATMUL_REPLACE =
+  'let p_isSmallA = uniforms.dim_a_outer <= 8;\n' +
+  '  let p_totalVecCols = (u32(uniforms.dim_b_outer) + 31u) / 32u;\n' +
+  '  let p_dispatchX = u32(ceil(sqrt(f32(p_totalVecCols))));\n' +
+  '  let p_effectiveWgX = workgroupId.x + workgroupId.y * p_dispatchX;\n' +
+  '  let globalRow = select(i32(globalId.y) * rowPerThread, i32(localId.y) * rowPerThread, p_isSmallA);\n' +
+  '  let globalCol = select(i32(globalId.x), i32(p_effectiveWgX) * 8 + i32(localId.x), p_isSmallA);';
+
+function patchWGSLForDispatchOverflow(code, label) {
+  if (label === 'Conv2DMatMul' && code.includes(CONV2D_MM_FIND)) {
+    return code.split(CONV2D_MM_FIND).join(CONV2D_MM_REPLACE);
+  }
+  if (label === 'MatMul' && code.includes(MATMUL_FIND)) {
+    return code.split(MATMUL_FIND).join(MATMUL_REPLACE);
+  }
+  return code;
+}
+
+function installWebGPUDispatchFix(device) {
+  if (!device || device[WGPU_DISPATCH_FIX_INSTALLED]) return false;
+  const origCreate = device.createShaderModule.bind(device);
+  device.createShaderModule = (descriptor) => {
+    const patched = patchWGSLForDispatchOverflow(descriptor.code, descriptor.label || '');
+    if (patched === descriptor.code) return origCreate(descriptor);
+    return origCreate({ ...descriptor, code: patched });
+  };
+  device[WGPU_DISPATCH_FIX_INSTALLED] = true;
+  return true;
+}
+
 export class UpscalerEngine {
   #session = null;
   #modelBuffer = null;
@@ -361,6 +423,14 @@ export class UpscalerEngine {
     if (actualBackend === 'webgpu') {
       try {
         this.#device = await ort.env.webgpu.device;
+        // Install once per device (idempotent across model loads).
+        // If we install here for the first time, the session's shader
+        // modules were compiled by ORT-Web BEFORE the wrapper existed
+        // — release and recreate so all shaders go through it now.
+        if (installWebGPUDispatchFix(this.#device)) {
+          await this.#session.release();
+          this.#session = await ort.InferenceSession.create(this.#modelBuffer, sessionOpts);
+        }
         if (canUseGpuFastPath) {
           this.#gpuRenderer = new GpuTileRenderer(this.#device);
         }

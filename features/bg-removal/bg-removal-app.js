@@ -7,6 +7,7 @@ import 'components/image-drop-zone';
 import 'components/status-bar';
 import 'components/compare-slider';
 import 'components/image-cropper';
+import 'components/view-mode-controls';
 import { BgRemovalEngine } from './bg-removal-engine.js';
 
 /**
@@ -55,7 +56,8 @@ class BgRemovalApp extends HTMLElement {
   #checkerBlobUrl = null;
   #beforeBlobUrl = null;
   #transparentBlobUrl = null;
-  #viewState = { expanded: false, upscaledOnly: false };
+  #viewState = { mode: 'fit-width' };
+  static #VIEW_MODES = ['fit-width', 'fit-height', 'one-to-one'];
 
   connectedCallback() {
     this.#render();
@@ -72,33 +74,49 @@ class BgRemovalApp extends HTMLElement {
     if (this.#transparentBlobUrl) { URL.revokeObjectURL(this.#transparentBlobUrl); this.#transparentBlobUrl = null; }
   }
 
-  #syncViewSizeButtonLabel() {
-    const btn = this.#q('.viewsize-btn');
-    if (!btn) return;
-    const expanded = this.#viewState.expanded;
-    const icon = expanded ? 'fa-arrows-up-down' : 'fa-arrows-left-right-to-line';
-    const label = expanded ? 'Fit Height' : 'Fit Width';
-    btn.innerHTML = `<i class="fas ${icon}"></i> <span class="btn-label">${label}</span>`;
-    btn.title = label;
-  }
-
   #applyViewState() {
-    const expanded = this.#viewState.expanded;
-    this.#q('image-cropper').classList.toggle('expanded', expanded);
-    this.#q('compare-slider').classList.toggle('expanded', expanded);
-    this.#syncViewSizeButtonLabel();
+    const mode = this.#viewState.mode;
+    const isFitHeight = mode === 'fit-height';
+    const isOneToOne = mode === 'one-to-one';
+    for (const sel of ['image-cropper', 'compare-slider']) {
+      const el = this.#q(sel);
+      if (!el) continue;
+      el.classList.toggle('expanded', isFitHeight);
+      el.classList.toggle('native-size', isOneToOne);
+    }
   }
 
   #persistViewState() {
-    localStorage.setItem('bgremoval_view_expanded', this.#viewState.expanded ? '1' : '0');
-    localStorage.setItem('bgremoval_view_upscaled_only', this.#viewState.upscaledOnly ? '1' : '0');
+    localStorage.setItem('bgremoval_view_mode', this.#viewState.mode);
+  }
+
+  #setMode(mode) {
+    if (!BgRemovalApp.#VIEW_MODES.includes(mode)) return;
+    if (this.#viewState.mode === mode) return;
+    this.#viewState.mode = mode;
+    const vmc = this.#q('view-mode-controls');
+    if (vmc) vmc.mode = mode;
+    this.#applyViewState();
+    this.#persistViewState();
+  }
+
+  #defaultModeForImage(image) {
+    const vw = window.innerWidth || 1;
+    const vh = window.innerHeight || 1;
+    const imgRatio = image.width / image.height;
+    const vpRatio = vw / vh;
+    return imgRatio >= vpRatio ? 'fit-width' : 'fit-height';
   }
 
   #restoreViewState() {
-    this.#viewState.expanded = localStorage.getItem('bgremoval_view_expanded') === '1';
-    this.#viewState.upscaledOnly = localStorage.getItem('bgremoval_view_upscaled_only') === '1';
+    const savedMode = localStorage.getItem('bgremoval_view_mode');
+    if (BgRemovalApp.#VIEW_MODES.includes(savedMode)) {
+      this.#viewState.mode = savedMode;
+    } else if (localStorage.getItem('bgremoval_view_expanded') === '1') {
+      this.#viewState.mode = 'fit-height';
+    }
+    this.#q('view-mode-controls').mode = this.#viewState.mode;
     this.#applyViewState();
-    this.#q('compare-slider').setUpscaledOnly(this.#viewState.upscaledOnly);
   }
 
   #getVisibleCanvasElement() {
@@ -128,13 +146,11 @@ class BgRemovalApp extends HTMLElement {
     const startOverBtn = this.#q('.startover-btn');
     const backToCropBtn = this.#q('.back-to-crop-btn');
     const clearCropBtn = this.#q('.clear-crop-btn');
-    const viewSizeBtn = this.#q('.viewsize-btn');
-    const zoomToggleBtn = this.#q('.zoom-toggle-btn');
+    const viewModeControls = this.#q('view-mode-controls');
     const openInTabBtn = this.#q('.open-in-tab-btn');
     const downloadBtn = this.#q('.download-btn');
     const toolbarLeft = this.#q('.canvas-toolbar-left');
     const toolbarRight = this.#q('.canvas-toolbar-right');
-    const zoomHint = this.#q('.canvas-zoom-hint');
 
     const statusBar     = this.#q('status-bar');
     const dropZone      = this.#q('image-drop-zone');
@@ -143,27 +159,13 @@ class BgRemovalApp extends HTMLElement {
 
     const CROP_HINT = ' \u2014 drag to crop (optional).';
 
-    const syncZoomToggleLabel = () => {
-      const upscaledOnly = !!this.#viewState.upscaledOnly;
-      const icon = upscaledOnly ? 'fa-arrows-left-right' : 'fa-magnifying-glass-plus';
-      const label = upscaledOnly ? 'Use Slider' : 'Use Zoom';
-      zoomToggleBtn.innerHTML = `<i class="fas ${icon}"></i> <span class="btn-label">${label}</span>`;
-      const compareShowing = zoomToggleBtn.style.display !== 'none';
-      zoomHint.hidden = !(upscaledOnly && compareShowing);
-    };
-    syncZoomToggleLabel();
-
     const showCompareControls = () => {
-      zoomToggleBtn.style.display = 'inline-block';
       backToCropBtn.style.display = 'inline-block';
       toolbarRight.hidden = false;
-      syncZoomToggleLabel();
     };
     const hideCompareControls = () => {
-      zoomToggleBtn.style.display = 'none';
       backToCropBtn.style.display = 'none';
       toolbarRight.hidden = true;
-      zoomHint.hidden = true;
     };
 
     statusBar.message = 'Load an image to begin.';
@@ -213,6 +215,7 @@ class BgRemovalApp extends HTMLElement {
         stopBtn.style.display = 'none';
       }
       this.#loadedImage = e.detail.image;
+      this.#setMode(this.#defaultModeForImage(this.#loadedImage));
       showReady();
     });
 
@@ -236,15 +239,11 @@ class BgRemovalApp extends HTMLElement {
       showReady();
     });
 
-    viewSizeBtn.addEventListener('click', () => {
-      this.#viewState.expanded = !this.#viewState.expanded;
+    viewModeControls.addEventListener('mode-change', (e) => {
+      this.#viewState.mode = e.detail.mode;
       this.#applyViewState();
       this.#persistViewState();
-      if (!this.#viewState.expanded) this.#snapCenterVisibleCanvas();
-    });
-
-    zoomToggleBtn.addEventListener('click', () => {
-      compareSlider.toggleUpscaledView();
+      this.#snapCenterVisibleCanvas();
     });
 
     openInTabBtn.addEventListener('click', () => {
@@ -252,17 +251,6 @@ class BgRemovalApp extends HTMLElement {
     });
     downloadBtn.addEventListener('click', () => {
       compareSlider.download();
-    });
-
-    compareSlider.addEventListener('view-state-change', (e) => {
-      if (typeof e.detail.upscaledOnly === 'boolean') {
-        this.#viewState.upscaledOnly = e.detail.upscaledOnly;
-      }
-      if (typeof e.detail.pixelZoomed === 'boolean') {
-        this.classList.toggle('canvas-fullscreen', e.detail.pixelZoomed);
-      }
-      this.#persistViewState();
-      syncZoomToggleLabel();
     });
 
     removeBtn.addEventListener('click', async () => {
@@ -301,12 +289,11 @@ class BgRemovalApp extends HTMLElement {
         this.#checkerBlobUrl = await checkerboardComposite(resultCanvas);
         this.#beforeBlobUrl = await imageToBlobUrl(inputImage);
 
-        compareSlider.classList.toggle('expanded', this.#viewState.expanded);
         await compareSlider.show(this.#beforeBlobUrl, this.#checkerBlobUrl, {
           downloadSrc: this.#transparentBlobUrl,
           downloadName: 'bg_removed.png',
         });
-        compareSlider.setUpscaledOnly(this.#viewState.upscaledOnly);
+        this.#applyViewState();
         showCompareControls();
 
       } catch (e) {
@@ -365,17 +352,6 @@ class BgRemovalApp extends HTMLElement {
           z-index: 10;
           pointer-events: none;
         }
-        /* When the compare-slider is in pixel-zoom (fullscreen) mode it covers
-           the page at z-index 1000, hiding the toolbars. Promote the rail to
-           a fixed-position overlay above it so the canvas controls stay
-           reachable without leaving fullscreen. */
-        bg-removal-app.canvas-fullscreen .canvas-toolbar-rail {
-          position: fixed;
-          top: 0.75rem;
-          left: 0;
-          right: 0;
-          z-index: 1001;
-        }
         bg-removal-app .canvas-toolbar {
           position: absolute;
           top: 0;
@@ -420,21 +396,6 @@ class BgRemovalApp extends HTMLElement {
           left: auto;
           top: auto;
           max-width: 100%;
-        }
-        bg-removal-app .canvas-zoom-hint {
-          font-size: 0.7rem;
-          line-height: 1.25;
-          padding: 0.15rem 0.5rem;
-          color: #fff;
-          background: color-mix(in oklab, var(--pico-card-background-color, #1e1e2e) 32%, transparent);
-          border: 1px solid color-mix(in oklab, var(--pico-muted-border-color) 45%, transparent);
-          border-radius: var(--pico-border-radius);
-          backdrop-filter: blur(10px) saturate(1.1);
-          -webkit-backdrop-filter: blur(10px) saturate(1.1);
-          max-width: 100%;
-        }
-        bg-removal-app .canvas-zoom-hint[hidden] {
-          display: none;
         }
         bg-removal-app .canvas-toolbar button {
           margin-bottom: 0;
@@ -531,22 +492,14 @@ class BgRemovalApp extends HTMLElement {
               <button class="stop-btn secondary" style="display:none" title="Stop background removal">
                 <i class="fas fa-stop"></i> <span class="btn-label">Stop</span>
               </button>
-              <button class="viewsize-btn secondary outline" type="button" title="Fit Width">
-                <i class="fas fa-arrows-left-right-to-line"></i> <span class="btn-label">Fit Width</span>
-              </button>
-              <button class="zoom-toggle-btn secondary outline" type="button" style="display:none" title="Toggle between slider compare and result-only inspection">
-                <i class="fas fa-magnifying-glass-plus"></i> <span class="btn-label">Use Zoom</span>
-              </button>
+              <view-mode-controls></view-mode-controls>
               <button class="clear-crop-btn secondary outline" style="display:none" type="button" title="Clear the selected crop region">
                 <i class="fas fa-eraser"></i> <span class="btn-label">Clear Selection</span>
               </button>
-              <button class="startover-btn secondary outline" style="display:none" title="Start over with a new image">
-                <i class="fas fa-redo"></i> <span class="btn-label">Start Over</span>
+              <button class="startover-btn secondary outline" style="display:none" title="Clear and start over with a new image">
+                <i class="fas fa-xmark"></i> <span class="btn-label">Clear</span>
               </button>
               <status-bar></status-bar>
-            </div>
-            <div class="canvas-zoom-hint" hidden>
-              Click: Zoom \u00b7 Right-click: Compare \u00b7 Shift+Wheel: Bubble size \u00b7 Ctrl+Wheel: Zoom factor
             </div>
           </div>
           <div class="canvas-toolbar canvas-toolbar-right" hidden>

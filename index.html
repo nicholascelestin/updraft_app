@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="dark">
     <title>AI Tools</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="favicon-180x180.png">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
         integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A=="
@@ -14,13 +17,13 @@
 <body>
     <nav class="container-fluid">
         <ul>
-            <li><strong><i class="fas fa-wand-magic-sparkles"></i> AI Tools</strong></li>
+            <li class="brand"><strong>up<img src="favicon.svg" alt="" class="brand-icon">draft</strong></li>
         </ul>
         <ul>
-            <li><a href="#" class="nav-link active" data-feature="upscaler">
+            <li><a href="#" data-feature="upscaler" aria-current="page">
                 <i class="fas fa-expand"></i> Upscaler
             </a></li>
-            <li><a href="#" class="nav-link" data-feature="bg-removal">
+            <li><a href="#" data-feature="bg-removal">
                 <i class="fas fa-eraser"></i> Background Removal
             </a></li>
         </ul>
@@ -47,7 +50,8 @@
         "components/video-drop-zone":   "./components/video-drop-zone.js",
         "components/status-bar":        "./components/status-bar.js",
         "components/compare-slider":    "./components/compare-slider.js",
-        "components/image-cropper":     "./components/image-cropper.js"
+        "components/image-cropper":     "./components/image-cropper.js",
+        "components/view-mode-controls": "./components/view-mode-controls.js"
       }
     }
     </script>
@@ -57,9 +61,9 @@
 
         function activateFeature(link) {
             const feature = link.dataset.feature;
-            document.querySelectorAll('.nav-link').forEach(l => {
-                l.classList.toggle('active', l === link);
-                l.setAttribute('aria-current', l === link ? 'page' : '');
+            document.querySelectorAll('nav a[data-feature]').forEach(l => {
+                if (l === link) l.setAttribute('aria-current', 'page');
+                else l.removeAttribute('aria-current');
             });
             document.querySelectorAll('[id^="feature-"]').forEach(el => {
                 el.style.display = el.id === 'feature-' + feature ? '' : 'none';
@@ -67,7 +71,7 @@
             localStorage.setItem('aitools_feature', feature);
         }
 
-        document.querySelectorAll('.nav-link').forEach(link => {
+        document.querySelectorAll('nav a[data-feature]').forEach(link => {
             link.addEventListener('click', (e) => {
                 e.preventDefault();
                 activateFeature(link);
@@ -75,12 +79,8 @@
         });
 
         const savedFeature = localStorage.getItem('aitools_feature');
-        const savedLink = savedFeature && document.querySelector(`.nav-link[data-feature="${savedFeature}"]`);
-        if (savedLink) {
-            activateFeature(savedLink);
-        } else {
-            document.querySelector('.nav-link.active')?.setAttribute('aria-current', 'page');
-        }
+        const savedLink = savedFeature && document.querySelector(`nav a[data-feature="${savedFeature}"]`);
+        if (savedLink) activateFeature(savedLink);
     </script>
 </body>
 </html>

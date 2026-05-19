@@ -16,6 +16,7 @@ import 'components/image-drop-zone';
 import 'components/status-bar';
 import 'components/image-cropper';
 import 'components/compare-slider';
+import 'components/view-mode-controls';
 import './upscale-preview.js';
 import './perf-monitor.js';
 import './custom-model-upload-dialog.js';
@@ -136,7 +137,8 @@ class UpscalerApp extends HTMLElement {
   #loadedImage = null;
   #running = false;
   #generation = 0;
-  #viewState = { expanded: false, upscaledOnly: false };
+  #viewState = { mode: 'fit-width' };
+  static #VIEW_MODES = ['fit-width', 'fit-height', 'one-to-one'];
   #customModels = [];
   #previousModelValue = '';
   #outputBaseLabels = null;
@@ -156,15 +158,6 @@ class UpscalerApp extends HTMLElement {
 
   #q(sel) { return this.querySelector(sel); }
   #isBuiltInResampler(modelOpt) { return !!modelOpt?.value?.startsWith('builtin:'); }
-  #syncViewSizeButtonLabel() {
-    const btn = this.#q('.viewsize-btn');
-    if (!btn) return;
-    const expanded = this.#viewState.expanded;
-    const icon = expanded ? 'fa-arrows-up-down' : 'fa-arrows-left-right-to-line';
-    const label = expanded ? 'Fit Height' : 'Fit Width';
-    btn.innerHTML = `<i class="fas ${icon}"></i> <span class="btn-label">${label}</span>`;
-    btn.title = label;
-  }
 
   #getCustomModelOptionsHTML(selected) {
     if (!this.#customModels.length) return '';
@@ -279,20 +272,13 @@ class UpscalerApp extends HTMLElement {
   }
 
   #setupViewStateSync() {
-    this.#q('.viewsize-btn').addEventListener('click', () => {
-      this.#viewState.expanded = !this.#viewState.expanded;
+    this.#q('view-mode-controls').addEventListener('mode-change', (e) => {
+      this.#viewState.mode = e.detail.mode;
       this.#applyViewState();
       this.#persistViewState();
-      if (!this.#viewState.expanded) this.#snapCenterVisibleCanvas();
-    });
-    this.#q('compare-slider').addEventListener('view-state-change', (e) => {
-      if (typeof e.detail.upscaledOnly === 'boolean') {
-        this.#viewState.upscaledOnly = e.detail.upscaledOnly;
-      }
-      if (typeof e.detail.pixelZoomed === 'boolean') {
-        this.classList.toggle('canvas-fullscreen', e.detail.pixelZoomed);
-      }
-      this.#persistViewState();
+      // Scroll the visible canvas into view so the newly-sized image is
+      // actually on screen after a mode change.
+      this.#snapCenterVisibleCanvas();
     });
   }
 
@@ -317,16 +303,37 @@ class UpscalerApp extends HTMLElement {
   }
 
   #persistViewState() {
-    localStorage.setItem('upscaler_view_expanded', this.#viewState.expanded ? '1' : '0');
-    localStorage.setItem('upscaler_view_upscaled_only', this.#viewState.upscaledOnly ? '1' : '0');
+    localStorage.setItem('upscaler_view_mode', this.#viewState.mode);
+  }
+
+  #setMode(mode) {
+    if (!UpscalerApp.#VIEW_MODES.includes(mode)) return;
+    if (this.#viewState.mode === mode) return;
+    this.#viewState.mode = mode;
+    const vmc = this.#q('view-mode-controls');
+    if (vmc) vmc.mode = mode;
+    this.#applyViewState();
+    this.#persistViewState();
+  }
+
+  #defaultModeForImage(image) {
+    const vw = window.innerWidth || 1;
+    const vh = window.innerHeight || 1;
+    const imgRatio = image.width / image.height;
+    const vpRatio = vw / vh;
+    return imgRatio >= vpRatio ? 'fit-width' : 'fit-height';
   }
 
   #applyViewState() {
-    const expanded = this.#viewState.expanded;
-    this.#q('image-cropper').classList.toggle('expanded', expanded);
-    this.#q('upscale-preview').classList.toggle('expanded', expanded);
-    this.#q('compare-slider').classList.toggle('expanded', expanded);
-    this.#syncViewSizeButtonLabel();
+    const mode = this.#viewState.mode;
+    const isFitHeight = mode === 'fit-height';
+    const isOneToOne = mode === 'one-to-one';
+    for (const sel of ['image-cropper', 'upscale-preview', 'compare-slider']) {
+      const el = this.#q(sel);
+      if (!el) continue;
+      el.classList.toggle('expanded', isFitHeight);
+      el.classList.toggle('native-size', isOneToOne);
+    }
   }
 
   #setupUpscaleActions() {
@@ -341,39 +348,23 @@ class UpscalerApp extends HTMLElement {
     const startOverBtn  = this.#q('.startover-btn');
     const clearCropBtn  = this.#q('.clear-crop-btn');
     const backToCropBtn = this.#q('.back-to-crop-btn');
-    const zoomToggleBtn = this.#q('.zoom-toggle-btn');
     const openInTabBtn  = this.#q('.open-in-tab-btn');
     const downloadBtn   = this.#q('.download-btn');
     const toolbarLeft   = this.#q('.canvas-toolbar-left');
     const toolbarRight  = this.#q('.canvas-toolbar-right');
-    const zoomHint      = this.#q('.canvas-zoom-hint');
     const modelEl       = this.#q('.model-select');
     const editCustomBtn = this.#q('.edit-custom-model-btn');
     const deleteCustomBtn = this.#q('.delete-custom-model-btn');
 
     const CROP_HINT = ' \u2014 drag to crop (optional).';
 
-    const syncZoomToggleLabel = () => {
-      const upscaledOnly = !!this.#viewState.upscaledOnly;
-      const icon = upscaledOnly ? 'fa-arrows-left-right' : 'fa-magnifying-glass-plus';
-      const label = upscaledOnly ? 'Use Slider' : 'Use Zoom';
-      zoomToggleBtn.innerHTML = `<i class="fas ${icon}"></i> <span class="btn-label">${label}</span>`;
-      const compareShowing = zoomToggleBtn.style.display !== 'none';
-      zoomHint.hidden = !(upscaledOnly && compareShowing);
-    };
-    syncZoomToggleLabel();
-
     const showCompareControls = () => {
-      zoomToggleBtn.style.display = 'inline-block';
       backToCropBtn.style.display = 'inline-block';
       toolbarRight.hidden = false;
-      syncZoomToggleLabel();
     };
     const hideCompareControls = () => {
-      zoomToggleBtn.style.display = 'none';
       backToCropBtn.style.display = 'none';
       toolbarRight.hidden = true;
-      zoomHint.hidden = true;
     };
 
     statusBar.message = 'Load an image to begin.';
@@ -440,6 +431,10 @@ class UpscalerApp extends HTMLElement {
         this.#q('.clear-cache-btn').disabled = false;
       }
       this.#loadedImage = e.detail.image;
+      // Default to whichever fit mode keeps the whole image on screen:
+      // fit-width when the image is at least as wide (relative to height)
+      // as the viewport, fit-height otherwise.
+      this.#setMode(this.#defaultModeForImage(this.#loadedImage));
       showReady();
     });
 
@@ -593,11 +588,10 @@ class UpscalerApp extends HTMLElement {
         const outH = inputImage.height * scale;
         statusBar.message = `Done: ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}.`;
 
-        compareSlider.classList.toggle('expanded', this.#viewState.expanded);
         await compareSlider.show(beforeCanvas, afterCanvas, {
           downloadName: comparison ? `comparison_${scale}x.png` : `upscaled_${scale}x.png`,
         });
-        compareSlider.setUpscaledOnly(this.#viewState.upscaledOnly);
+        this.#applyViewState();
         preview.hide();
         showCompareControls();
 
@@ -645,18 +639,11 @@ class UpscalerApp extends HTMLElement {
       showReady();
     });
 
-    zoomToggleBtn.addEventListener('click', () => {
-      compareSlider.toggleUpscaledView();
-    });
     openInTabBtn.addEventListener('click', () => {
       compareSlider.openInTab();
     });
     downloadBtn.addEventListener('click', () => {
       compareSlider.download();
-    });
-
-    compareSlider.addEventListener('view-state-change', () => {
-      syncZoomToggleLabel();
     });
   }
 
@@ -1068,15 +1055,19 @@ class UpscalerApp extends HTMLElement {
       if (saved === null) continue;
       writeControl(this.#q(selector), kind, saved);
     }
-    this.#viewState.expanded = localStorage.getItem('upscaler_view_expanded') === '1';
-    this.#viewState.upscaledOnly = localStorage.getItem('upscaler_view_upscaled_only') === '1';
+    const savedMode = localStorage.getItem('upscaler_view_mode');
+    if (UpscalerApp.#VIEW_MODES.includes(savedMode)) {
+      this.#viewState.mode = savedMode;
+    } else if (localStorage.getItem('upscaler_view_expanded') === '1') {
+      this.#viewState.mode = 'fit-height';
+    }
 
     const modelEl = this.#q('.model-select');
     if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
     this.#previousModelValue = modelEl.value;
 
+    this.#q('view-mode-controls').mode = this.#viewState.mode;
     this.#applyViewState();
-    this.#q('compare-slider').setUpscaledOnly(this.#viewState.upscaledOnly);
     this.#syncComparisonExclusion();
     this.#updateModelBoundControls();
     this.#updateInputMirrors();
@@ -1276,18 +1267,6 @@ class UpscalerApp extends HTMLElement {
           z-index: 10;
           pointer-events: none;
         }
-        /* When the compare-slider is in pixel-zoom (fullscreen) mode it covers
-           the page at z-index 1000, hiding the toolbars. Promote the rail to
-           a fixed-position overlay above it so the canvas controls (Stop,
-           Start Over, Use Slider, Open in Tab, Download, etc.) stay reachable
-           without leaving fullscreen. */
-        upscaler-app.canvas-fullscreen .canvas-toolbar-rail {
-          position: fixed;
-          top: 0.75rem;
-          left: 0;
-          right: 0;
-          z-index: 1001;
-        }
         upscaler-app .canvas-toolbar {
           position: absolute;
           top: 0;
@@ -1332,21 +1311,6 @@ class UpscalerApp extends HTMLElement {
           left: auto;
           top: auto;
           max-width: 100%;
-        }
-        upscaler-app .canvas-zoom-hint {
-          font-size: 0.7rem;
-          line-height: 1.25;
-          padding: 0.15rem 0.5rem;
-          color: #fff;
-          background: color-mix(in oklab, var(--pico-card-background-color, #1e1e2e) 32%, transparent);
-          border: 1px solid color-mix(in oklab, var(--pico-muted-border-color) 45%, transparent);
-          border-radius: var(--pico-border-radius);
-          backdrop-filter: blur(10px) saturate(1.1);
-          -webkit-backdrop-filter: blur(10px) saturate(1.1);
-          max-width: 100%;
-        }
-        upscaler-app .canvas-zoom-hint[hidden] {
-          display: none;
         }
         upscaler-app .canvas-toolbar button {
           margin-bottom: 0;
@@ -1566,22 +1530,14 @@ class UpscalerApp extends HTMLElement {
               <button class="stop-btn secondary" style="display:none" title="Stop upscale">
                 <i class="fas fa-stop"></i> <span class="btn-label">Stop</span>
               </button>
-              <button class="viewsize-btn secondary outline" type="button" title="Fit Width">
-                <i class="fas fa-arrows-left-right-to-line"></i> <span class="btn-label">Fit Width</span>
-              </button>
-              <button class="zoom-toggle-btn secondary outline" type="button" style="display:none" title="Toggle between slider compare and upscaled-only inspection">
-                <i class="fas fa-magnifying-glass-plus"></i> <span class="btn-label">Use Zoom</span>
-              </button>
+              <view-mode-controls></view-mode-controls>
               <button class="clear-crop-btn secondary outline" style="display:none" type="button" title="Clear the selected crop region">
                 <i class="fas fa-eraser"></i> <span class="btn-label">Clear Selection</span>
               </button>
-              <button class="startover-btn secondary outline" style="display:none" title="Start over with a new image">
-                <i class="fas fa-redo"></i> <span class="btn-label">Start Over</span>
+              <button class="startover-btn secondary outline" style="display:none" title="Clear and start over with a new image">
+                <i class="fas fa-xmark"></i> <span class="btn-label">Clear</span>
               </button>
               <status-bar></status-bar>
-            </div>
-            <div class="canvas-zoom-hint" hidden>
-              Click: Zoom \u00b7 Right-click: Compare \u00b7 Shift+Wheel: Bubble size \u00b7 Ctrl+Wheel: Zoom factor
             </div>
           </div>
           <div class="canvas-toolbar canvas-toolbar-right" hidden>

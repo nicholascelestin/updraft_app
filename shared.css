@@ -6,9 +6,14 @@
     scrollbar-color: var(--pico-secondary-border) var(--pico-background-color);
 }
 
-/* Nav active link styling */
-nav .nav-link.active {
-    font-weight: 600;
+/* Nav brand */
+nav .brand {
+    color: #6366f1;
+}
+nav .brand-icon {
+    height: 2.25em;
+    vertical-align: -0.35em;
+    margin: 0 -0.5em;
 }
 
 /* Compact form controls inside tool UIs */
