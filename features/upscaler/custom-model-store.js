@@ -40,6 +40,15 @@ function sanitizePrecision(precision) {
   return String(precision || '').toLowerCase() === 'fp16' ? 'fp16' : 'fp32';
 }
 
+function sanitizeUpscaleBefore(value) {
+  if (value === true || value === 'true' || value === 1 || value === '1') return true;
+  return false;
+}
+
+function sanitizeTileBlend(value) {
+  return value === 'gaussian' ? 'gaussian' : 'overlapCrop';
+}
+
 function normalizeLabel(label) {
   const trimmed = (label || '').trim();
   return trimmed || 'Custom ONNX';
@@ -54,6 +63,8 @@ function toModelRecord(raw = {}) {
   const multipleOf = sanitizeMultipleOf(raw.multipleOf);
   const maxTileSize = sanitizeMaxTileSize(raw.maxTileSize);
   const precision = sanitizePrecision(raw.precision);
+  const upscaleBefore = sanitizeUpscaleBefore(raw.upscaleBefore);
+  const tileBlend = sanitizeTileBlend(raw.tileBlend);
   const sizeBytes = Number.isFinite(raw.sizeBytes) ? Math.max(0, raw.sizeBytes) : 0;
   const sizeMB = Number((sizeBytes / (1024 * 1024)).toFixed(1));
   return {
@@ -66,6 +77,8 @@ function toModelRecord(raw = {}) {
     multipleOf,
     maxTileSize,
     precision,
+    upscaleBefore,
+    tileBlend,
     sizeBytes,
     sizeMB,
     custom: true,
@@ -87,7 +100,7 @@ function readStoredRecords() {
 }
 
 function persistRecords(records) {
-  const payload = records.map(({ id, label, scale, range, layout, multipleOf, maxTileSize, precision, sizeBytes }) => ({
+  const payload = records.map(({ id, label, scale, range, layout, multipleOf, maxTileSize, precision, upscaleBefore, tileBlend, sizeBytes }) => ({
     id,
     label,
     scale,
@@ -96,6 +109,8 @@ function persistRecords(records) {
     multipleOf,
     maxTileSize,
     precision,
+    upscaleBefore,
+    tileBlend,
     sizeBytes,
   }));
   localStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(payload));
@@ -114,7 +129,7 @@ export function getCustomModelByUrl(url) {
   return readStoredRecords().find((model) => model.url === url) || null;
 }
 
-export async function saveCustomModel({ file, label, scale, range, layout, multipleOf, maxTileSize, precision }) {
+export async function saveCustomModel({ file, label, scale, range, layout, multipleOf, maxTileSize, precision, upscaleBefore, tileBlend }) {
   if (!(file instanceof File)) {
     throw new Error('Missing ONNX file for custom model upload.');
   }
@@ -125,6 +140,8 @@ export async function saveCustomModel({ file, label, scale, range, layout, multi
   const normalizedMultipleOf = sanitizeMultipleOf(multipleOf);
   const normalizedMaxTileSize = sanitizeMaxTileSize(maxTileSize);
   const normalizedPrecision = sanitizePrecision(precision);
+  const normalizedUpscaleBefore = sanitizeUpscaleBefore(upscaleBefore);
+  const normalizedTileBlend = sanitizeTileBlend(tileBlend);
   const idSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const id = `custom-${idSeed}`;
   const url = `${CUSTOM_MODEL_URL_PREFIX}${id}`;
@@ -151,6 +168,8 @@ export async function saveCustomModel({ file, label, scale, range, layout, multi
     multipleOf: normalizedMultipleOf,
     maxTileSize: normalizedMaxTileSize,
     precision: normalizedPrecision,
+    upscaleBefore: normalizedUpscaleBefore,
+    tileBlend: normalizedTileBlend,
     sizeBytes: bytes.byteLength,
   });
   records.unshift(model);
@@ -180,6 +199,8 @@ export function updateCustomModelByUrl(url, updates = {}) {
     multipleOf: 'multipleOf' in updates ? updates.multipleOf : current.multipleOf,
     maxTileSize: 'maxTileSize' in updates ? updates.maxTileSize : current.maxTileSize,
     precision: 'precision' in updates ? updates.precision : current.precision,
+    upscaleBefore: 'upscaleBefore' in updates ? updates.upscaleBefore : current.upscaleBefore,
+    tileBlend: 'tileBlend' in updates ? updates.tileBlend : current.tileBlend,
     sizeBytes: current.sizeBytes,
   });
   records[index] = merged;

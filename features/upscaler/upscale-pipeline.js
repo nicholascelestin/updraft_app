@@ -27,14 +27,16 @@ class EnginePool {
     (slot.engine.destroy ?? slot.engine.release)?.call(slot.engine);
   }
 
-  getUpscaler(tag, { modelUrl, scale, modelValueRange, modelLayout = 'nchw', modelInputMultiple = 1, modelPrecision = 'fp32', backend, profile = false }) {
+  getUpscaler(tag, { modelUrl, scale, modelValueRange, modelLayout = 'nchw', modelInputMultiple = 1, modelPrecision = 'fp32', upscaleBefore = false, tileBlend = 'overlapCrop', backend, profile = false }) {
     const slot = this.#slots.get(tag);
     if (
       slot &&
       slot.modelUrl === modelUrl &&
       slot.modelLayout === modelLayout &&
       slot.modelInputMultiple === modelInputMultiple &&
-      slot.modelPrecision === modelPrecision
+      slot.modelPrecision === modelPrecision &&
+      slot.upscaleBefore === upscaleBefore &&
+      slot.tileBlend === tileBlend
     ) {
       const backendOk = !slot.engine.activeBackend || slot.engine.activeBackend === backend;
       if (backendOk) {
@@ -43,8 +45,8 @@ class EnginePool {
       }
     }
     this.#evict(tag);
-    const engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, profile });
-    this.#slots.set(tag, { engine, modelUrl, modelLayout, modelInputMultiple, modelPrecision });
+    const engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, profile });
+    this.#slots.set(tag, { engine, modelUrl, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend });
     return engine;
   }
 
@@ -100,7 +102,7 @@ function blendCanvas(destCanvas, srcCanvas, opacity) {
 const tiledUpscaleStep = {
   name: 'tiledUpscale',
   async run(ctx, cb) {
-    const { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, backend, tileSize, profile } = ctx.config;
+    const { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, backend, tileSize, profile } = ctx.config;
     const engine = ctx.pool.getUpscaler('base', {
       modelUrl,
       scale,
@@ -108,6 +110,8 @@ const tiledUpscaleStep = {
       modelLayout,
       modelInputMultiple,
       modelPrecision,
+      upscaleBefore,
+      tileBlend,
       backend,
       profile,
     });
@@ -147,6 +151,8 @@ const comparisonStep = {
       modelLayout: comparison.modelLayout,
       modelInputMultiple: comparison.modelInputMultiple,
       modelPrecision: comparison.modelPrecision,
+      upscaleBefore: comparison.upscaleBefore,
+      tileBlend: comparison.tileBlend,
       backend: passBackend,
     });
     emitStage(cb, 'comparison', 'loading', { message: 'Loading comparison model…' });
@@ -182,6 +188,8 @@ const blendAllStep = {
       modelLayout: all.modelLayout,
       modelInputMultiple: all.modelInputMultiple,
       modelPrecision: all.modelPrecision,
+      upscaleBefore: all.upscaleBefore,
+      tileBlend: all.tileBlend,
       backend: passBackend,
     });
     emitStage(cb, 'blendAll', 'loading', { message: 'Loading all-pass model…' });
@@ -263,6 +271,8 @@ const enhanceFacesStep = {
       modelLayout: face.modelLayout,
       modelInputMultiple: face.modelInputMultiple,
       modelPrecision: face.modelPrecision,
+      upscaleBefore: face.upscaleBefore,
+      tileBlend: face.tileBlend,
       backend: faceBackend,
     });
     emitStage(cb, 'enhanceFaces', 'loading', { message: 'Loading face enhancer model…' });
@@ -528,7 +538,7 @@ export class Pipeline {
   }
 
   async warmup(config, { onProgress } = {}) {
-    const { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, backend, profile } = config;
+    const { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, backend, profile } = config;
     const engine = this.#pool.getUpscaler('base', {
       modelUrl,
       scale,
@@ -536,6 +546,8 @@ export class Pipeline {
       modelLayout,
       modelInputMultiple,
       modelPrecision,
+      upscaleBefore,
+      tileBlend,
       backend,
       profile,
     });

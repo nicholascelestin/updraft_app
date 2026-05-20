@@ -7,7 +7,15 @@
 import { fetchWithProgress } from 'lib/fetch-progress';
 import { GpuTileRenderer, GpuOutputTooLargeError } from './gpu-tile-renderer.js';
 import { GpuFrameExtractor } from './gpu-frame-extractor.js';
-import { buildTileGrid, pasteTileCropped, overlapCrop } from './tiling.js';
+import {
+  buildTileGrid,
+  pasteTileCropped,
+  overlapCrop,
+  makeGaussianWeights2D,
+  accumulateGaussianTileCHW,
+  accumulateGaussianTileHWC,
+  finalizeGaussianRegion,
+} from './tiling.js';
 
 const DEFAULT_SCALE = 4;
 const DEFAULT_OVERLAP = 16;
@@ -285,6 +293,8 @@ export class UpscalerEngine {
   #modelLayout;
   #modelInputMultiple;
   #modelPrecision;
+  #upscaleBefore;
+  #tileBlend;
   #profiling = false;
   #activeBackend = null;
   #device = null;
@@ -299,6 +309,22 @@ export class UpscalerEngine {
     modelLayout = 'nchw',
     modelInputMultiple = 1,
     modelPrecision = 'fp32',
+    // upscaleBefore=true: the model operates in HR pixel space (e.g. a
+    // refiner that takes a pre-upsampled LR image and returns an HR image
+    // at the SAME resolution). Tile coordinates and modelInputMultiple
+    // stay in LR-pixel units (consistent with regular SR models advertised
+    // with scale > 1); the engine bicubic-upsamples LR->HR before tile
+    // extraction and multiplies extraction coords by `scale` so the
+    // backend sees HR tensors. All GPU fast paths remain viable — they're
+    // coordinate-agnostic.
+    upscaleBefore = false,
+    // tileBlend='gaussian' replaces the default half-overlap hard crop
+    // with float32 Gaussian-weighted accumulation. Use for diffusion-
+    // style models with visible tile seams. Costs ~16 bytes/HR-pixel
+    // working memory and forces the CPU readback path (the GPU output
+    // renderer writes directly to the bgra8unorm canvas surface, which
+    // can't host the float32 accumulator).
+    tileBlend = 'overlapCrop',
     profile = false,
   }) {
     this.#modelUrl = modelUrl;
@@ -308,6 +334,8 @@ export class UpscalerEngine {
     this.#modelLayout = modelLayout === 'nhwc' ? 'nhwc' : 'nchw';
     this.#modelInputMultiple = Number.isFinite(modelInputMultiple) ? Math.max(1, Math.floor(modelInputMultiple)) : 1;
     this.#modelPrecision = modelPrecision === 'fp16' ? 'fp16' : 'fp32';
+    this.#upscaleBefore = !!upscaleBefore;
+    this.#tileBlend = tileBlend === 'gaussian' ? 'gaussian' : 'overlapCrop';
     this.#profiling = profile;
   }
 
@@ -471,8 +499,26 @@ export class UpscalerEngine {
     const srcH = img.videoHeight ?? img.height;
     const outW = srcW * scale;
     const outH = srcH * scale;
-    let useGpu = this.#gpuRenderer !== null;
+    const gaussianBlend = this.#tileBlend === 'gaussian';
+    // The GPU output renderer writes via fragment shader directly to the
+    // canvas's bgra8unorm surface, so it can't host the float32
+    // accumulator Gaussian blending needs. Force the CPU readback path.
+    let useGpu = this.#gpuRenderer !== null && !gaussianBlend;
     const useGpuInput = this.#gpuExtractor !== null;
+
+    // In upscaleBefore mode the model takes HR-sized tiles, so we
+    // multiply all input-side tile coords/dims by `scale`. The output
+    // side already uses HR coords (tx*scale, outTW=tw*scale, …) for
+    // every model, so the GPU output renderer needs no changes.
+    const pixelScale = this.#upscaleBefore ? scale : 1;
+
+    // Gaussian accumulator buffers + a per-tile-size weight cache. The
+    // accumRGB stores values in [0, 255] before clamping (matching what
+    // the existing chwToImageData decoder produces), so finalize can do
+    // a single divide+clamp+pack pass.
+    const accumRGB = gaussianBlend ? new Float32Array(3 * outW * outH) : null;
+    const accumW = gaussianBlend ? new Float32Array(outW * outH) : null;
+    const gaussWeightCache = gaussianBlend ? new Map() : null;
 
     // The WebGPU canvas surface and the renderer's persistent output texture
     // are both bounded by maxTextureDimension2D (commonly 8192, sometimes
@@ -490,7 +536,27 @@ export class UpscalerEngine {
       }
     }
 
-    const srcData = this.#prepareSource(img, srcW, srcH, useGpuInput, perf);
+    // For upscaleBefore models, pre-rasterize an HR bicubic upsample on
+    // a 2D canvas and use that as the source for tile extraction. The
+    // GPU extractor and CPU getImageData paths both accept any canvas;
+    // they just see a larger texture/ImageData with HR coordinates.
+    let extractImg = img;
+    let extractW = srcW;
+    let extractH = srcH;
+    if (this.#upscaleBefore) {
+      const hrCanvas = document.createElement('canvas');
+      hrCanvas.width = outW;
+      hrCanvas.height = outH;
+      const hrCtx = hrCanvas.getContext('2d');
+      hrCtx.imageSmoothingEnabled = true;
+      hrCtx.imageSmoothingQuality = 'high';
+      hrCtx.drawImage(img, 0, 0, outW, outH);
+      extractImg = hrCanvas;
+      extractW = outW;
+      extractH = outH;
+    }
+
+    const srcData = this.#prepareSource(extractImg, extractW, extractH, useGpuInput, perf);
 
     const outCanvas = document.createElement('canvas');
     outCanvas.width = outW;
@@ -541,14 +607,17 @@ export class UpscalerEngine {
       const paddedTW = this.#alignToMultiple(tw);
       const paddedTH = this.#alignToMultiple(th);
       const tExtract = performance.now();
+      // In upscaleBefore mode the source canvas is HR-sized, so extraction
+      // coords/dims scale up. Equality checks against the LR-side padded
+      // values are unaffected (both sides scale by the same factor).
       const tensor = this.#createTileTensor(
         srcData,
-        tx,
-        ty,
-        tw,
-        th,
-        paddedTW,
-        paddedTH,
+        tx * pixelScale,
+        ty * pixelScale,
+        tw * pixelScale,
+        th * pixelScale,
+        paddedTW * pixelScale,
+        paddedTH * pixelScale,
         useGpuInput && paddedTW === tw && paddedTH === th,
       );
       const extractMs = performance.now() - tExtract;
@@ -597,12 +666,41 @@ export class UpscalerEngine {
         const tWrite = performance.now();
         const dims = outTensor.dims;
         const isNHWC = dims.length === 4 && dims[3] === 3 && dims[1] !== 3;
-        const decode = isNHWC ? hwcToImageData : chwToImageData;
-        const paddedImgData = decode(outData, outPaddedTW, outPaddedTH, 255 / this.#modelValueRange);
-        const imgData = outPaddedTW === outTW && outPaddedTH === outTH
-          ? paddedImgData
-          : this.#cropImageData(paddedImgData, outTW, outTH);
-        pasteTileCropped(outCtx, imgData, tx * scale, ty * scale, outW, outH, overlap * scale);
+        if (gaussianBlend) {
+          // Look up / build the weight kernel for this tile's HR-side
+          // content dimensions (outTH, outTW). Edge tiles can be smaller
+          // than interior tiles; cache by key.
+          const key = `${outTH}x${outTW}`;
+          let weights = gaussWeightCache.get(key);
+          if (!weights) {
+            weights = makeGaussianWeights2D(outTH, outTW);
+            gaussWeightCache.set(key, weights);
+          }
+          const valueScale = 255 / this.#modelValueRange;
+          const accumulator = isNHWC ? accumulateGaussianTileHWC : accumulateGaussianTileCHW;
+          accumulator(
+            accumRGB, accumW, outW, outH,
+            outData, outPaddedTW, outPaddedTH,
+            outTW, outTH, tx * scale, ty * scale,
+            weights, valueScale,
+          );
+          // Finalize just the rectangle this tile touched so the user
+          // sees progressive preview. Overlapping tiles will rewrite
+          // their shared region as they accumulate; the last tile to
+          // touch a pixel writes the same value a final full-canvas
+          // finalize would.
+          finalizeGaussianRegion(
+            outCtx, tx * scale, ty * scale, outTW, outTH,
+            outW, outH, accumRGB, accumW,
+          );
+        } else {
+          const decode = isNHWC ? hwcToImageData : chwToImageData;
+          const paddedImgData = decode(outData, outPaddedTW, outPaddedTH, 255 / this.#modelValueRange);
+          const imgData = outPaddedTW === outTW && outPaddedTH === outTH
+            ? paddedImgData
+            : this.#cropImageData(paddedImgData, outTW, outTH);
+          pasteTileCropped(outCtx, imgData, tx * scale, ty * scale, outW, outH, overlap * scale);
+        }
         renderMs = performance.now() - tWrite;
         perf.writeTile += renderMs;
       }

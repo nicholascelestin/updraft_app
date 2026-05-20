@@ -46,6 +46,8 @@ class CustomModelUploadDialog extends HTMLElement {
     const multipleInput = this.querySelector('.custom-model-multiple');
     const maxTileInput  = this.querySelector('.custom-model-maxtile');
     const precisionInput = this.querySelector('.custom-model-precision');
+    const upscaleBeforeInput = this.querySelector('.custom-model-upscalebefore');
+    const tileBlendInput = this.querySelector('.custom-model-tileblend');
     const sizeLabel     = this.querySelector('.custom-model-size');
     const detectLabel   = this.querySelector('.custom-model-detected');
     const errorLabel    = this.querySelector('.custom-model-error');
@@ -72,6 +74,8 @@ class CustomModelUploadDialog extends HTMLElement {
       multipleInput.value = String(Math.max(1, editModel.multipleOf || 1));
       maxTileInput.value = editModel.maxTileSize != null ? String(editModel.maxTileSize) : '';
       precisionInput.value = editModel.precision === 'fp16' ? 'fp16' : 'fp32';
+      upscaleBeforeInput.value = editModel.upscaleBefore ? 'true' : 'false';
+      tileBlendInput.value = editModel.tileBlend === 'gaussian' ? 'gaussian' : 'overlapCrop';
       sizeLabel.textContent = editModel.sizeMB != null
         ? `Model size: ~${editModel.sizeMB} MB`
         : 'Model size: -';
@@ -83,6 +87,8 @@ class CustomModelUploadDialog extends HTMLElement {
       multipleInput.value = '1';
       maxTileInput.value = '';
       precisionInput.value = 'fp32';
+      upscaleBeforeInput.value = 'false';
+      tileBlendInput.value = 'overlapCrop';
       sizeLabel.textContent = 'Model size: -';
     }
     errorLabel.textContent = '';
@@ -212,6 +218,8 @@ class CustomModelUploadDialog extends HTMLElement {
               multipleOf: multipleInput.value,
               maxTileSize: maxTileInput.value,
               precision: precisionInput.value,
+              upscaleBefore: upscaleBeforeInput.value === 'true',
+              tileBlend: tileBlendInput.value,
             });
             if (!model) {
               errorLabel.textContent = 'Model not found; it may have been removed.';
@@ -246,6 +254,8 @@ class CustomModelUploadDialog extends HTMLElement {
             multipleOf: multipleInput.value,
             maxTileSize: maxTileInput.value,
             precision: precisionInput.value,
+            upscaleBefore: upscaleBeforeInput.value === 'true',
+            tileBlend: tileBlendInput.value,
           });
           if (dialog.open) dialog.close();
           finish(model);
@@ -415,6 +425,20 @@ class CustomModelUploadDialog extends HTMLElement {
               <select class="custom-model-precision">
                 <option value="fp32">fp32</option>
                 <option value="fp16">fp16</option>
+              </select>
+            </label>
+            <label title="HR-space refiner — the engine bicubic-upsamples LR to HR before feeding tiles to the model. Multiple-of and Max tile stay in LR-pixel units.">
+              Upscale before
+              <select class="custom-model-upscalebefore">
+                <option value="false">No</option>
+                <option value="true">Yes</option>
+              </select>
+            </label>
+            <label title="Tile blend: 'overlap' is a half-overlap hard crop (fast). 'gaussian' is float32 weighted accumulation that hides seams on diffusion-style models — forces CPU readback path.">
+              Tile blend
+              <select class="custom-model-tileblend">
+                <option value="overlapCrop">overlap</option>
+                <option value="gaussian">gaussian</option>
               </select>
             </label>
           </div>

@@ -704,19 +704,33 @@ class UpscalerApp extends HTMLElement {
       .filter((v) => Number.isFinite(v) && v >= 1);
     const hasMaxTile = caps.length > 0;
     const maxTileSize = hasMaxTile ? Math.min(...caps) : Infinity;
+    // Fixed-input models (multipleOf === maxTileSize) have exactly one
+    // valid tile size; anything smaller still "works" via edge-replication
+    // padding but pays the same per-tile cost over a smaller real region.
+    // Disable the below-floor options in the dropdown so the choice is
+    // visibly the model's required input size.
+    const fixedSizes = capCandidates
+      .map((o) => {
+        const m = parseInt(o?.dataset?.multipleof, 10);
+        const c = parseInt(o?.dataset?.maxtilesize, 10);
+        return (Number.isFinite(m) && Number.isFinite(c) && m === c && m >= 1) ? c : null;
+      })
+      .filter((v) => v != null);
+    const tileFloor = fixedSizes.length ? Math.max(...fixedSizes) : 0;
     let largestEnabledTileVal = null;
     for (const opt of tileEl.options) {
       const optVal = parseInt(opt.value, 10);
       const isFullImage = optVal === 0;
       const exceeds = hasMaxTile && (isFullImage || optVal > maxTileSize);
-      opt.disabled = exceeds;
+      const belowFloor = tileFloor > 0 && !isFullImage && optVal < tileFloor;
+      opt.disabled = exceeds || belowFloor;
       if (!opt.disabled && Number.isFinite(optVal) && optVal > 0) {
         if (largestEnabledTileVal === null || optVal > largestEnabledTileVal) {
           largestEnabledTileVal = optVal;
         }
       }
     }
-    if (hasMaxTile && tileEl.selectedOptions[0]?.disabled && largestEnabledTileVal != null) {
+    if ((hasMaxTile || tileFloor > 0) && tileEl.selectedOptions[0]?.disabled && largestEnabledTileVal != null) {
       tileEl.value = String(largestEnabledTileVal);
       localStorage.setItem('upscaler_tilesize', tileEl.value);
     }
@@ -808,11 +822,13 @@ class UpscalerApp extends HTMLElement {
     const modelLayout = opt.dataset.layout || 'nchw';
     const modelInputMultiple = parseInt(opt.dataset.multipleof, 10) || 1;
     const modelPrecision = opt.dataset.precision === 'fp16' ? 'fp16' : 'fp32';
+    const upscaleBefore = opt.dataset.upscalebefore === 'true';
+    const tileBlend = opt.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop';
     const backend = opt.dataset.backend || this.#q('.backend-select').value;
     let tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const profile = this.#q('perf-monitor').visible;
 
-    const config = { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, backend, tileSize, profile };
+    const config = { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, backend, tileSize, profile };
 
     // Track every option that contributes to the run, so the tile-size cap
     // below covers the strictest model among the main + enabled passes —
@@ -836,6 +852,8 @@ class UpscalerApp extends HTMLElement {
         modelLayout: copt?.dataset.layout || 'nchw',
         modelInputMultiple: parseInt(copt?.dataset.multipleof, 10) || 1,
         modelPrecision: copt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
+        upscaleBefore: copt?.dataset.upscalebefore === 'true',
+        tileBlend: copt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
         backend: copt?.dataset.backend || backend,
       };
     } else {
@@ -849,6 +867,8 @@ class UpscalerApp extends HTMLElement {
           modelLayout: aopt?.dataset.layout || 'nchw',
           modelInputMultiple: parseInt(aopt?.dataset.multipleof, 10) || 1,
           modelPrecision: aopt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
+          upscaleBefore: aopt?.dataset.upscalebefore === 'true',
+          tileBlend: aopt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
           backend: aopt?.dataset.backend || backend,
           blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
         };
@@ -864,6 +884,8 @@ class UpscalerApp extends HTMLElement {
           modelLayout: fopt?.dataset.layout || 'nchw',
           modelInputMultiple: parseInt(fopt?.dataset.multipleof, 10) || 1,
           modelPrecision: fopt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
+          upscaleBefore: fopt?.dataset.upscalebefore === 'true',
+          tileBlend: fopt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
           backend: fopt?.dataset.backend || backend,
           paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
           featherPx: 16,
@@ -879,6 +901,23 @@ class UpscalerApp extends HTMLElement {
     // engine never feeds anything past any model's limit. Combined with
     // each model's modelInputMultiple == maxTileSize, every padded tile
     // lands at exactly the cap.
+    //
+    // When multipleOf === maxTileSize the model has a *fixed* input size:
+    // smaller user-selected tiles still work via edge-replication padding,
+    // but pay the same per-tile inference cost over a smaller real region.
+    // Floor the tile size to the fixed size so the user doesn't silently
+    // pay 4x for picking a smaller number.
+    const fixedSizes = optionsForClamp
+      .map((o) => {
+        const m = parseInt(o?.dataset?.multipleof, 10);
+        const c = parseInt(o?.dataset?.maxtilesize, 10);
+        return (Number.isFinite(m) && Number.isFinite(c) && m === c && m >= 1) ? c : null;
+      })
+      .filter((v) => v != null);
+    if (fixedSizes.length) {
+      const floor = Math.max(...fixedSizes);
+      if (tileSize > 0 && tileSize < floor) tileSize = floor;
+    }
     const caps = optionsForClamp
       .map((o) => parseInt(o?.dataset?.maxtilesize, 10))
       .filter((v) => Number.isFinite(v) && v >= 1);
