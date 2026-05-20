@@ -8,42 +8,27 @@
 
 import { getModelCache, isCustomModelUrl } from '../lib/fetch-progress.js';
 
-let _versions = null;
-export async function getVersions() {
-  if (_versions) return _versions;
-  const r = await fetch('desktop/versions.lock.json', { cache: 'no-store' });
-  if (!r.ok) throw new Error(`failed to load desktop/versions.lock.json: HTTP ${r.status}`);
-  _versions = await r.json();
-  return _versions;
+const _jsonCache = new Map();
+async function fetchJsonOnce(url) {
+  if (_jsonCache.has(url)) return _jsonCache.get(url);
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`failed to load ${url}: HTTP ${r.status}`);
+  const json = await r.json();
+  _jsonCache.set(url, json);
+  return json;
 }
 
-let _branding = null;
-export async function getBranding() {
-  if (_branding) return _branding;
-  const r = await fetch('branding.json', { cache: 'no-store' });
-  if (!r.ok) throw new Error(`failed to load branding.json: HTTP ${r.status}`);
-  _branding = await r.json();
-  return _branding;
-}
+export const getVersions = () => fetchJsonOnce('desktop/versions.lock.json');
+export const getBranding = () => fetchJsonOnce('branding.json');
 
-let _manifest = null;
-/**
- * Load the explicit list of files the desktop bundle should include. The
- * manifest at desktop/bundle-manifest.json is the source of truth — when
- * adding a new static file to the web app, add it there.
- *
- * Returns an array of repo-relative paths (no leading slash).
- */
+// desktop/bundle-manifest.json is the source of truth for files bundled into
+// the desktop build — add new static assets there.
 export async function getBundleManifest() {
-  if (_manifest) return _manifest;
-  const r = await fetch('desktop/bundle-manifest.json', { cache: 'no-store' });
-  if (!r.ok) throw new Error(`failed to load desktop/bundle-manifest.json: HTTP ${r.status}`);
-  const parsed = await r.json();
+  const parsed = await fetchJsonOnce('desktop/bundle-manifest.json');
   if (!Array.isArray(parsed?.files)) {
     throw new Error('desktop/bundle-manifest.json is malformed: expected { files: [...] }');
   }
-  _manifest = parsed.files;
-  return _manifest;
+  return parsed.files;
 }
 
 /**

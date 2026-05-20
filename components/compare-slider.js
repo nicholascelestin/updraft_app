@@ -8,6 +8,7 @@
  */
 
 import { morph } from 'lib/morph';
+import { canvasToBlobUrl } from 'lib/canvas';
 
 class CompareSlider extends HTMLElement {
   #dragging = false;
@@ -295,8 +296,7 @@ class CompareSlider extends HTMLElement {
   async #ensureDownloadURL() {
     if (this.#downloadSrc) return this.#downloadSrc;
     if (!this.#afterCanvas) return '';
-    const blob = await new Promise(r => this.#afterCanvas.toBlob(r, 'image/png'));
-    this.#lazyBlobURL = URL.createObjectURL(blob);
+    this.#lazyBlobURL = await canvasToBlobUrl(this.#afterCanvas);
     this.#downloadSrc = this.#lazyBlobURL;
     return this.#downloadSrc;
   }
@@ -304,9 +304,12 @@ class CompareSlider extends HTMLElement {
   async #prepareLazyDownload() {
     const canvas = this.#afterCanvas;
     if (!canvas) return;
-    const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-    if (this.#afterCanvas !== canvas) return;
-    this.#lazyBlobURL = URL.createObjectURL(blob);
+    const url = await canvasToBlobUrl(canvas);
+    if (this.#afterCanvas !== canvas) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+    this.#lazyBlobURL = url;
     this.#downloadSrc = this.#lazyBlobURL;
   }
 

@@ -88,64 +88,38 @@ export function makeGaussianWeights2D(tileH, tileW) {
 }
 
 /**
- * Accumulate one model-output tile, weighted by `weights`, into the
- * float32 canvas-sized buffers `accumRGB` (length 3*outW*outH, RGB-planar)
- * and `accumW` (length outW*outH).
- *
- * `srcRGB` is the model's float output as RGB-planar (CHW) or RGB-
- * interleaved (HWC) in [0, modelValueRange]. We crop to the top-left
- * (tileW × tileH) region in case the model output was padded.
+ * Accumulate one model-output tile into the canvas-sized float32 buffers
+ * `accumRGB` (3*outW*outH, RGB-planar) and `accumW` (outW*outH), weighted
+ * by `weights`. `srcRGB` is in [0, modelValueRange]; `layout` is 'chw' for
+ * RGB-planar input or 'hwc' for RGB-interleaved. Crops to the top-left
+ * (tileW × tileH) region if the model output was padded.
  */
-export function accumulateGaussianTileCHW(
+export function accumulateGaussianTile(
   accumRGB, accumW, outW, outH,
   srcRGB, srcStrideW, srcStrideH,
   tileW, tileH, destX, destY,
-  weights, valueScale,
+  weights, valueScale, layout,
 ) {
   const outPlane = outW * outH;
-  const srcPlane = srcStrideW * srcStrideH;
+  const isCHW = layout === 'chw';
+  const chanStride = isCHW ? srcStrideW * srcStrideH : 1;
+  const colStride = isCHW ? 1 : 3;
+  const rowStride = isCHW ? srcStrideW : srcStrideW * 3;
   for (let y = 0; y < tileH; y++) {
     const dy = destY + y;
     if (dy < 0 || dy >= outH) continue;
     const wRow = y * tileW;
-    const sRow = y * srcStrideW;
+    const sRow = y * rowStride;
     const dRow = dy * outW;
     for (let x = 0; x < tileW; x++) {
       const dx = destX + x;
       if (dx < 0 || dx >= outW) continue;
       const w = weights[wRow + x];
-      const srcIdx = sRow + x;
+      const srcIdx = sRow + x * colStride;
       const dstIdx = dRow + dx;
-      accumRGB[dstIdx]                = (accumRGB[dstIdx]                + srcRGB[srcIdx]                * valueScale * w);
-      accumRGB[outPlane + dstIdx]     = (accumRGB[outPlane + dstIdx]     + srcRGB[srcPlane + srcIdx]     * valueScale * w);
-      accumRGB[2 * outPlane + dstIdx] = (accumRGB[2 * outPlane + dstIdx] + srcRGB[2 * srcPlane + srcIdx] * valueScale * w);
-      accumW[dstIdx] += w;
-    }
-  }
-}
-
-export function accumulateGaussianTileHWC(
-  accumRGB, accumW, outW, outH,
-  srcRGB, srcStrideW, srcStrideH,
-  tileW, tileH, destX, destY,
-  weights, valueScale,
-) {
-  const outPlane = outW * outH;
-  for (let y = 0; y < tileH; y++) {
-    const dy = destY + y;
-    if (dy < 0 || dy >= outH) continue;
-    const wRow = y * tileW;
-    const sRow = y * srcStrideW * 3;
-    const dRow = dy * outW;
-    for (let x = 0; x < tileW; x++) {
-      const dx = destX + x;
-      if (dx < 0 || dx >= outW) continue;
-      const w = weights[wRow + x];
-      const srcIdx = sRow + x * 3;
-      const dstIdx = dRow + dx;
-      accumRGB[dstIdx]                = accumRGB[dstIdx]                + srcRGB[srcIdx]     * valueScale * w;
-      accumRGB[outPlane + dstIdx]     = accumRGB[outPlane + dstIdx]     + srcRGB[srcIdx + 1] * valueScale * w;
-      accumRGB[2 * outPlane + dstIdx] = accumRGB[2 * outPlane + dstIdx] + srcRGB[srcIdx + 2] * valueScale * w;
+      accumRGB[dstIdx]                += srcRGB[srcIdx]                  * valueScale * w;
+      accumRGB[outPlane + dstIdx]     += srcRGB[srcIdx + chanStride]     * valueScale * w;
+      accumRGB[2 * outPlane + dstIdx] += srcRGB[srcIdx + 2 * chanStride] * valueScale * w;
       accumW[dstIdx] += w;
     }
   }

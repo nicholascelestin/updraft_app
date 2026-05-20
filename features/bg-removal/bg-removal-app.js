@@ -3,6 +3,7 @@
  */
 
 import { morph } from 'lib/morph';
+import { canvasToBlobUrl, imageToBlobUrl } from 'lib/canvas';
 import 'components/image-drop-zone';
 import 'components/status-bar';
 import 'components/compare-slider';
@@ -30,19 +31,7 @@ function checkerboardComposite(transparentCanvas) {
   }
 
   ctx.drawImage(transparentCanvas, 0, 0);
-  return new Promise(resolve => c.toBlob(blob => resolve(URL.createObjectURL(blob)), 'image/png'));
-}
-
-function canvasToBlobUrl(canvas) {
-  return new Promise(resolve => canvas.toBlob(blob => resolve(URL.createObjectURL(blob)), 'image/png'));
-}
-
-function imageToBlobUrl(image) {
-  const c = document.createElement('canvas');
-  c.width = image.width;
-  c.height = image.height;
-  c.getContext('2d').drawImage(image, 0, 0);
-  return new Promise(resolve => c.toBlob(blob => resolve(URL.createObjectURL(blob)), 'image/png'));
+  return canvasToBlobUrl(c);
 }
 
 class BgRemovalApp extends HTMLElement {
@@ -112,8 +101,6 @@ class BgRemovalApp extends HTMLElement {
     const savedMode = localStorage.getItem('bgremoval_view_mode');
     if (BgRemovalApp.#VIEW_MODES.includes(savedMode)) {
       this.#viewState.mode = savedMode;
-    } else if (localStorage.getItem('bgremoval_view_expanded') === '1') {
-      this.#viewState.mode = 'fit-height';
     }
     this.#q('view-mode-controls').mode = this.#viewState.mode;
     this.#applyViewState();

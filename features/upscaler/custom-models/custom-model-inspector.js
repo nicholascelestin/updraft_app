@@ -1,25 +1,8 @@
+import { readMetaEntry, isFp16InputType } from 'lib/onnx-meta';
+
 function normalizeDims(dims) {
   if (!Array.isArray(dims)) return [];
   return dims.map((d) => (typeof d === 'number' ? d : Number.NaN));
-}
-
-/**
- * ORT-Web 1.18+ exposes `session.inputMetadata` / `outputMetadata` as a
- * readonly array of ValueMetadata, ordered to match `inputNames` /
- * `outputNames`. Older versions exposed it as a Record keyed by tensor
- * name. We support both shapes so the inspector keeps working across ORT
- * upgrades, with a name-keyed fallback to the positional entry.
- */
-function readMetaEntry(metaCollection, name, index = 0) {
-  if (!metaCollection) return null;
-  if (Array.isArray(metaCollection)) {
-    if (name) {
-      const byName = metaCollection.find((m) => m?.name === name);
-      if (byName) return byName;
-    }
-    return metaCollection[index] || null;
-  }
-  return (name && metaCollection[name]) || null;
 }
 
 /**
@@ -67,12 +50,6 @@ function rangeFromInputType(inputType) {
   if (typeof inputType !== 'string') return 1;
   if (inputType.includes('uint8') || inputType.includes('int8')) return 255;
   return 1;
-}
-
-function precisionFromInputType(inputType) {
-  return typeof inputType === 'string' && inputType.toLowerCase().includes('float16')
-    ? 'fp16'
-    : 'fp32';
 }
 
 function createProbeTensor(ort, inputType, layout, size, range) {
@@ -251,7 +228,7 @@ export class CustomModelInspector {
       const layout = detectLayout(inDims);
       const inputType = inMeta?.type || 'float32';
       const range = rangeFromInputType(inputType);
-      const precision = precisionFromInputType(inputType);
+      const precision = isFp16InputType(inputType) ? 'fp16' : 'fp32';
       const notes = [];
       if (precision === 'fp16' && probeBackend !== 'webgpu') {
         notes.push('This model is fp16 but probing fell back to CPU/WASM, which has limited fp16 op coverage. Probe results may be unreliable; the model itself will require WebGPU at run time.');

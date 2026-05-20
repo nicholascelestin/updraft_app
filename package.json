@@ -5,7 +5,6 @@
   "private": true,
   "scripts": {
     "start": "npx serve -l 8081",
-    "build:chrome-extension": "node build-chrome-extension.mjs",
     "deploy": "node deploy.js",
     "deploy:local": "node deploy.js --local"
   },

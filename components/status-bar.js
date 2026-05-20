@@ -3,7 +3,8 @@
  */
 
 import { morph } from 'lib/morph';
-import { esc } from 'lib/escape';
+
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 class StatusBar extends HTMLElement {
   #msg = '';

@@ -3,15 +3,17 @@
  * Only the Pipeline class is exported; everything else is module-private.
  */
 
-import { UpscalerEngine } from './upscaler-engine.js';
-import { FaceDetectorEngine } from './face-detector-engine.js';
+import { UpscalerEngine } from './engine/upscaler-engine.js';
+import { FaceDetectorEngine } from './engine/face-detector-engine.js';
 import {
   expandRect,
   cropToCanvas,
   compositeFeathered,
-  computeFaceFeatherPx,
-} from './face-enhance.js';
-import { buildTileGrid } from './tiling.js';
+  computeFeatherPx,
+  ensureCanvas,
+  blendCanvas,
+} from 'lib/canvas';
+import { buildTileGrid } from './engine/tiling.js';
 
 // ---------------------------------------------------------------------------
 // Engine pool — caches engines by tag, recreates when config diverges.
@@ -68,31 +70,6 @@ class EnginePool {
     }
     this.#slots.clear();
   }
-}
-
-function clamp(v, min, max) {
-  return v < min ? min : v > max ? max : v;
-}
-
-function ensureCanvas(imageLike) {
-  if (imageLike?.getContext?.('2d')) return imageLike;
-  const copy = document.createElement('canvas');
-  copy.width = imageLike.width;
-  copy.height = imageLike.height;
-  copy.getContext('2d').drawImage(imageLike, 0, 0);
-  return copy;
-}
-
-function blendCanvas(destCanvas, srcCanvas, opacity) {
-  const alpha = clamp(opacity, 0, 1);
-  if (alpha <= 0) return destCanvas;
-  const ctx = destCanvas.getContext('2d');
-  if (!ctx) return destCanvas;
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.drawImage(srcCanvas, 0, 0, destCanvas.width, destCanvas.height);
-  ctx.restore();
-  return destCanvas;
 }
 
 // ---------------------------------------------------------------------------
@@ -345,9 +322,9 @@ const enhanceFacesStep = {
       const roiOutX = roi.x * scale;
       const roiOutY = roi.y * scale;
       compositeFeathered(canvas, patch, roiOutX, roiOutY, {
-        featherPx: computeFaceFeatherPx({
+        featherPx: computeFeatherPx({
           configuredFeatherPx: face.featherPx ?? 16,
-          faceW: det.w, faceH: det.h,
+          regionW: det.w, regionH: det.h,
           patchW: tw, patchH: th,
           paddingPx: face.paddingPx,
           scale,

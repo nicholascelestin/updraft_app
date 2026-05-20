@@ -142,7 +142,6 @@ function decodeRawYunet(results, scoreThreshold, srcW, srcH, padW, padH) {
   const outByName = new Map(Object.entries(results));
   const faces = [];
   const strides = [8, 16, 32];
-  const perStride = {};
 
   for (const stride of strides) {
     const cls = outByName.get(`cls_${stride}`);
@@ -153,7 +152,6 @@ function decodeRawYunet(results, scoreThreshold, srcW, srcH, padW, padH) {
     const fmW = Math.floor(padW / stride);
     const fmH = Math.floor(padH / stride);
     const anchorCount = fmW * fmH;
-    const before = faces.length;
 
     for (let i = 0; i < anchorCount; i++) {
       const clsVec = readFeatureVector(cls, i, 1);
@@ -186,14 +184,7 @@ function decodeRawYunet(results, scoreThreshold, srcW, srcH, padW, padH) {
         score,
       });
     }
-
-    perStride[stride] = { anchors: anchorCount, hits: faces.length - before };
   }
-
-  console.info(
-    '[FaceDetectorEngine] Raw decode per stride:',
-    Object.entries(perStride).map(([s, v]) => `stride=${s} anchors=${v.anchors} hits=${v.hits}`).join(', '),
-  );
 
   return faces;
 }
@@ -203,8 +194,6 @@ export class FaceDetectorEngine {
   #modelBuffer = null;
   #currentDetectorKey = null;
   #activeBackend = null;
-  #loggedOutputMeta = false;
-
   get isLoaded() { return this.#session !== null; }
   get activeBackend() { return this.#activeBackend; }
   get currentDetector() { return this.#currentDetectorKey; }
@@ -318,49 +307,18 @@ export class FaceDetectorEngine {
     const ort = globalThis.ort;
     const tensor = new ort.Tensor('float32', input, [1, 3, inH, inW]);
     const inputName = this.#session.inputNames[0];
-    const t0 = performance.now();
     const results = await this.#session.run({ [inputName]: tensor });
-    const inferMs = performance.now() - t0;
     tensor.dispose();
 
-    if (!this.#loggedOutputMeta) {
-      const outputMeta = (this.#session.outputNames || []).map(name => {
-        const t = results[name];
-        const dims = t?.dims ? `[${t.dims.join(',')}]` : '[]';
-        let min = Number.POSITIVE_INFINITY;
-        let max = Number.NEGATIVE_INFINITY;
-        const d = t?.data;
-        if (d?.length) {
-          for (let i = 0; i < d.length; i++) {
-            if (d[i] < min) min = d[i];
-            if (d[i] > max) max = d[i];
-          }
-        } else {
-          min = 0;
-          max = 0;
-        }
-        return `${name}${dims} min=${Number(min).toFixed(4)} max=${Number(max).toFixed(4)}`;
-      });
-      console.info('[FaceDetectorEngine] Output tensors:', outputMeta.join(' | '));
-      this.#loggedOutputMeta = true;
-    }
-
-    console.info(
-      `[FaceDetectorEngine] Inference done (${detectorKey}) in ${inferMs.toFixed(1)}ms. input=${inW}x${inH}, source=${srcW}x${srcH}, score>=${minScore}, iou<=${maxIou}, topK=${maxKeep}`,
-    );
-
     let candidates = [];
-    let decodePath;
     const outputNames = this.#session.outputNames || [];
     if (outputNames.length === 1) {
       const raw = results[outputNames[0]];
       candidates = parseDecodedDetections(raw, minScore, srcW, srcH, inW, inH);
-      if (candidates.length) decodePath = 'single-tensor (pre-decoded)';
     }
 
     if (!candidates.length) {
       candidates = decodeRawYunet(results, minScore, srcW, srcH, inW, inH);
-      decodePath = `multi-tensor (${outputNames.length} outputs)`;
     }
 
     for (const name of outputNames) {
@@ -372,33 +330,6 @@ export class FaceDetectorEngine {
       maxIou,
       maxKeep,
     );
-
-    const suppressed = candidates.length - filtered.length;
-    console.info(
-      `[FaceDetectorEngine] Decode path: ${decodePath}. Candidates: ${candidates.length}, kept: ${filtered.length}, suppressed by NMS: ${suppressed}`,
-    );
-
-    if (candidates.length) {
-      const scores = candidates.map(f => f.score).sort((a, b) => b - a);
-      const scoreMin = scores[scores.length - 1];
-      const scoreMax = scores[0];
-      const scoreMed = scores[Math.floor(scores.length / 2)];
-      console.info(
-        `[FaceDetectorEngine] Candidate scores: min=${scoreMin.toFixed(3)}, median=${scoreMed.toFixed(3)}, max=${scoreMax.toFixed(3)}`,
-      );
-    }
-
-    if (filtered.length) {
-      const imgArea = srcW * srcH;
-      filtered.forEach((f, i) => {
-        const pct = ((f.w * f.h) / imgArea * 100).toFixed(1);
-        console.info(
-          `[FaceDetectorEngine]   face #${i + 1}: bbox=[${f.x.toFixed(1)}, ${f.y.toFixed(1)}, ${f.w.toFixed(1)}, ${f.h.toFixed(1)}] score=${f.score.toFixed(3)} area=${pct}% of image`,
-        );
-      });
-    } else {
-      console.info('[FaceDetectorEngine] No faces detected.');
-    }
 
     return filtered.map(face => ({
       ...face,

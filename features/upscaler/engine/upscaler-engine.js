@@ -12,10 +12,10 @@ import {
   pasteTileCropped,
   overlapCrop,
   makeGaussianWeights2D,
-  accumulateGaussianTileCHW,
-  accumulateGaussianTileHWC,
+  accumulateGaussianTile,
   finalizeGaussianRegion,
 } from './tiling.js';
+import { readMetaEntry, isFp16InputType } from 'lib/onnx-meta';
 
 const DEFAULT_SCALE = 4;
 const DEFAULT_OVERLAP = 16;
@@ -130,24 +130,6 @@ function hwcToImageData(hwcData, width, height, valueScale) {
   return imgData;
 }
 
-/**
- * ORT-Web 1.18+ exposes `session.inputMetadata` / `outputMetadata` as a
- * readonly array of ValueMetadata, ordered to match `inputNames` /
- * `outputNames`. Older versions exposed it as a Record keyed by tensor
- * name. Accept both shapes so behavior is stable across ORT upgrades.
- */
-function readSessionMetaEntry(metaCollection, name, index = 0) {
-  if (!metaCollection) return null;
-  if (Array.isArray(metaCollection)) {
-    if (name) {
-      const byName = metaCollection.find((m) => m?.name === name);
-      if (byName) return byName;
-    }
-    return metaCollection[index] || null;
-  }
-  return (name && metaCollection[name]) || null;
-}
-
 // ---------------------------------------------------------------------------
 // fp16 packing — ORT-Web fp16 tensors take/return a Uint16Array of IEEE-754
 // binary16 bit patterns. We use the platform's Float16Array when available
@@ -221,21 +203,20 @@ function unpackFloat16BitsToFloat32(u16) {
   return out;
 }
 
-// ── ORT-Web WebGPU dispatch-overflow workaround ─────────────────────────
-// ORT-Web's program-manager.normalizeDispatchGroupSize reshuffles
-// dispatch shape (X, 1, 1) into (sqrt(X), sqrt(X), 1) whenever X exceeds
-// maxComputeWorkgroupsPerDimension (65535). The Conv2DMatMul and MatMul
-// shaders, though, interpret workgroupId.x as a column tile and
-// workgroupId.y as a row tile with hardcoded multipliers. After the
-// reshuffle they treat the synthesised Y as a row-tile index and the
-// row-bounds guard rejects ~99% of the writes, leaving most of the
-// output buffer uninitialised — visible as scrambled image content for
+// TODO(ort-web): remove this whole block when ORT-Web fixes
+// program-manager.ts normalizeDispatchGroupSize, which today does a lossy
+// rewrite of dispatch shape (X, 1, 1) → (sqrt(X), sqrt(X), 1) and breaks
+// the (X=col, Y=row) contract Conv2DMatMul and MatMul shaders expect.
+//
+// What goes wrong: ORT reshuffles whenever X > maxComputeWorkgroupsPerDimension
+// (65535). Conv2DMatMul/MatMul then treat the synthesised Y as a row-tile
+// index, the row-bounds guard rejects ~99% of writes, and the output
+// buffer is left mostly uninitialised — visible as scrambled output for
 // any model whose post-PixelShuffle activation has H*W > ~2.1M pixels.
-// Fix recovers the effective column from both workgroup ids when
-// dim_a_outer is small enough that the original dispatch Y was 1.
-// Upstream: program-manager.ts normalizeDispatchGroupSize is a lossy
-// rewrite that violates the (X=col, Y=row) contract Conv/MatMul shaders
-// expect; removable once a fix lands there.
+//
+// Workaround: monkey-patch device.createShaderModule to recover the
+// effective column from both workgroup ids when dim_a_outer is small
+// enough that the original dispatch Y was 1.
 
 const WGPU_DISPATCH_FIX_INSTALLED = Symbol.for('updraft.wgslDispatchOverflowFix');
 
@@ -427,13 +408,10 @@ export class UpscalerEngine {
     // can carry the wrong precision; the model graph itself doesn't lie.
     // Without this, the engine would build fp32 tensors for an fp16 model
     // and ORT would throw "Unexpected input data type" at the first run.
-    // Note: ORT-Web's inputMetadata is an array (1.18+) keyed positionally
-    // to inputNames — readSessionMetaEntry handles that shape plus the
-    // older Record-keyed-by-name form.
     const sessionInputName = this.#session.inputNames?.[0];
-    const sessionInMeta = readSessionMetaEntry(this.#session.inputMetadata, sessionInputName, 0);
+    const sessionInMeta = readMetaEntry(this.#session.inputMetadata, sessionInputName, 0);
     const declaredInputType = sessionInMeta?.type;
-    const detectedPrecision = String(declaredInputType || '').toLowerCase().includes('float16')
+    const detectedPrecision = isFp16InputType(declaredInputType)
       ? 'fp16'
       : 'fp32';
     if (detectedPrecision !== this.#modelPrecision) {
@@ -677,12 +655,11 @@ export class UpscalerEngine {
             gaussWeightCache.set(key, weights);
           }
           const valueScale = 255 / this.#modelValueRange;
-          const accumulator = isNHWC ? accumulateGaussianTileHWC : accumulateGaussianTileCHW;
-          accumulator(
+          accumulateGaussianTile(
             accumRGB, accumW, outW, outH,
             outData, outPaddedTW, outPaddedTH,
             outTW, outTH, tx * scale, ty * scale,
-            weights, valueScale,
+            weights, valueScale, isNHWC ? 'hwc' : 'chw',
           );
           // Finalize just the rectangle this tile touched so the user
           // sees progressive preview. Overlapping tiles will rewrite

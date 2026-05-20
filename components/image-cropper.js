@@ -6,6 +6,7 @@
  */
 
 import { morph } from 'lib/morph';
+import { cropToCanvas } from 'lib/canvas';
 
 class ImageCropper extends HTMLElement {
   #image = null;
@@ -96,13 +97,7 @@ class ImageCropper extends HTMLElement {
     const img = this.#image;
     if (!img) throw new Error('No image loaded');
     if (!this.#crop) return img;
-
-    const { x, y, w, h } = this.#crop;
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    canvas.getContext('2d').drawImage(img, x, y, w, h, 0, 0, w, h);
-    return canvas;
+    return cropToCanvas(img, this.#crop);
   }
 
   #resizeCanvas() {

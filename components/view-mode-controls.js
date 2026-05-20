@@ -8,7 +8,7 @@
  * Mode keys: 'fit-width' | 'fit-height' | 'one-to-one'.
  */
 
-export const VIEW_MODES = [
+const VIEW_MODES = [
   { key: 'fit-width',   label: 'Fit Width',   icon: 'fa-arrows-left-right' },
   { key: 'fit-height',  label: 'Fit Height',  icon: 'fa-arrows-up-down' },
   { key: 'one-to-one',  label: '1:1',         icon: 'fa-vector-square' },

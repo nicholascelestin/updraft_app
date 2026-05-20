@@ -55,7 +55,7 @@ export async function composeDesktopZip({
   let icnsBytes = null;
   if (target.os === 'darwin') {
     onProgress?.('Rendering app icon');
-    const svgText = new TextDecoder().decode(staticFiles['favicon.svg']);
+    const svgText = new TextDecoder().decode(staticFiles['assets/favicon.svg']);
     try {
       icnsBytes = await renderSvgToIcns(svgText);
     } catch (e) {
@@ -184,19 +184,4 @@ function composeLayout({
   }
 
   return { files: out, attrs };
-}
-
-/**
- * Estimate the final zip size from the staged inputs. We can't be precise
- * without actually running compression, but we can be honest:
- *   - Electron framework + ORT-Node + models + WASMs are all incompressible
- *     (or near-incompressible), so the zip ends up ~= sum of their byte
- *     sizes. Source files (HTML/CSS/JS) compress ~3x but they're a small
- *     fraction of total — call it "negligible savings."
- */
-export function estimateZipBytes({ electronZipBytes, ortTgzBytes, staticTreeBytes, modelBytes }) {
-  // The electron base ships as a zip with files already mostly stored.
-  // Our re-zip stores incompressible files (same byte cost). Total ≈ sum.
-  // Subtract the default_app.asar we drop (~1 MB).
-  return electronZipBytes + ortTgzBytes + staticTreeBytes + modelBytes - 1_000_000;
 }

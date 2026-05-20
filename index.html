@@ -5,17 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="dark">
     <title>AI Tools</title>
-    <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
-    <link rel="apple-touch-icon" sizes="180x180" href="favicon-180x180.png">
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32x32.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/favicon-180x180.png">
     <link rel="stylesheet" href="vendor/picocss/pico.min.css">
     <link rel="stylesheet" href="vendor/font-awesome/css/all.min.css">
-    <link rel="stylesheet" href="shared.css">
+    <link rel="stylesheet" href="assets/shared.css">
 </head>
 <body>
     <nav class="container-fluid">
         <ul>
-            <li class="brand"><strong>up<img src="favicon.svg" alt="" class="brand-icon">draft</strong></li>
+            <li class="brand"><strong>up<img src="assets/favicon.svg" alt="" class="brand-icon">draft</strong></li>
         </ul>
         <ul>
             <li><a href="#" data-feature="upscaler" aria-current="page">
@@ -42,10 +42,10 @@
     {
       "imports": {
         "lib/morph":                    "./lib/morph.js",
-        "lib/escape":                   "./lib/escape.js",
         "lib/fetch-progress":           "./lib/fetch-progress.js",
+        "lib/canvas":                   "./lib/canvas.js",
+        "lib/onnx-meta":                "./lib/onnx-meta.js",
         "components/image-drop-zone":   "./components/image-drop-zone.js",
-        "components/video-drop-zone":   "./components/video-drop-zone.js",
         "components/status-bar":        "./components/status-bar.js",
         "components/compare-slider":    "./components/compare-slider.js",
         "components/image-cropper":     "./components/image-cropper.js",

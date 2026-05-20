@@ -1,62 +1,9 @@
-/**
- * <upscaler-app> — orchestrates the image upscaler feature.
- * Delegates inference to Pipeline; owns abort control and presentation.
- */
-
 import { morph } from 'lib/morph';
 import { Pipeline } from './upscale-pipeline.js';
-import { modelOptionsHTML } from './model-registry.js';
-import {
-  deleteCustomModelByUrl,
-  getCustomModelByUrl,
-  getUploadCustomOptionHTML,
-  listCustomModels,
-} from './custom-model-store.js';
-import 'components/image-drop-zone';
-import 'components/status-bar';
-import 'components/image-cropper';
-import 'components/compare-slider';
-import 'components/view-mode-controls';
-import './upscale-preview.js';
-import './perf-monitor.js';
-import './custom-model-upload-dialog.js';
-
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-const UPLOAD_CUSTOM_VALUE = '__upload_custom__';
-
-// Single source of truth for localStorage <-> form control wiring.
-// `kind` is 'value' for inputs/selects, 'checked' for checkboxes.
-const PERSISTED_CONTROLS = [
-  { selector: '.tilesize-select',         key: 'upscaler_tilesize',                kind: 'value',   event: 'change' },
-  { selector: '.backend-select',          key: 'upscaler_backend',                 kind: 'value',   event: 'change' },
-  { selector: '.output-select',           key: 'upscaler_output',                  kind: 'value',   event: 'change' },
-  { selector: '.pass-all-enabled',        key: 'upscaler_pass_all_enabled',        kind: 'checked', event: 'change' },
-  { selector: '.pass-all-blend',          key: 'upscaler_pass_all_blend',          kind: 'value',   event: 'input' },
-  { selector: '.pass-all-model',          key: 'upscaler_pass_all_model',          kind: 'value',   event: 'change' },
-  { selector: '.pass-compare-enabled',    key: 'upscaler_pass_compare_enabled',    kind: 'checked', event: 'change' },
-  { selector: '.pass-compare-model',      key: 'upscaler_pass_compare_model',      kind: 'value',   event: 'change' },
-  { selector: '.detector-face-enabled',   key: 'upscaler_detector_face_enabled',   kind: 'checked', event: 'change' },
-  { selector: '.detector-face-padding',   key: 'upscaler_detector_face_padding_px', kind: 'value',   event: 'input' },
-  { selector: '.detector-face-score',     key: 'upscaler_detector_face_score',     kind: 'value',   event: 'input' },
-  { selector: '.detector-face-blend',     key: 'upscaler_detector_face_blend',     kind: 'value',   event: 'input' },
-  { selector: '.detector-face-model',     key: 'upscaler_detector_face_model',     kind: 'value',   event: 'change' },
-];
-
-function readControl(el, kind) {
-  return kind === 'checked' ? (el.checked ? '1' : '0') : el.value;
-}
-function writeControl(el, kind, saved) {
-  if (kind === 'checked') el.checked = saved === '1';
-  else el.value = saved;
-}
+import './ui/upscaler-controls.js';
+import './ui/upscaler-canvas-area.js';
+import './ui/upscaler-toolbar.js';
+import './ui/perf-monitor.js';
 
 /**
  * Format a pipeline/inference error for end users.
@@ -68,14 +15,6 @@ function writeControl(el, kind, saved) {
 function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, maxTileSize = null, precision = 'fp32', backend = null } = {}) {
   const raw = error?.message || String(error || 'Unknown error');
 
-  // fp16-on-CPU class of failures: ORT throws either an input-dtype mismatch
-  // (when the engine sends fp32 but the model declares fp16) or a kernel-
-  // not-found from the WASM EP for an op with no fp16 implementation. Both
-  // mean the same thing for the user when on CPU: the model needs WebGPU.
-  // When already on WebGPU, the dtype error means the engine's configured
-  // precision metadata was stale (typically a custom model uploaded before
-  // fp16 support existed) — the engine now self-corrects on next load, so
-  // simply running again should fix it.
   const isFp16DtypeError =
     /Unexpected input data type/i.test(raw) && /tensor\(float16\)/i.test(raw);
   const isFp16KernelMissing =
@@ -109,7 +48,7 @@ function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, max
   // not to bump Multiple-of — bumping it would push padded edge tiles past
   // the cap.
   if (Number.isFinite(maxTileSize) && maxTileSize >= 1) {
-    return `Model reshape failed: this model only accepts inputs up to ${maxTileSize}\u00d7${maxTileSize}. Reduce Tile size to \u2264 ${maxTileSize} and set Multiple-of = ${maxTileSize} so edge tiles get padded back into range. Raw error: ${raw}`;
+    return `Model reshape failed: this model only accepts inputs up to ${maxTileSize}×${maxTileSize}. Reduce Tile size to ≤ ${maxTileSize} and set Multiple-of = ${maxTileSize} so edge tiles get padded back into range. Raw error: ${raw}`;
   }
 
   let inferredMultiple = 0;
@@ -131,796 +70,333 @@ function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, max
   return `Model reshape failed (likely window-size constraint). Try setting Multiple-of to ${suggestedMultiple} (common values: 8/16/32/64) and/or switch Layout to ${altLayout}.${specificHint} If reducing the tile size below ~64 makes it work, the model may have a hard upper bound — set "Max tile" on the custom model. Raw error: ${raw}`;
 }
 
-class UpscalerApp extends HTMLElement {
-  #loadedImage = null;
-  #running = false;
-  #generation = 0;
-  #viewState = { mode: 'fit-width' };
-  static #VIEW_MODES = ['fit-width', 'fit-height', 'one-to-one'];
-  #customModels = [];
-  #previousModelValue = '';
-  #outputBaseLabels = null;
+const STEP_LABEL = {
+  tiledUpscale: 'Upscaling',
+  comparison: 'Comparison',
+  blendAll: 'All-pass',
+  detectFaces: 'Detecting',
+  enhanceFaces: 'Faces',
+};
 
+function scaleCanvasToOutput(srCanvas, image, outputScale) {
+  const targetScale = Math.max(1, outputScale || Math.round(srCanvas.width / image.width) || 1);
+  const w = image.width * targetScale;
+  const h = image.height * targetScale;
+  if (srCanvas.width === w && srCanvas.height === h) return srCanvas;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(srCanvas, 0, 0, w, h);
+  return out;
+}
+
+function makeComparisonCanvases(resultCanvas, image, outputScale) {
+  const afterCanvas = scaleCanvasToOutput(resultCanvas, image, outputScale);
+  const w = afterCanvas.width;
+  const h = afterCanvas.height;
+  const beforeCanvas = document.createElement('canvas');
+  beforeCanvas.width = w;
+  beforeCanvas.height = h;
+  const bCtx = beforeCanvas.getContext('2d');
+  bCtx.imageSmoothingEnabled = false;
+  bCtx.drawImage(image, 0, 0, w, h);
+  return { beforeCanvas, afterCanvas };
+}
+
+// For Comparison mode: both layers are SR canvases of the same size, so the
+// before slot is the base SR (no pixelated LR upscale) and the after slot
+// is the comparison SR. We still honor the user's Final Output downscale.
+function makeComparisonPairCanvases(baseSR, comparisonSR, image, outputScale) {
+  return {
+    beforeCanvas: scaleCanvasToOutput(baseSR, image, outputScale),
+    afterCanvas: scaleCanvasToOutput(comparisonSR, image, outputScale),
+  };
+}
+
+class UpscalerApp extends HTMLElement {
   #pipeline = new Pipeline();
   #abortController = null;
+  #running = false;
+  #generation = 0;
 
   connectedCallback() {
     this.#render();
-    this.#customModels = listCustomModels();
-    this.#refreshModelSelectOptions(localStorage.getItem('upscaler_model') || undefined);
-    this.#setupPersistence();
-    this.#setupViewStateSync();
-    this.#setupUpscaleActions();
-    this.#restoreSettings();
+    this.#wire();
+    this.#restoreViewState();
   }
 
   #q(sel) { return this.querySelector(sel); }
-  #isBuiltInResampler(modelOpt) { return !!modelOpt?.value?.startsWith('builtin:'); }
 
-  #getCustomModelOptionsHTML(selected) {
-    if (!this.#customModels.length) return '';
-    return this.#customModels.map((model) => {
-      const attrs = [
-        `value="${model.url}"`,
-        `data-scale="${model.scale}"`,
-        `data-range="${model.range || 1}"`,
-        `data-layout="${model.layout || 'nchw'}"`,
-        `data-multipleof="${model.multipleOf || 1}"`,
-        `data-sizemb="${model.sizeMB}"`,
-      ];
-      if (Number.isFinite(model.maxTileSize)) {
-        attrs.push(`data-maxtilesize="${model.maxTileSize}"`);
-      }
-      if (model.precision === 'fp16') attrs.push(`data-precision="fp16"`);
-      if (model.url === selected) attrs.push('selected');
-      const sizeStr = model.sizeMB != null ? ` (~${model.sizeMB}MB)` : '';
-      return `<option ${attrs.join(' ')}>${escapeHtml(model.label)}${sizeStr}</option>`;
-    }).join('\n              ');
-  }
+  // ── Wiring ─────────────────────────────────────────────────────────────
 
-  #refreshModelSelectOptions(selected) {
-    const modelEl = this.#q('.model-select');
-    if (!modelEl) return;
-    modelEl.innerHTML = [
-      modelOptionsHTML(undefined, { selected, includeResamplers: true }),
-      this.#getCustomModelOptionsHTML(selected),
-      getUploadCustomOptionHTML(),
-    ].filter(Boolean).join('\n              ');
-    if (selected) modelEl.value = selected;
-    if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
+  #wire() {
+    const controls   = this.#q('upscaler-controls');
+    const canvasArea = this.#q('upscaler-canvas-area');
+    const toolbar    = this.#q('upscaler-toolbar');
+    const perfMon    = this.#q('perf-monitor');
+    const cropHint   = ' — drag to crop (optional).';
 
-    // Pass selectors share the same custom-model list as the primary select.
-    // We only refresh their option lists — never their selection — so adding
-    // or editing a custom model from the main select doesn't disturb whatever
-    // the user has chosen for the all-pass / face-pass.
-    this.#refreshPassModelSelect('.pass-all-model');
-    this.#refreshPassModelSelect('.pass-compare-model');
-    this.#refreshPassModelSelect('.detector-face-model');
-  }
+    toolbar.statusBar.message = 'Load an image to begin.';
 
-  #refreshPassModelSelect(selector) {
-    const el = this.#q(selector);
-    if (!el) return;
-    const previousValue = el.value;
-    el.innerHTML = [
-      modelOptionsHTML(undefined, { selected: previousValue }),
-      this.#getCustomModelOptionsHTML(previousValue),
-    ].filter(Boolean).join('\n              ');
-    // Re-apply the previous selection if it still exists (covers the upload
-    // case where we want to keep the user's pass choice). If the previously
-    // selected custom model has just been deleted, fall back to the first
-    // option so the select is never left in an invalid state.
-    if (previousValue) {
-      el.value = previousValue;
-      if (!el.selectedOptions.length) el.selectedIndex = 0;
-    } else if (!el.selectedOptions.length) {
-      el.selectedIndex = 0;
-    }
-  }
-
-  // --- Pipeline helpers ---
-
-  #scaleCanvasToOutput(srCanvas, image, outputScale) {
-    const targetScale = Math.max(1, outputScale || Math.round(srCanvas.width / image.width) || 1);
-    const w = image.width * targetScale;
-    const h = image.height * targetScale;
-    if (srCanvas.width === w && srCanvas.height === h) return srCanvas;
-    const out = document.createElement('canvas');
-    out.width = w;
-    out.height = h;
-    const ctx = out.getContext('2d');
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(srCanvas, 0, 0, w, h);
-    return out;
-  }
-
-  #createComparisonCanvases(resultCanvas, image, outputScale) {
-    const afterCanvas = this.#scaleCanvasToOutput(resultCanvas, image, outputScale);
-    const w = afterCanvas.width;
-    const h = afterCanvas.height;
-
-    const beforeCanvas = document.createElement('canvas');
-    beforeCanvas.width = w;
-    beforeCanvas.height = h;
-    const bCtx = beforeCanvas.getContext('2d');
-    bCtx.imageSmoothingEnabled = false;
-    bCtx.drawImage(image, 0, 0, w, h);
-
-    return { beforeCanvas, afterCanvas };
-  }
-
-  // For Comparison mode: both layers are SR canvases of the same size, so the
-  // before slot is the base SR (no pixelated LR upscale) and the after slot
-  // is the comparison SR. We still honor the user's Final Output downscale.
-  #createComparisonPairCanvases(baseSR, comparisonSR, image, outputScale) {
-    return {
-      beforeCanvas: this.#scaleCanvasToOutput(baseSR, image, outputScale),
-      afterCanvas: this.#scaleCanvasToOutput(comparisonSR, image, outputScale),
-    };
-  }
-
-  // --- Event setup ---
-
-  #setupPersistence() {
-    for (const { selector, key, kind, event } of PERSISTED_CONTROLS) {
-      const el = this.#q(selector);
-      el.addEventListener(event, () => localStorage.setItem(key, readControl(el, kind)));
-    }
-  }
-
-  #setupViewStateSync() {
-    this.#q('view-mode-controls').addEventListener('mode-change', (e) => {
-      this.#viewState.mode = e.detail.mode;
-      this.#applyViewState();
-      this.#persistViewState();
-      // Scroll the visible canvas into view so the newly-sized image is
-      // actually on screen after a mode change.
-      this.#snapCenterVisibleCanvas();
-    });
-  }
-
-  #getVisibleCanvasElement() {
-    for (const sel of ['compare-slider', 'upscale-preview', 'image-cropper', 'image-drop-zone']) {
-      const el = this.#q(sel);
-      if (el && el.offsetParent !== null) return el;
-    }
-    return null;
-  }
-
-  #snapCenterVisibleCanvas() {
-    const el = this.#getVisibleCanvasElement();
-    if (!el) return;
-    requestAnimationFrame(() => {
-      const rect = el.getBoundingClientRect();
-      const vh = window.innerHeight;
-      const fullyVisible = rect.top >= 0 && rect.bottom <= vh;
-      if (fullyVisible) return;
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    });
-  }
-
-  #persistViewState() {
-    localStorage.setItem('upscaler_view_mode', this.#viewState.mode);
-  }
-
-  #setMode(mode) {
-    if (!UpscalerApp.#VIEW_MODES.includes(mode)) return;
-    if (this.#viewState.mode === mode) return;
-    this.#viewState.mode = mode;
-    const vmc = this.#q('view-mode-controls');
-    if (vmc) vmc.mode = mode;
-    this.#applyViewState();
-    this.#persistViewState();
-  }
-
-  #defaultModeForImage(image) {
-    const vw = window.innerWidth || 1;
-    const vh = window.innerHeight || 1;
-    const imgRatio = image.width / image.height;
-    const vpRatio = vw / vh;
-    return imgRatio >= vpRatio ? 'fit-width' : 'fit-height';
-  }
-
-  #applyViewState() {
-    const mode = this.#viewState.mode;
-    const isFitHeight = mode === 'fit-height';
-    const isOneToOne = mode === 'one-to-one';
-    for (const sel of ['image-cropper', 'upscale-preview', 'compare-slider']) {
-      const el = this.#q(sel);
-      if (!el) continue;
-      el.classList.toggle('expanded', isFitHeight);
-      el.classList.toggle('native-size', isOneToOne);
-    }
-  }
-
-  #setupUpscaleActions() {
-    const statusBar     = this.#q('status-bar');
-    const dropZone      = this.#q('image-drop-zone');
-    const cropper       = this.#q('image-cropper');
-    const preview       = this.#q('upscale-preview');
-    const compareSlider = this.#q('compare-slider');
-    const perfMonitor   = this.#q('perf-monitor');
-    const upscaleBtn    = this.#q('.upscale-btn');
-    const stopBtn       = this.#q('.stop-btn');
-    const startOverBtn  = this.#q('.startover-btn');
-    const clearCropBtn  = this.#q('.clear-crop-btn');
-    const backToCropBtn = this.#q('.back-to-crop-btn');
-    const openInTabBtn  = this.#q('.open-in-tab-btn');
-    const downloadBtn   = this.#q('.download-btn');
-    const toolbarLeft   = this.#q('.canvas-toolbar-left');
-    const toolbarRight  = this.#q('.canvas-toolbar-right');
-    const modelEl       = this.#q('.model-select');
-    const editCustomBtn = this.#q('.edit-custom-model-btn');
-    const deleteCustomBtn = this.#q('.delete-custom-model-btn');
-
-    const CROP_HINT = ' \u2014 drag to crop (optional).';
-
-    const showCompareControls = () => {
-      backToCropBtn.style.display = 'inline-block';
-      toolbarRight.hidden = false;
-    };
-    const hideCompareControls = () => {
-      backToCropBtn.style.display = 'none';
-      toolbarRight.hidden = true;
-    };
-
-    statusBar.message = 'Load an image to begin.';
-
-    this.#q('.perf-toggle-btn').addEventListener('click', () => {
-      perfMonitor.visible ? perfMonitor.hide() : perfMonitor.show();
+    // Status messages from controls (custom-model upload/edit/delete).
+    this.addEventListener('status-message', (e) => {
+      toolbar.statusBar.message = e.detail.message;
     });
 
-    this.#q('.clear-cache-btn').addEventListener('click', () => {
-      if (this.#running) return;
-      this.#pipeline.destroy();
-      statusBar.message = 'Model cache cleared.';
+    // Model change → update upscale button label.
+    this.addEventListener('model-change', (e) => {
+      toolbar.setUpscaleLabel(`${e.detail.verb} ${e.detail.scale}x`);
     });
 
-    const resetToStart = () => {
-      this.#loadedImage = null;
-      this.#running = false;
-      this.#generation++;
-      this.#abortController = null;
-      upscaleBtn.disabled = true;
-      stopBtn.style.display = 'none';
-      startOverBtn.style.display = 'none';
-      clearCropBtn.style.display = 'none';
-      hideCompareControls();
-      toolbarLeft.hidden = true;
-      cropper.hide();
-      preview.hide();
-      compareSlider.hide();
-      dropZone.show();
-      statusBar.message = 'Load an image to begin.';
-      statusBar.hideProgress();
-    };
-
-    const showReady = () => {
-      upscaleBtn.disabled = false;
-      startOverBtn.style.display = 'inline-block';
-      hideCompareControls();
-      toolbarLeft.hidden = false;
-      compareSlider.hide();
-      preview.hide();
-      dropZone.hide();
-      // The cropper preserves an existing crop selection across re-show
-      // when given the same image reference, so this is the round-trip
-      // path used by the Edit Crop button after an upscale.
-      cropper.show(this.#loadedImage);
-      const existingCrop = cropper.crop;
-      if (existingCrop) {
-        clearCropBtn.style.display = 'inline-block';
-        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${existingCrop.w}\u00d7${existingCrop.h}.`;
-      } else {
-        clearCropBtn.style.display = 'none';
-        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height}${CROP_HINT}`;
-      }
-      statusBar.hideProgress();
-    };
-
-    dropZone.addEventListener('image-loaded', (e) => {
+    // Image loaded → switch to ready phase, pick a default view mode that
+    // keeps the whole image on screen.
+    canvasArea.addEventListener('image-loaded', (e) => {
       if (this.#running) {
         this.#abortController?.abort();
         this.#running = false;
         this.#generation++;
         this.#abortController = null;
-        stopBtn.style.display = 'none';
-        this.#q('.clear-cache-btn').disabled = false;
       }
-      this.#loadedImage = e.detail.image;
-      // Default to whichever fit mode keeps the whole image on screen:
-      // fit-width when the image is at least as wide (relative to height)
-      // as the viewport, fit-height otherwise.
-      this.#setMode(this.#defaultModeForImage(this.#loadedImage));
-      showReady();
+      const img = e.detail.image;
+      this.#setMode(canvasArea.defaultModeForImage(img));
+      canvasArea.showCropping(img);
+      toolbar.state = 'ready';
+      toolbar.hasCrop = false;
+      toolbar.statusBar.message = `${img.width}×${img.height}${cropHint}`;
+      toolbar.statusBar.hideProgress();
     });
 
-    cropper.addEventListener('crop-changed', (e) => {
+    canvasArea.addEventListener('crop-changed', (e) => {
       const crop = e.detail.crop;
-      if (crop) {
-        clearCropBtn.style.display = 'inline-block';
-        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${crop.w}\u00d7${crop.h}.`;
-      } else {
-        clearCropBtn.style.display = 'none';
-        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height}${CROP_HINT}`;
-      }
+      const img = canvasArea.image;
+      toolbar.hasCrop = !!crop;
+      toolbar.statusBar.message = crop
+        ? `${img.width}×${img.height} — crop ${crop.w}×${crop.h}.`
+        : `${img.width}×${img.height}${cropHint}`;
     });
 
-    clearCropBtn.addEventListener('click', () => {
-      cropper.clearCrop();
+    // View mode (toolbar → canvas).
+    toolbar.addEventListener('view-mode-change', (e) => {
+      this.#setMode(e.detail.mode);
+      canvasArea.snapCenterVisible();
     });
 
-    modelEl.addEventListener('change', async () => {
-      if (modelEl.value === UPLOAD_CUSTOM_VALUE) {
-        const previousOption = Array.from(modelEl.options).find((opt) => opt.value === this.#previousModelValue);
-        const defaultScale = parseInt(previousOption?.dataset.scale, 10) || 4;
-        const customModel = await this.#q('custom-model-upload-dialog').open({ defaultScale });
-        if (!customModel) {
-          modelEl.value = this.#previousModelValue;
-        } else {
-          this.#customModels = listCustomModels();
-          this.#refreshModelSelectOptions(customModel.url);
-          this.#previousModelValue = customModel.url;
-          statusBar.message = `Added "${customModel.label}" (${customModel.scale}x, ~${customModel.sizeMB}MB).`;
-        }
-      } else {
-        this.#previousModelValue = modelEl.value;
-      }
-      localStorage.setItem('upscaler_model', modelEl.value);
-      this.#updateModelBoundControls();
-      this.#updateCustomDeleteVisibility();
-    });
-
-    editCustomBtn.addEventListener('click', async () => {
-      if (this.#running) return;
-      const selected = getCustomModelByUrl(modelEl.value);
-      if (!selected) return;
-      const updated = await this.#q('custom-model-upload-dialog').open({ editModel: selected });
-      if (!updated) return;
-      this.#customModels = listCustomModels();
-      this.#refreshModelSelectOptions(updated.url);
-      this.#previousModelValue = updated.url;
-      localStorage.setItem('upscaler_model', updated.url);
-      this.#updateModelBoundControls();
-      this.#updateCustomDeleteVisibility();
-      statusBar.message = `Updated "${updated.label}".`;
-    });
-
-    deleteCustomBtn.addEventListener('click', async () => {
-      if (this.#running) return;
-      const selected = getCustomModelByUrl(modelEl.value);
-      if (!selected) return;
-      const ok = globalThis.confirm(`Delete custom model "${selected.label}"?\n\nThis will remove it from the local model cache.`);
-      if (!ok) return;
-      await deleteCustomModelByUrl(selected.url);
-      this.#customModels = listCustomModels();
-      this.#refreshModelSelectOptions();
-      if (modelEl.value === UPLOAD_CUSTOM_VALUE && modelEl.options.length > 1) {
-        modelEl.selectedIndex = 0;
-      }
-      this.#previousModelValue = modelEl.value;
-      localStorage.setItem('upscaler_model', modelEl.value);
-      this.#updateModelBoundControls();
-      this.#updateCustomDeleteVisibility();
-      statusBar.message = `Deleted "${selected.label}".`;
-    });
-
-    this.#q('.tilesize-select').addEventListener('change', () => {
-      this.#updateHangWarning();
-    });
-
-    // The fp16-on-WASM warning is backend-dependent, so refresh whenever the
-    // user toggles the active backend.
-    this.#q('.backend-select')?.addEventListener('change', () => {
-      this.#updateHangWarning();
-    });
-
-    // The pass selectors can also carry a max-tile cap (custom DAT models
-    // etc.), so toggling a pass on/off or switching its model has to refresh
-    // the tile-size dropdown's enabled set the same way the main model
-    // change does.
-    for (const sel of [
-      '.pass-all-enabled',
-      '.pass-all-model',
-      '.pass-compare-enabled',
-      '.pass-compare-model',
-      '.detector-face-enabled',
-      '.detector-face-model',
-    ]) {
-      this.#q(sel)?.addEventListener('change', () => this.#updateModelBoundControls());
-    }
-
-    this.#q('.pass-compare-enabled')?.addEventListener('change', () => {
-      this.#syncComparisonExclusion();
-    });
-
-    const wireMirror = (selector, mirrorSelector) => {
-      this.#q(selector).addEventListener('input', (e) => {
-        this.#q(mirrorSelector).textContent = e.target.value;
-      });
-    };
-    wireMirror('.pass-all-blend',      '.pass-all-blend-val');
-    wireMirror('.detector-face-score', '.detector-face-score-val');
-    wireMirror('.detector-face-blend', '.detector-face-blend-val');
-
-    // --- Upscale pipeline ---
-
-    upscaleBtn.addEventListener('click', async () => {
-      if (this.#running || !this.#loadedImage) return;
-      this.#running = true;
-      const gen = ++this.#generation;
-      this.#abortController = new AbortController();
-
-      upscaleBtn.disabled = true;
-      this.#q('.clear-cache-btn').disabled = true;
-      stopBtn.style.display = 'inline-block';
-      startOverBtn.style.display = 'none';
-      clearCropBtn.style.display = 'none';
-      hideCompareControls();
-      compareSlider.hide();
-
-      try {
-        statusBar.showProgress(0);
-        const inputImage = cropper.extractImage();
-        cropper.style.display = 'none';
-
-        const signal = this.#abortController.signal;
-        const parsedOutputScale = parseInt(this.#q('.output-select').value, 10);
-        const requestedOutputScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : 4;
-
-        const { beforeCanvas, afterCanvas, scale, comparison } = await this.#runLocalUpscale(
-          inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor,
-        );
-
-        statusBar.hideProgress();
-        const outW = inputImage.width * scale;
-        const outH = inputImage.height * scale;
-        statusBar.message = `Done: ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}.`;
-
-        await compareSlider.show(beforeCanvas, afterCanvas, {
-          downloadName: comparison ? `comparison_${scale}x.png` : `upscaled_${scale}x.png`,
-        });
-        this.#applyViewState();
-        preview.hide();
-        showCompareControls();
-
-      } catch (e) {
-        if (e.name === 'AbortError') {
-          statusBar.message = 'Cancelled.';
-        } else {
-          console.error(e);
-          const opt = this.#q('.model-select')?.selectedOptions?.[0];
-          const parsedMaxTile = parseInt(opt?.dataset?.maxtilesize, 10);
-          const activeBackend = opt?.dataset?.backend || this.#q('.backend-select')?.value;
-          statusBar.message = 'Error: ' + formatUpscaleErrorMessage(e, {
-            layout: opt?.dataset?.layout,
-            multipleOf: parseInt(opt?.dataset?.multipleof, 10),
-            maxTileSize: Number.isFinite(parsedMaxTile) ? parsedMaxTile : null,
-            precision: opt?.dataset?.precision === 'fp16' ? 'fp16' : 'fp32',
-            backend: activeBackend,
-          });
-        }
-        statusBar.hideProgress();
-        perfMonitor.stop();
-      }
-
-      if (this.#generation === gen) {
-        this.#running = false;
-        this.#abortController = null;
-        stopBtn.style.display = 'none';
-        startOverBtn.style.display = 'inline-block';
-        upscaleBtn.disabled = false;
-        this.#q('.clear-cache-btn').disabled = false;
-      }
-    });
-
-    stopBtn.addEventListener('click', () => {
-      this.#abortController?.abort();
-    });
-
-    startOverBtn.addEventListener('click', () => {
+    // Button events from toolbar.
+    toolbar.addEventListener('upscale-click',     () => this.#runUpscale());
+    toolbar.addEventListener('stop-click',        () => this.#abortController?.abort());
+    toolbar.addEventListener('start-over-click',  () => {
       if (this.#running) this.#abortController?.abort();
-      resetToStart();
+      this.#reset();
     });
+    toolbar.addEventListener('back-to-crop-click', () => {
+      if (this.#running || !canvasArea.image) return;
+      this.#showReady();
+    });
+    toolbar.addEventListener('clear-crop-click',  () => canvasArea.clearCrop());
+    toolbar.addEventListener('open-in-tab-click', () => canvasArea.openInTab());
+    toolbar.addEventListener('download-click',    () => canvasArea.download());
 
-    backToCropBtn.addEventListener('click', () => {
-      if (this.#running || !this.#loadedImage) return;
-      showReady();
+    // perf-toggle + clear-cache buttons live inside <upscaler-controls>
+    // but their actions are orchestrator-level (perf monitor, pipeline cache).
+    this.addEventListener('perf-toggle', () => {
+      perfMon.visible ? perfMon.hide() : perfMon.show();
     });
-
-    openInTabBtn.addEventListener('click', () => {
-      compareSlider.openInTab();
-    });
-    downloadBtn.addEventListener('click', () => {
-      compareSlider.download();
+    this.addEventListener('clear-cache', () => {
+      if (this.#running) return;
+      this.#pipeline.destroy();
+      toolbar.statusBar.message = 'Model cache cleared.';
     });
   }
 
-  #updateModelBoundControls() {
-    const modelEl = this.#q('.model-select');
-    const outputEl = this.#q('.output-select');
-    const tileEl = this.#q('.tilesize-select');
-    const upscaleBtn = this.#q('.upscale-btn');
+  // ── Phase helpers ──────────────────────────────────────────────────────
 
-    if (!this.#outputBaseLabels) {
-      this.#outputBaseLabels = new Map(Array.from(outputEl.options).map(opt => [
-        opt.value,
-        opt.textContent.replace(/\s+\(no downscale\)$/i, ''),
-      ]));
+  #showReady() {
+    const canvasArea = this.#q('upscaler-canvas-area');
+    const toolbar = this.#q('upscaler-toolbar');
+    const img = canvasArea.image;
+    canvasArea.showCropping(img);
+    const existingCrop = canvasArea.currentCrop;
+    toolbar.state = 'ready';
+    toolbar.hasCrop = !!existingCrop;
+    toolbar.statusBar.message = existingCrop
+      ? `${img.width}×${img.height} — crop ${existingCrop.w}×${existingCrop.h}.`
+      : `${img.width}×${img.height} — drag to crop (optional).`;
+    toolbar.statusBar.hideProgress();
+  }
+
+  #reset() {
+    this.#running = false;
+    this.#generation++;
+    this.#abortController = null;
+    const canvasArea = this.#q('upscaler-canvas-area');
+    const toolbar = this.#q('upscaler-toolbar');
+    canvasArea.showInitial();
+    toolbar.state = 'empty';
+    toolbar.hasCrop = false;
+    toolbar.statusBar.message = 'Load an image to begin.';
+    toolbar.statusBar.hideProgress();
+  }
+
+  // ── View-mode persistence (orchestrator-level so it survives across phases) ──
+
+  #setMode(mode) {
+    const canvasArea = this.#q('upscaler-canvas-area');
+    const toolbar = this.#q('upscaler-toolbar');
+    if (canvasArea.viewMode === mode) return;
+    canvasArea.viewMode = mode;
+    toolbar.viewMode = mode;
+    localStorage.setItem('upscaler_view_mode', mode);
+  }
+
+  #restoreViewState() {
+    const saved = localStorage.getItem('upscaler_view_mode');
+    const mode = ['fit-width', 'fit-height', 'one-to-one'].includes(saved) ? saved : 'fit-width';
+    this.#q('upscaler-canvas-area').viewMode = mode;
+    this.#q('upscaler-toolbar').viewMode = mode;
+  }
+
+  // ── Upscale run flow ───────────────────────────────────────────────────
+
+  async #runUpscale() {
+    if (this.#running) return;
+    const controls   = this.#q('upscaler-controls');
+    const canvasArea = this.#q('upscaler-canvas-area');
+    const toolbar    = this.#q('upscaler-toolbar');
+    const perfMon    = this.#q('perf-monitor');
+    const status     = toolbar.statusBar;
+
+    if (!canvasArea.image) return;
+    this.#running = true;
+    const gen = ++this.#generation;
+    this.#abortController = new AbortController();
+    const signal = this.#abortController.signal;
+
+    controls.isRunning = true;
+    toolbar.state = 'running';
+
+    try {
+      status.showProgress(0);
+      const inputImage = canvasArea.croppedImage;
+      const requestedOutputScale = controls.outputScale;
+
+      const { beforeCanvas, afterCanvas, scale, comparison } =
+        await this.#runPipeline(controls, canvasArea, perfMon, status, signal, inputImage, requestedOutputScale);
+
+      status.hideProgress();
+      const outW = inputImage.width * scale;
+      const outH = inputImage.height * scale;
+      status.message = `Done: ${inputImage.width}×${inputImage.height} → ${outW}×${outH}.`;
+
+      await canvasArea.showResult(beforeCanvas, afterCanvas, {
+        downloadName: comparison ? `comparison_${scale}x.png` : `upscaled_${scale}x.png`,
+      });
+      toolbar.state = 'done';
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        status.message = 'Cancelled.';
+      } else {
+        console.error(e);
+        const opt = controls.selectedModelOption;
+        const parsedMaxTile = parseInt(opt?.dataset?.maxtilesize, 10);
+        status.message = 'Error: ' + formatUpscaleErrorMessage(e, {
+          layout: opt?.dataset?.layout,
+          multipleOf: parseInt(opt?.dataset?.multipleof, 10),
+          maxTileSize: Number.isFinite(parsedMaxTile) ? parsedMaxTile : null,
+          precision: opt?.dataset?.precision === 'fp16' ? 'fp16' : 'fp32',
+          backend: controls.backend,
+        });
+      }
+      status.hideProgress();
+      perfMon.stop();
+      // Fall back to ready so the user can adjust and retry.
+      if (this.#generation === gen) toolbar.state = canvasArea.image ? 'ready' : 'empty';
     }
 
-    const modelOpt = modelEl.selectedOptions[0];
-    const scale = parseInt(modelOpt?.dataset.scale, 10) || 4;
-    const verb = scale === 1 ? 'Enhance' : 'Upscale';
-    const maxOutputScale = Math.max(1, Math.min(scale, 4));
-    const isBuiltInResampler = this.#isBuiltInResampler(modelOpt);
-    const previousOutputScale = parseInt(outputEl.value, 10);
+    if (this.#generation === gen) {
+      this.#running = false;
+      this.#abortController = null;
+      controls.isRunning = false;
+    }
+  }
 
-    upscaleBtn.innerHTML = `<i class="fas fa-wand-magic-sparkles"></i> <span class="btn-label">${verb} ${scale}x</span>`;
+  async #runPipeline(controls, canvasArea, perfMon, status, signal, inputImage, requestedOutputScale) {
+    const modelOpt = controls.selectedModelOption;
+    const isBuiltInResampler = !!modelOpt?.value?.startsWith('builtin:');
 
-    for (const opt of outputEl.options) {
-      const optionScale = parseInt(opt.value, 10) || 1;
-      const baseLabel = this.#outputBaseLabels.get(opt.value) || `${optionScale}x`;
-      opt.textContent = !isBuiltInResampler && optionScale === maxOutputScale
-        ? `${baseLabel} (no downscale)`
-        : baseLabel;
-      opt.disabled = optionScale > maxOutputScale;
+    if (isBuiltInResampler) {
+      return this.#runBuiltInResample(inputImage, modelOpt.value, requestedOutputScale, canvasArea, status, signal);
     }
 
-    const preferredScale = Number.isFinite(previousOutputScale) ? previousOutputScale : maxOutputScale;
-    const nextOutputScale = Math.max(1, Math.min(maxOutputScale, preferredScale));
-    outputEl.value = String(nextOutputScale);
-    localStorage.setItem('upscaler_output', outputEl.value);
-    this.#q('.backend-select').disabled = isBuiltInResampler;
-    tileEl.disabled = isBuiltInResampler;
+    const config = { ...controls.config, profile: perfMon.visible };
+    if (perfMon.visible) perfMon.start(config.backend);
 
-    // Compute the strictest tile-size cap from the main model plus any
-    // enabled pass models — so picking a 64-cap custom model as the
-    // all-pass also disables tiles >64 in the dropdown, even if the main
-    // model has no cap.
-    const capCandidates = [modelOpt];
-    if (this.#q('.pass-all-enabled')?.checked) {
-      capCandidates.push(this.#q('.pass-all-model')?.selectedOptions[0]);
-    }
-    if (this.#q('.pass-compare-enabled')?.checked) {
-      capCandidates.push(this.#q('.pass-compare-model')?.selectedOptions[0]);
-    }
-    if (this.#q('.detector-face-enabled')?.checked) {
-      capCandidates.push(this.#q('.detector-face-model')?.selectedOptions[0]);
-    }
-    const caps = capCandidates
-      .map((o) => parseInt(o?.dataset?.maxtilesize, 10))
-      .filter((v) => Number.isFinite(v) && v >= 1);
-    const hasMaxTile = caps.length > 0;
-    const maxTileSize = hasMaxTile ? Math.min(...caps) : Infinity;
-    // Fixed-input models (multipleOf === maxTileSize) have exactly one
-    // valid tile size; anything smaller still "works" via edge-replication
-    // padding but pays the same per-tile cost over a smaller real region.
-    // Disable the below-floor options in the dropdown so the choice is
-    // visibly the model's required input size.
-    const fixedSizes = capCandidates
-      .map((o) => {
-        const m = parseInt(o?.dataset?.multipleof, 10);
-        const c = parseInt(o?.dataset?.maxtilesize, 10);
-        return (Number.isFinite(m) && Number.isFinite(c) && m === c && m >= 1) ? c : null;
-      })
-      .filter((v) => v != null);
-    const tileFloor = fixedSizes.length ? Math.max(...fixedSizes) : 0;
-    let largestEnabledTileVal = null;
-    for (const opt of tileEl.options) {
-      const optVal = parseInt(opt.value, 10);
-      const isFullImage = optVal === 0;
-      const exceeds = hasMaxTile && (isFullImage || optVal > maxTileSize);
-      const belowFloor = tileFloor > 0 && !isFullImage && optVal < tileFloor;
-      opt.disabled = exceeds || belowFloor;
-      if (!opt.disabled && Number.isFinite(optVal) && optVal > 0) {
-        if (largestEnabledTileVal === null || optVal > largestEnabledTileVal) {
-          largestEnabledTileVal = optVal;
+    const outW = inputImage.width * config.scale;
+    const outH = inputImage.height * config.scale;
+    canvasArea.showPreview(inputImage, outW, outH);
+    status.message = `Upscaling ${inputImage.width}×${inputImage.height} → ${outW}×${outH}…`;
+
+    const result = await this.#pipeline.run(inputImage, config, {
+      onProgress(frac, msg) {
+        status.showProgress(frac);
+        status.message = msg;
+      },
+      onStage(stage) {
+        const label = STEP_LABEL[stage.step] || stage.step;
+        const prefix = label ? `${label}: ` : '';
+        if (typeof stage.progress === 'number') status.showProgress(stage.progress);
+        if (stage.message) status.message = prefix + stage.message;
+        else if (stage.phase === 'start') status.message = `${label}…`;
+        if (perfMon.visible) perfMon.updateStage(stage);
+      },
+      onTile: (info) => {
+        if (info.step === 'tiledUpscale' || info.step === 'comparison') {
+          canvasArea.drawPreviewTile(info);
+        } else if (info.step === 'blendAll') {
+          canvasArea.drawPreviewTile(info, { opacity: config.all?.blendOpacity ?? 1 });
+        } else if (info.step === 'enhanceFaces' && info.composited) {
+          canvasArea.drawPreviewTile(info);
         }
-      }
-    }
-    if ((hasMaxTile || tileFloor > 0) && tileEl.selectedOptions[0]?.disabled && largestEnabledTileVal != null) {
-      tileEl.value = String(largestEnabledTileVal);
-      localStorage.setItem('upscaler_tilesize', tileEl.value);
+        status.showProgress((info.index + 1) / info.total);
+        const label = STEP_LABEL[info.step] || info.step || 'Pass';
+        if (info.step === 'enhanceFaces') {
+          if (info.composited) {
+            status.message = `${label}: face ${(info.faceIndex ?? 0) + 1}/${info.faceTotal ?? '?'} done`;
+          } else {
+            const faceN = Number.isFinite(info.faceIndex) ? info.faceIndex + 1 : null;
+            const faceTotal = Number.isFinite(info.faceTotal) ? info.faceTotal : null;
+            const facePrefix = faceN && faceTotal ? `face ${faceN}/${faceTotal}, ` : '';
+            const faceTileTotal = Number.isFinite(info.faceTileTotal) ? info.faceTileTotal : info.total;
+            status.message = `${label}: ${facePrefix}tile ${info.index + 1}/${faceTileTotal}`;
+          }
+        } else {
+          status.message = `${label}: tile ${info.index + 1}/${info.total}`;
+        }
+        if (perfMon.visible) perfMon.update({
+          step: info.step,
+          index: info.index, total: info.total,
+          tileMs: info.tileMs, tilePixels: info.tilePixels, perf: info.perf,
+        });
+      },
+      signal,
+    });
+
+    if (result.perf || result.pipelinePerf) {
+      perfMon.showResults(result.perf, result.ortProfile, result.pipelinePerf);
     }
 
-    this.#updateHangWarning();
+    const outputScale = Math.max(1, Math.min(requestedOutputScale, result.scale));
+    if (config.comparison && result.comparisonImage) {
+      const canvases = makeComparisonPairCanvases(result.image, result.comparisonImage, inputImage, outputScale);
+      return { ...canvases, scale: outputScale, comparison: true };
+    }
+    const canvases = makeComparisonCanvases(result.image, inputImage, outputScale);
+    return { ...canvases, scale: outputScale, comparison: false };
   }
 
-  #updateCustomDeleteVisibility() {
-    const modelEl = this.#q('.model-select');
-    const editCustomBtn = this.#q('.edit-custom-model-btn');
-    const deleteCustomBtn = this.#q('.delete-custom-model-btn');
-    const selected = getCustomModelByUrl(modelEl.value);
-    deleteCustomBtn.hidden = !selected;
-    deleteCustomBtn.disabled = !selected || this.#running;
-    deleteCustomBtn.title = selected
-      ? `Delete custom model "${selected.label}"`
-      : 'Delete selected custom model';
-    editCustomBtn.hidden = !selected;
-    editCustomBtn.disabled = !selected || this.#running;
-    editCustomBtn.title = selected
-      ? `Edit custom model "${selected.label}"`
-      : 'Edit selected custom model';
-  }
-
-  #updateInputMirrors() {
-    this.#q('.pass-all-blend-val').textContent = this.#q('.pass-all-blend').value;
-    this.#q('.detector-face-score-val').textContent = this.#q('.detector-face-score').value;
-    this.#q('.detector-face-blend-val').textContent = this.#q('.detector-face-blend').value;
-  }
-
-  // When Comparison is on, the All/Faces passes are mutually exclusive — they
-  // would muddy what the slider is showing. We disable their controls and dim
-  // the rows, but we leave the underlying values untouched so toggling
-  // Comparison off restores the user's prior pass setup verbatim.
-  #syncComparisonExclusion() {
-    const compareOn = !!this.#q('.pass-compare-enabled')?.checked;
-    const otherRows = this.querySelectorAll('.detector-row:not(.pass-compare-row)');
-    for (const row of otherRows) {
-      row.classList.toggle('passes-disabled', compareOn);
-      for (const ctrl of row.querySelectorAll('input, select')) {
-        ctrl.disabled = compareOn;
-      }
-    }
-  }
-
-  #updateHangWarning() {
-    const warnEl = this.#q('.hang-warn');
-    const tipEl = this.#q('.hang-warn-tip');
-    const modelOpt = this.#q('.model-select').selectedOptions[0];
-    if (this.#isBuiltInResampler(modelOpt)) {
-      warnEl.classList.remove('visible');
-      return;
-    }
-    const sizeMB = parseFloat(modelOpt?.dataset.sizemb) || 0;
-    const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
-    const isLargeOnBigTile = sizeMB > 10 && tileSize > 128;
-
-    // fp16 inference effectively requires WebGPU — ORT-Web's WASM EP has very
-    // limited fp16 op coverage so most fp16 models throw a kernel-not-found
-    // or input-dtype error. Surface this before the user runs.
-    const backend = modelOpt?.dataset.backend || this.#q('.backend-select').value;
-    const isFp16OnCpu = modelOpt?.dataset.precision === 'fp16' && backend !== 'webgpu';
-
-    const show = isLargeOnBigTile || isFp16OnCpu;
-    warnEl.classList.toggle('visible', show);
-    if (!show) return;
-
-    const messages = [];
-    if (isFp16OnCpu) {
-      messages.push(
-        `<strong>fp16 model on CPU backend:</strong> this model uses 16-bit precision, which ONNX Runtime's WASM backend has very limited support for. Inference will almost certainly fail with an "unexpected input data type" or "kernel not found" error. Switch <em>Backend</em> to <em>GPU (WebGPU)</em>.`,
-      );
-    }
-    if (isLargeOnBigTile) {
-      messages.push(
-        `<strong>Large model with big tiles:</strong> models &gt;10 MB combined with tile sizes above 128 can block the browser's main thread for extended periods, causing the UI to freeze. You may not be able to click Stop until the current tile finishes. Consider reducing the tile size or using a smaller model.`,
-      );
-    }
-    tipEl.innerHTML = messages.join('<br><br>');
-  }
-
-  // --- Config extraction ---
-
-  #extractConfig() {
-    const opt = this.#q('.model-select').selectedOptions[0];
-    const modelUrl = opt.value;
-    const scale = parseInt(opt.dataset.scale, 10) || 4;
-    const modelValueRange = parseInt(opt.dataset.range, 10) || 1;
-    const modelLayout = opt.dataset.layout || 'nchw';
-    const modelInputMultiple = parseInt(opt.dataset.multipleof, 10) || 1;
-    const modelPrecision = opt.dataset.precision === 'fp16' ? 'fp16' : 'fp32';
-    const upscaleBefore = opt.dataset.upscalebefore === 'true';
-    const tileBlend = opt.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop';
-    const backend = opt.dataset.backend || this.#q('.backend-select').value;
-    let tileSize = parseInt(this.#q('.tilesize-select').value, 10);
-    const profile = this.#q('perf-monitor').visible;
-
-    const config = { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, backend, tileSize, profile };
-
-    // Track every option that contributes to the run, so the tile-size cap
-    // below covers the strictest model among the main + enabled passes —
-    // not just the primary one.
-    const optionsForClamp = [opt];
-
-    // Comparison runs the base + a second SR pass and shows them side-by-
-    // side; All/Faces would mutate the base canvas the slider is supposed to
-    // expose, so we suppress them entirely whenever Comparison is on. The UI
-    // already disables those rows — this is the matching defensive guard at
-    // the config layer.
-    const compareOn = this.#q('.pass-compare-enabled').checked;
-
-    if (compareOn) {
-      const copt = this.#q('.pass-compare-model').selectedOptions[0];
-      if (copt) optionsForClamp.push(copt);
-      config.comparison = {
-        modelUrl: copt?.value || modelUrl,
-        scale: parseInt(copt?.dataset.scale, 10) || scale,
-        modelValueRange: parseInt(copt?.dataset.range, 10) || 1,
-        modelLayout: copt?.dataset.layout || 'nchw',
-        modelInputMultiple: parseInt(copt?.dataset.multipleof, 10) || 1,
-        modelPrecision: copt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
-        upscaleBefore: copt?.dataset.upscalebefore === 'true',
-        tileBlend: copt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
-        backend: copt?.dataset.backend || backend,
-      };
-    } else {
-      if (this.#q('.pass-all-enabled').checked) {
-        const aopt = this.#q('.pass-all-model').selectedOptions[0];
-        if (aopt) optionsForClamp.push(aopt);
-        config.all = {
-          modelUrl: aopt?.value || modelUrl,
-          scale: parseInt(aopt?.dataset.scale, 10) || scale,
-          modelValueRange: parseInt(aopt?.dataset.range, 10) || 1,
-          modelLayout: aopt?.dataset.layout || 'nchw',
-          modelInputMultiple: parseInt(aopt?.dataset.multipleof, 10) || 1,
-          modelPrecision: aopt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
-          upscaleBefore: aopt?.dataset.upscalebefore === 'true',
-          tileBlend: aopt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
-          backend: aopt?.dataset.backend || backend,
-          blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
-        };
-      }
-
-      if (this.#q('.detector-face-enabled').checked) {
-        const fopt = this.#q('.detector-face-model').selectedOptions[0];
-        if (fopt) optionsForClamp.push(fopt);
-        config.face = {
-          modelUrl: fopt?.value || modelUrl,
-          scale: parseInt(fopt?.dataset.scale, 10) || scale,
-          modelValueRange: parseInt(fopt?.dataset.range, 10) || 1,
-          modelLayout: fopt?.dataset.layout || 'nchw',
-          modelInputMultiple: parseInt(fopt?.dataset.multipleof, 10) || 1,
-          modelPrecision: fopt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
-          upscaleBefore: fopt?.dataset.upscalebefore === 'true',
-          tileBlend: fopt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
-          backend: fopt?.dataset.backend || backend,
-          paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
-          featherPx: 16,
-          blendOpacity: parseFloat(this.#q('.detector-face-blend').value),
-          scoreThreshold: parseFloat(this.#q('.detector-face-score').value),
-        };
-      }
-    }
-
-    // Models with a hard input-size cap (e.g. DAT exports with baked-in
-    // window counts) only accept tiles up to a fixed dim. We clamp the
-    // pipeline's shared tile size to the strictest selected model so the
-    // engine never feeds anything past any model's limit. Combined with
-    // each model's modelInputMultiple == maxTileSize, every padded tile
-    // lands at exactly the cap.
-    //
-    // When multipleOf === maxTileSize the model has a *fixed* input size:
-    // smaller user-selected tiles still work via edge-replication padding,
-    // but pay the same per-tile inference cost over a smaller real region.
-    // Floor the tile size to the fixed size so the user doesn't silently
-    // pay 4x for picking a smaller number.
-    const fixedSizes = optionsForClamp
-      .map((o) => {
-        const m = parseInt(o?.dataset?.multipleof, 10);
-        const c = parseInt(o?.dataset?.maxtilesize, 10);
-        return (Number.isFinite(m) && Number.isFinite(c) && m === c && m >= 1) ? c : null;
-      })
-      .filter((v) => v != null);
-    if (fixedSizes.length) {
-      const floor = Math.max(...fixedSizes);
-      if (tileSize > 0 && tileSize < floor) tileSize = floor;
-    }
-    const caps = optionsForClamp
-      .map((o) => parseInt(o?.dataset?.maxtilesize, 10))
-      .filter((v) => Number.isFinite(v) && v >= 1);
-    if (caps.length) {
-      const minCap = Math.min(...caps);
-      if (tileSize <= 0 || tileSize > minCap) tileSize = minCap;
-      config.tileSize = tileSize;
-    }
-
-    return config;
-  }
-
-  async #runBuiltInResampleUpscale(inputImage, signal, requestedOutputScale, statusBar, preview, modelUrl) {
+  async #runBuiltInResample(inputImage, modelUrl, requestedOutputScale, canvasArea, status, signal) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
     const isLanczos = modelUrl === 'builtin:lanczos-4x';
@@ -929,9 +405,9 @@ class UpscalerApp extends HTMLElement {
     const outW = inputImage.width * scale;
     const outH = inputImage.height * scale;
 
-    preview.showDimmedPreview(inputImage, outW, outH);
-    statusBar.showProgress(0.25);
-    statusBar.message = `${methodLabel} resampling\u2026`;
+    canvasArea.showPreview(inputImage, outW, outH);
+    status.showProgress(0.25);
+    status.message = `${methodLabel} resampling…`;
 
     const resultCanvas = document.createElement('canvas');
     resultCanvas.width = outW;
@@ -943,595 +419,28 @@ class UpscalerApp extends HTMLElement {
 
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    statusBar.showProgress(1);
+    status.showProgress(1);
     const outputScale = Math.max(1, Math.min(requestedOutputScale, scale));
-    const canvases = this.#createComparisonCanvases(resultCanvas, inputImage, outputScale);
-    return { ...canvases, scale: outputScale };
-  }
-
-  // --- Pipeline branches ---
-
-  async #runLocalUpscale(inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor) {
-    const modelOpt = this.#q('.model-select').selectedOptions[0];
-    if (this.#isBuiltInResampler(modelOpt)) {
-      return this.#runBuiltInResampleUpscale(
-        inputImage,
-        signal,
-        requestedOutputScale,
-        statusBar,
-        preview,
-        modelOpt.value,
-      );
-    }
-
-    const config = this.#extractConfig();
-    if (perfMonitor.visible) perfMonitor.start(config.backend);
-    const stepLabel = {
-      tiledUpscale: 'Upscaling',
-      comparison: 'Comparison',
-      blendAll: 'All-pass',
-      detectFaces: 'Detecting',
-      enhanceFaces: 'Faces',
-    };
-
-    const outW = inputImage.width * config.scale;
-    const outH = inputImage.height * config.scale;
-    preview.showDimmedPreview(inputImage, outW, outH);
-    statusBar.message = `Upscaling ${inputImage.width}\u00d7${inputImage.height} \u2192 ${outW}\u00d7${outH}\u2026`;
-
-    const result = await this.#pipeline.run(inputImage, config, {
-      onProgress(frac, msg) {
-        statusBar.showProgress(frac);
-        statusBar.message = msg;
-      },
-      onStage(stage) {
-        const label = stepLabel[stage.step] || stage.step;
-        const prefix = label ? `${label}: ` : '';
-        if (typeof stage.progress === 'number') statusBar.showProgress(stage.progress);
-        if (stage.message) statusBar.message = prefix + stage.message;
-        else if (stage.phase === 'start') statusBar.message = `${label}…`;
-        if (perfMonitor.visible) perfMonitor.updateStage(stage);
-      },
-      onTile(info) {
-        if (info.step === 'tiledUpscale') {
-          preview.drawTile(info);
-        } else if (info.step === 'comparison') {
-          preview.drawTile(info);
-        } else if (info.step === 'blendAll') {
-          preview.drawTile(info, { opacity: config.all?.blendOpacity ?? 1 });
-        } else if (info.step === 'enhanceFaces' && info.composited) {
-          preview.drawTile(info);
-        }
-        statusBar.showProgress((info.index + 1) / info.total);
-        const label = stepLabel[info.step] || info.step || 'Pass';
-        if (info.step === 'enhanceFaces') {
-          if (info.composited) {
-            statusBar.message = `${label}: face ${(info.faceIndex ?? 0) + 1}/${info.faceTotal ?? '?'} done`;
-          } else {
-            const faceN = Number.isFinite(info.faceIndex) ? info.faceIndex + 1 : null;
-            const faceTotal = Number.isFinite(info.faceTotal) ? info.faceTotal : null;
-            const facePrefix = faceN && faceTotal ? `face ${faceN}/${faceTotal}, ` : '';
-            const faceTileTotal = Number.isFinite(info.faceTileTotal) ? info.faceTileTotal : info.total;
-            statusBar.message = `${label}: ${facePrefix}tile ${info.index + 1}/${faceTileTotal}`;
-          }
-        } else {
-          statusBar.message = `${label}: tile ${info.index + 1}/${info.total}`;
-        }
-        if (perfMonitor.visible) perfMonitor.update({
-          step: info.step,
-          index: info.index, total: info.total,
-          tileMs: info.tileMs, tilePixels: info.tilePixels, perf: info.perf,
-        });
-      },
-      signal,
-    });
-
-    if (result.perf || result.pipelinePerf) {
-      perfMonitor.showResults(result.perf, result.ortProfile, result.pipelinePerf);
-    }
-
-    const outputScale = Math.max(1, Math.min(requestedOutputScale, result.scale));
-    if (config.comparison && result.comparisonImage) {
-      const canvases = this.#createComparisonPairCanvases(
-        result.image, result.comparisonImage, inputImage, outputScale,
-      );
-      return { ...canvases, scale: outputScale, comparison: true };
-    }
-    const canvases = this.#createComparisonCanvases(result.image, inputImage, outputScale);
+    const canvases = makeComparisonCanvases(resultCanvas, inputImage, outputScale);
     return { ...canvases, scale: outputScale, comparison: false };
   }
 
-  // --- Settings ---
-
-  #restoreSettings() {
-    for (const { selector, key, kind } of PERSISTED_CONTROLS) {
-      const saved = localStorage.getItem(key);
-      if (saved === null) continue;
-      writeControl(this.#q(selector), kind, saved);
-    }
-    const savedMode = localStorage.getItem('upscaler_view_mode');
-    if (UpscalerApp.#VIEW_MODES.includes(savedMode)) {
-      this.#viewState.mode = savedMode;
-    } else if (localStorage.getItem('upscaler_view_expanded') === '1') {
-      this.#viewState.mode = 'fit-height';
-    }
-
-    const modelEl = this.#q('.model-select');
-    if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
-    this.#previousModelValue = modelEl.value;
-
-    this.#q('view-mode-controls').mode = this.#viewState.mode;
-    this.#applyViewState();
-    this.#syncComparisonExclusion();
-    this.#updateModelBoundControls();
-    this.#updateInputMirrors();
-    this.#updateCustomDeleteVisibility();
-  }
-
-  // --- Template ---
+  // ── Template ───────────────────────────────────────────────────────────
 
   #render() {
     morph(this, `
       <style>
-        upscaler-app .controls {
-          display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem;
-          align-items: center; margin-bottom: 1rem;
-        }
-        upscaler-app .controls label {
-          display: inline-flex; align-items: center; gap: 0.35rem;
-          font-size: 0.85rem; margin-bottom: 0; white-space: nowrap;
-        }
-        upscaler-app .controls select,
-        upscaler-app .controls input {
-          margin-bottom: 0; padding: 0.3rem 0.5rem;
-          font-size: 0.85rem; width: auto;
-        }
-        upscaler-app select:not([multiple], [size]) {
-          max-width: 100%;
-          padding-left: 0.7rem;
-          padding-right: 2.25rem;
-          padding-inline-start: 0.7rem;
-          padding-inline-end: 2.25rem;
-          background-position: center right 0.7rem;
-          overflow: hidden;
-          white-space: nowrap;
-        }
-        upscaler-app select.model-select,
-        upscaler-app select.pass-all-model,
-        upscaler-app select.pass-compare-model,
-        upscaler-app select.detector-face-model {
-          width: min(100%, 25em);
-          max-width: 25em;
-          text-overflow: ellipsis;
-        }
-        upscaler-app select.output-select {
-          width: min(100%, calc(2ch + 0.7rem + 2.25rem));
-          max-width: calc(2ch + 0.7rem + 2.25rem);
-        }
-        upscaler-app select.tilesize-select {
-          width: min(100%, calc(3ch + 0.7rem + 2.25rem));
-          max-width: calc(3ch + 0.7rem + 2.25rem);
-        }
-        upscaler-app select.backend-select {
-          width: min(100%, calc(4ch + 0.7rem + 2.25rem));
-          max-width: calc(4ch + 0.7rem + 2.25rem);
-        }
-        upscaler-app .delete-custom-model-btn,
-        upscaler-app .edit-custom-model-btn {
-          padding: 0.3rem 0.55rem;
-          min-width: 2rem;
-        }
-        upscaler-app .controls button {
-          margin-bottom: 0; padding: 0.4rem 0.8rem;
-          font-size: 0.85rem; width: auto;
-        }
-        upscaler-app .local-controls {
-          display: inline-flex; flex-wrap: wrap; gap: 0.4rem 0.75rem;
-          align-items: center;
-        }
-        upscaler-app .passes-panel {
-          margin-bottom: 1rem;
-          padding: 0.6rem 0.7rem;
-          border: 1px solid var(--pico-muted-border-color);
-          border-radius: var(--pico-border-radius);
-        }
-        upscaler-app .passes-panel > summary {
-          cursor: pointer;
-          font-size: 0.9rem;
-          user-select: none;
-          margin-bottom: 0;
-          padding: 0.15rem 0;
-        }
-        upscaler-app .detector-row {
-          display: grid;
-          grid-template-columns:
-            minmax(11rem, 1fr)
-            minmax(17rem, 2.2fr)
-            minmax(13rem, 1.2fr)
-            minmax(14rem, 1.35fr);
-          gap: 0.35rem 0.55rem;
-          align-items: center;
-          width: 100%;
-          max-width: none;
-          margin-top: 0.45rem;
-        }
-        upscaler-app .detector-row:first-of-type {
-          margin-top: 0;
-        }
-        upscaler-app .detector-row.passes-disabled {
-          opacity: 0.5;
-        }
-        upscaler-app .detector-row label {
-          margin-bottom: 0;
-          display: grid;
-          grid-template-columns: auto minmax(0, 1fr);
-          align-items: center;
-          column-gap: 0.35rem;
-          font-size: 0.85rem;
-          min-height: 2rem;
-          width: 100%;
-        }
-        upscaler-app .detector-row .check-control {
-          display: inline-flex;
-          align-items: center;
-          gap: 0.35rem;
-          width: auto;
-        }
-        upscaler-app .detector-row .range-control {
-          grid-template-columns: auto auto;
-        }
-        upscaler-app .detector-row .range-field {
-          display: inline-grid;
-          grid-auto-flow: column;
-          align-items: center;
-          column-gap: 0.3rem;
-        }
-        upscaler-app .detector-row .range-input {
-          width: 7rem;
-          vertical-align: middle;
-        }
-        upscaler-app .detector-row .range-value {
-          min-width: 4ch;
-          font-variant-numeric: tabular-nums;
-        }
-        upscaler-app .detector-row input,
-        upscaler-app .detector-row select {
-          margin-bottom: 0;
-        }
-        upscaler-app .detector-row input[type="checkbox"] {
-          margin-top: 0;
-        }
-        upscaler-app .detector-row .model-control select {
-          width: 100%;
-          min-width: 0;
-        }
-        upscaler-app .detector-row .model-control {
-          grid-template-columns: minmax(0, 1fr);
-        }
-        @media (max-width: 980px) {
-          upscaler-app .detector-row {
-            grid-template-columns: 1fr;
-          }
-        }
-        upscaler-app .hang-warn {
-          display: none;
-          position: relative;
-          color: var(--pico-del-color, #c62828);
-          font-size: 1rem;
-          cursor: help;
-          align-self: center;
-        }
-        upscaler-app .hang-warn.visible {
-          display: inline-flex;
-        }
-        upscaler-app .hang-warn .hang-warn-tip {
-          display: none;
-          position: absolute;
-          bottom: calc(100% + 0.45rem);
-          left: 50%;
-          transform: translateX(-50%);
-          background: var(--pico-card-background-color, #1e1e2e);
-          color: var(--pico-color, #cdd6f4);
-          border: 1px solid var(--pico-muted-border-color);
-          border-radius: var(--pico-border-radius);
-          padding: 0.5rem 0.65rem;
-          font-size: 0.78rem;
-          line-height: 1.4;
-          white-space: normal;
-          width: max-content;
-          max-width: 26rem;
-          z-index: 10;
-          pointer-events: none;
-          box-shadow: 0 2px 8px rgba(0,0,0,.25);
-        }
-        upscaler-app .hang-warn:hover .hang-warn-tip {
-          display: block;
-        }
         upscaler-app .canvas-stack {
           position: relative;
           background: rgba(0, 0, 0, 0.4);
           border-radius: var(--pico-border-radius);
           padding: 0.5rem;
         }
-        upscaler-app .canvas-toolbar-rail {
-          position: sticky;
-          top: 0.75rem;
-          height: 0;
-          z-index: 10;
-          pointer-events: none;
-        }
-        upscaler-app .canvas-toolbar {
-          position: absolute;
-          top: 0;
-          display: inline-flex;
-          gap: 0.25rem;
-          align-items: center;
-          padding: 0.25rem 0.3rem;
-          background: color-mix(in oklab, var(--pico-card-background-color, #1e1e2e) 32%, transparent);
-          border: 1px solid color-mix(in oklab, var(--pico-muted-border-color) 45%, transparent);
-          border-radius: var(--pico-border-radius);
-          box-shadow: 0 4px 18px rgba(0, 0, 0, 0.28);
-          backdrop-filter: blur(10px) saturate(1.1);
-          -webkit-backdrop-filter: blur(10px) saturate(1.1);
-          pointer-events: auto;
-          max-width: calc(100% - 1.5rem);
-        }
-        upscaler-app .canvas-toolbar-left {
-          left: 0.75rem;
-        }
-        upscaler-app .canvas-toolbar-right {
-          right: 0.75rem;
-        }
-        upscaler-app .canvas-toolbar[hidden] {
-          display: none;
-        }
-        upscaler-app .canvas-toolbar-stack-left {
-          position: absolute;
-          top: 0;
-          left: 0.75rem;
-          display: flex;
-          flex-direction: column;
-          align-items: flex-start;
-          gap: 0.25rem;
-          max-width: calc(100% - 1.5rem);
-          pointer-events: none;
-        }
-        upscaler-app .canvas-toolbar-stack-left > * {
-          pointer-events: auto;
-        }
-        upscaler-app .canvas-toolbar-stack-left > .canvas-toolbar {
-          position: static;
-          left: auto;
-          top: auto;
-          max-width: 100%;
-        }
-        upscaler-app .canvas-toolbar button {
-          margin-bottom: 0;
-          padding: 0.25rem 0.5rem;
-          font-size: 0.72rem;
-          line-height: 1.2;
-          width: auto;
-          white-space: nowrap;
-        }
-        upscaler-app .canvas-toolbar button.secondary,
-        upscaler-app .canvas-toolbar button.outline {
-          opacity: 0.78;
-          transition: opacity 0.15s ease;
-          background: transparent;
-          border-color: currentColor;
-          color: #fff;
-          mix-blend-mode: difference;
-        }
-        upscaler-app .canvas-toolbar button.secondary:hover,
-        upscaler-app .canvas-toolbar button.outline:hover,
-        upscaler-app .canvas-toolbar button.secondary:focus-visible,
-        upscaler-app .canvas-toolbar button.outline:focus-visible {
-          opacity: 1;
-          background: transparent;
-          border-color: currentColor;
-          color: #fff;
-        }
-        upscaler-app .canvas-toolbar button .fas {
-          font-size: 0.78em;
-          margin-right: 0.15rem;
-        }
-        upscaler-app .canvas-toolbar button .btn-label {
-          display: inline;
-        }
-        @media (max-width: 768px) {
-          upscaler-app .canvas-toolbar button .btn-label {
-            display: none;
-          }
-          upscaler-app .canvas-toolbar button .fas {
-            margin-right: 0;
-          }
-        }
-        upscaler-app .canvas-toolbar status-bar {
-          display: inline-flex;
-          flex-direction: column;
-          align-items: stretch;
-          justify-content: center;
-          gap: 0.15rem;
-          margin-left: 0.3rem;
-          min-width: 0;
-          max-width: 20rem;
-        }
-        upscaler-app .canvas-toolbar status-bar .status-text {
-          font-size: 0.68rem;
-          line-height: 1.25;
-          min-height: 0;
-          margin-bottom: 0;
-          color: #fff;
-          mix-blend-mode: difference;
-        }
-        upscaler-app .canvas-toolbar status-bar .progress-track {
-          width: 100%;
-          max-width: 180px;
-          height: 3px;
-          margin-bottom: 0;
-          mix-blend-mode: difference;
-        }
       </style>
-
-      <div class="controls">
-        <span class="local-controls">
-          <label>Model:
-            <select class="model-select">
-              ${modelOptionsHTML(undefined, { includeResamplers: true })}
-              ${getUploadCustomOptionHTML()}
-            </select>
-          </label>
-          <button class="secondary outline edit-custom-model-btn" type="button" hidden title="Edit selected custom model" aria-label="Edit selected custom model">
-            <i class="fas fa-pen"></i>
-          </button>
-          <button class="secondary outline delete-custom-model-btn" type="button" hidden title="Delete selected custom model" aria-label="Delete selected custom model">
-            <i class="fas fa-trash"></i>
-          </button>
-          <label>Backend:
-            <select class="backend-select">
-              <option value="webgpu">GPU (WebGPU)</option>
-              <option value="wasm">CPU (WASM)</option>
-            </select>
-          </label>
-          <label>Tile size:
-            <select class="tilesize-select">
-              <option value="64">64</option>
-              <option value="80">80</option>
-              <option value="128">128</option>
-              <option value="192" selected>192</option>
-              <option value="256">256</option>
-              <option value="384">384</option>
-              <option value="512">512</option>
-              <option value="0">Full image (no tiling)</option>
-            </select>
-          </label>
-          <label>Final Output:
-            <select class="output-select">
-              <option value="1">1x</option>
-              <option value="2">2x</option>
-              <option value="3">3x</option>
-              <option value="4" selected>4x (no downscale)</option>
-            </select>
-          </label>
-        </span>
-
-        <button class="perf-toggle-btn secondary outline" title="Toggle performance monitor">
-          <i class="fas fa-gauge-high"></i>
-        </button>
-        <span class="hang-warn" aria-label="Performance warning">
-          <i class="fas fa-triangle-exclamation"></i>
-          <span class="hang-warn-tip">
-            Large models (&gt;10 MB) with tile sizes above 128 can block the
-            browser's main thread for extended periods, causing the UI to freeze.
-            You may not be able to click Stop until the current tile finishes.
-            Consider reducing the tile size or using a smaller model.
-          </span>
-        </span>
-        <button class="clear-cache-btn secondary outline" hidden title="Clear cached ONNX models (frees memory)">
-          <i class="fas fa-broom"></i> Clear Cache
-        </button>
-      </div>
-
-      <details class="passes-panel">
-        <summary><i class="fas fa-user-check"></i> Additional Passes</summary>
-        <div class="detector-row pass-compare-row">
-          <label class="check-control">
-            <input class="pass-compare-enabled" type="checkbox">
-            Comparison
-          </label>
-          <label class="model-control">
-            <select class="pass-compare-model" aria-label="Comparison pass model">
-              ${modelOptionsHTML()}
-            </select>
-          </label>
-        </div>
-        <div class="detector-row pass-all-row">
-          <label class="check-control">
-            <input class="pass-all-enabled" type="checkbox">
-            All (full image blend)
-          </label>
-          <label class="model-control">
-            <select class="pass-all-model" aria-label="All pass model">
-              ${modelOptionsHTML()}
-            </select>
-          </label>
-          <label class="range-control" title="Blend opacity of the secondary full-image pass over the base upscale">
-            Blend:
-            <span class="range-field">
-              <input class="pass-all-blend range-input" type="range" min="0" max="1" step="0.05" value="0.40">
-              <span class="pass-all-blend-val range-value">0.40</span>
-            </span>
-          </label>
-        </div>
-        <div class="detector-row pass-faces-row">
-          <label class="check-control">
-            <input class="detector-face-enabled" type="checkbox">
-            Faces (YuNet)
-          </label>
-          <label class="model-control">
-            <select class="detector-face-model" aria-label="Face pass model">
-              ${modelOptionsHTML(undefined, { selected: 'models/RMBN_M4C8_FACES_x4.onnx' })}
-            </select>
-          </label>
-          <label class="range-control" title="Blend opacity of the face patch over the base upscale (1 = full replace, lower = transparent blend)">
-            Blend:
-            <span class="range-field">
-              <input class="detector-face-blend range-input" type="range" min="0" max="1" step="0.05" value="0.65">
-              <span class="detector-face-blend-val range-value">0.65</span>
-            </span>
-          </label>
-          <label hidden>Padding:
-            <input class="detector-face-padding" type="number" min="0" max="512" step="1" value="20" style="width:7ch">
-            px
-          </label>
-          <label class="range-control" title="Minimum face detection confidence">
-            Confidence Threshold:
-            <span class="range-field">
-              <input class="detector-face-score range-input" type="range" min="0.3" max="0.95" step="0.01" value="0.70">
-              <span class="detector-face-score-val range-value">0.70</span>
-            </span>
-          </label>
-        </div>
-      </details>
-
-      <custom-model-upload-dialog></custom-model-upload-dialog>
-
+      <upscaler-controls></upscaler-controls>
       <div class="canvas-stack">
-        <div class="canvas-toolbar-rail" aria-hidden="true">
-          <div class="canvas-toolbar-stack-left">
-            <div class="canvas-toolbar canvas-toolbar-left" hidden>
-              <button class="back-to-crop-btn secondary outline" style="display:none" type="button" title="Back to crop / change selection">
-                <i class="fas fa-arrow-left"></i><i class="fas fa-crop-simple"></i> <span class="btn-label">Edit Crop</span>
-              </button>
-              <button class="upscale-btn" disabled title="Upscale image">
-                <i class="fas fa-wand-magic-sparkles"></i> <span class="btn-label">Upscale 4x</span>
-              </button>
-              <button class="stop-btn secondary" style="display:none" title="Stop upscale">
-                <i class="fas fa-stop"></i> <span class="btn-label">Stop</span>
-              </button>
-              <view-mode-controls></view-mode-controls>
-              <button class="clear-crop-btn secondary outline" style="display:none" type="button" title="Clear the selected crop region">
-                <i class="fas fa-eraser"></i> <span class="btn-label">Clear Selection</span>
-              </button>
-              <button class="startover-btn secondary outline" style="display:none" title="Clear and start over with a new image">
-                <i class="fas fa-xmark"></i> <span class="btn-label">Clear</span>
-              </button>
-              <status-bar></status-bar>
-            </div>
-          </div>
-          <div class="canvas-toolbar canvas-toolbar-right" hidden>
-            <button class="open-in-tab-btn secondary outline" type="button" title="Open the upscaled image in a new tab">
-              <i class="fas fa-up-right-from-square"></i> <span class="btn-label">Open in Tab</span>
-            </button>
-            <button class="download-btn secondary outline" type="button" title="Download the upscaled image">
-              <i class="fas fa-download"></i> <span class="btn-label">Download</span>
-            </button>
-          </div>
-        </div>
-        <image-drop-zone></image-drop-zone>
-        <image-cropper></image-cropper>
-        <upscale-preview></upscale-preview>
-        <compare-slider></compare-slider>
+        <upscaler-toolbar></upscaler-toolbar>
+        <upscaler-canvas-area></upscaler-canvas-area>
       </div>
       <perf-monitor></perf-monitor>
     `);

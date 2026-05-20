@@ -133,15 +133,6 @@ export async function saveCustomModel({ file, label, scale, range, layout, multi
   if (!(file instanceof File)) {
     throw new Error('Missing ONNX file for custom model upload.');
   }
-  const normalizedLabel = normalizeLabel(label);
-  const normalizedScale = sanitizeScale(scale);
-  const normalizedRange = sanitizeRange(range);
-  const normalizedLayout = sanitizeLayout(layout);
-  const normalizedMultipleOf = sanitizeMultipleOf(multipleOf);
-  const normalizedMaxTileSize = sanitizeMaxTileSize(maxTileSize);
-  const normalizedPrecision = sanitizePrecision(precision);
-  const normalizedUpscaleBefore = sanitizeUpscaleBefore(upscaleBefore);
-  const normalizedTileBlend = sanitizeTileBlend(tileBlend);
   const idSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const id = `custom-${idSeed}`;
   const url = `${CUSTOM_MODEL_URL_PREFIX}${id}`;
@@ -160,16 +151,8 @@ export async function saveCustomModel({ file, label, scale, range, layout, multi
 
   const records = readStoredRecords();
   const model = toModelRecord({
-    id,
-    label: normalizedLabel,
-    scale: normalizedScale,
-    range: normalizedRange,
-    layout: normalizedLayout,
-    multipleOf: normalizedMultipleOf,
-    maxTileSize: normalizedMaxTileSize,
-    precision: normalizedPrecision,
-    upscaleBefore: normalizedUpscaleBefore,
-    tileBlend: normalizedTileBlend,
+    id, label, scale, range, layout, multipleOf, maxTileSize,
+    precision, upscaleBefore, tileBlend,
     sizeBytes: bytes.byteLength,
   });
   records.unshift(model);
