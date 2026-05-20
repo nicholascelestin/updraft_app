@@ -8,10 +8,8 @@
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
     <link rel="apple-touch-icon" sizes="180x180" href="favicon-180x180.png">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
-        integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A=="
-        crossorigin="anonymous" referrerpolicy="no-referrer">
+    <link rel="stylesheet" href="vendor/picocss/pico.min.css">
+    <link rel="stylesheet" href="vendor/font-awesome/css/all.min.css">
     <link rel="stylesheet" href="shared.css">
 </head>
 <body>
@@ -38,8 +36,8 @@
         </section>
     </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/idiomorph@0.3.0/dist/idiomorph.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/ort.all.min.js"></script>
+    <script src="vendor/idiomorph/idiomorph.min.js"></script>
+    <script src="vendor/onnxruntime-web/ort.all.min.js"></script>
     <script type="importmap">
     {
       "imports": {
@@ -58,6 +56,7 @@
     <script type="module">
         import './features/upscaler/upscaler-app.js';
         import './features/bg-removal/bg-removal-app.js';
+        import './desktop/download-button.js';
 
         function activateFeature(link) {
             const feature = link.dataset.feature;

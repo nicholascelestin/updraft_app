@@ -8,10 +8,30 @@ import { esc } from 'lib/escape';
 class StatusBar extends HTMLElement {
   #msg = '';
   #progress = -1;
+  #docListener = null;
 
   connectedCallback() {
     this.classList.add('status-bar');
     this.#render();
+
+    // External code that doesn't hold a ref to a specific <status-bar>
+    // instance (e.g. the desktop wrapper's inject script) dispatches
+    // `aitools:status` events on `document` to surface a transient
+    // message. Every mounted status-bar reflects it; since features
+    // hide their own status-bar containers when inactive, the visible
+    // one wins.
+    this.#docListener = (e) => {
+      const msg = e?.detail?.message;
+      if (typeof msg === 'string') this.message = msg;
+    };
+    document.addEventListener('aitools:status', this.#docListener);
+  }
+
+  disconnectedCallback() {
+    if (this.#docListener) {
+      document.removeEventListener('aitools:status', this.#docListener);
+      this.#docListener = null;
+    }
   }
 
   /** @param {string} msg */

@@ -1,0 +1,14 @@
+{
+  "_comment": "Versions + download URLs for binary dependencies the in-browser desktop downloader fetches at click time. Keep `electron` / `onnxruntime-node` / `onnxruntime-common` versions in sync with desktop/package.json + its resolved lockfile. The `*Url` fields use {name} / {version} / {os} / {arch} as placeholders, expanded by download-sources.js. Swap them when changing CDN providers.",
+
+  "electron": "32.3.3",
+  "electronUrl": "https://cdn.npmmirror.com/binaries/electron/v{version}/electron-v{version}-{os}-{arch}.zip",
+  "_electronUrlNote": "npmmirror.com mirrors Electron releases with permissive CORS, which GitHub Releases does not. For long-term independence from third-party CDNs, host your own mirror (e.g. Cloudflare R2 with public CORS) and replace this URL — same {version}/{os}/{arch} placeholders.",
+
+  "onnxruntime-node": "1.26.0",
+  "onnxruntime-common": "1.26.0",
+  "_npmDepsNote": "onnxruntime-node has runtime require('onnxruntime-common'). The two version strings normally match, but pin them independently so a future ORT release can break that assumption without breaking us. adm-zip and global-agent are install-time only (used by ORT's postinstall to download native binaries) — not needed at runtime.",
+
+  "npmTarballUrl": "https://registry.npmjs.org/{name}/-/{name}-{version}.tgz",
+  "_npmTarballUrlNote": "npm registry serves package tarballs with Access-Control-Allow-Origin: *, so no mirror needed. Used for both onnxruntime-node and onnxruntime-common."
+}

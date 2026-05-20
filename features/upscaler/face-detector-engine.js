@@ -229,7 +229,7 @@ export class FaceDetectorEngine {
 
     ort.env.wasm.wasmPaths =
       globalThis.__ORT_WASM_PATHS__ ||
-      'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.24.3/dist/';
+      new URL('vendor/onnxruntime-web/', document.baseURI).toString();
     ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
 
     if (this.#session) {

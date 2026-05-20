@@ -1,0 +1,16 @@
+{
+  "name": "aitools-desktop",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Desktop wrapper for aitools — routes inference through onnxruntime-node with native EPs (CoreML / CUDA / DirectML / CPU). The renderer loads the unchanged static site; aitools itself only knows this dir as the source of `desktop/*.cjs` wrapper files when packaging.",
+  "main": "main.cjs",
+  "scripts": {
+    "app": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^32.0.0"
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.20.0"
+  }
+}

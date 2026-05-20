@@ -12,6 +12,8 @@ export const UPSCALER_MODELS = [
   { url: 'models/super.onnx', scale: 4, label: 'Apple Super 188k', sizeMB: 5.5, multipleOf: 32 },
   { url: 'models/super_2.onnx', scale: 4, label: 'Apple Super 2 202k', sizeMB: 5.5, multipleOf: 32 },
   { url: 'models/super_3.onnx', scale: 4, label: 'Apple Super 3 244k', sizeMB: 5.5, multipleOf: 32 },
+  { url: 'models/super_4.onnx', scale: 4, label: 'Apple Super 4 308k', sizeMB: 5.5, multipleOf: 32 },
+
 
   {
     url: 'models/tinysr_fused.onnx',

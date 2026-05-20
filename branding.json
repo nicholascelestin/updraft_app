@@ -1,0 +1,6 @@
+{
+  "_comment": "App-wide branding — read by the desktop downloader to brand the packaged Electron build (Info.plist CFBundle* fields). Also the canonical source for the app's user-facing name; index.html and other surfaces should align with these strings.",
+  "name": "Updraft",
+  "displayName": "Updraft",
+  "identifier": "com.aitools.updraft"
+}

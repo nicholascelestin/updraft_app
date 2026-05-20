@@ -35,8 +35,6 @@ const UPLOAD_CUSTOM_VALUE = '__upload_custom__';
 // Single source of truth for localStorage <-> form control wiring.
 // `kind` is 'value' for inputs/selects, 'checked' for checkboxes.
 const PERSISTED_CONTROLS = [
-  { selector: '.runpod-endpoint',         key: 'upscaler_runpod_endpoint',         kind: 'value',   event: 'input' },
-  { selector: '.runpod-apikey',           key: 'upscaler_runpod_apikey',           kind: 'value',   event: 'input' },
   { selector: '.tilesize-select',         key: 'upscaler_tilesize',                kind: 'value',   event: 'change' },
   { selector: '.backend-select',          key: 'upscaler_backend',                 kind: 'value',   event: 'change' },
   { selector: '.output-select',           key: 'upscaler_output',                  kind: 'value',   event: 'change' },
@@ -571,17 +569,9 @@ class UpscalerApp extends HTMLElement {
         const parsedOutputScale = parseInt(this.#q('.output-select').value, 10);
         const requestedOutputScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : 4;
 
-        let beforeCanvas, afterCanvas, scale, comparison;
-
-        if (this.#q('.mode-select').value === 'runpod') {
-          ({ beforeCanvas, afterCanvas, scale, comparison } = await this.#runRunPodUpscale(
-            inputImage, signal, statusBar, preview,
-          ));
-        } else {
-          ({ beforeCanvas, afterCanvas, scale, comparison } = await this.#runLocalUpscale(
-            inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor,
-          ));
-        }
+        const { beforeCanvas, afterCanvas, scale, comparison } = await this.#runLocalUpscale(
+          inputImage, signal, requestedOutputScale, statusBar, preview, perfMonitor,
+        );
 
         statusBar.hideProgress();
         const outW = inputImage.width * scale;
@@ -1051,41 +1041,6 @@ class UpscalerApp extends HTMLElement {
     return { ...canvases, scale: outputScale, comparison: false };
   }
 
-  async #runRunPodUpscale(inputImage, signal, statusBar, preview) {
-    const endpointEl = this.#q('.runpod-endpoint');
-    const apikeyEl = this.#q('.runpod-apikey');
-    if (!endpointEl.value || !apikeyEl.value) {
-      throw new Error('Enter your RunPod Endpoint ID and API Key.');
-    }
-
-    const { RunPodEngine } = await import('./runpod-engine.js');
-    const engine = new RunPodEngine({
-      endpointId: endpointEl.value.trim(),
-      apiKey: apikeyEl.value.trim(),
-      scale: 4,
-    });
-
-    const parsedOutputScale = parseInt(this.#q('.output-select').value, 10);
-    const requestedScale = Number.isFinite(parsedOutputScale) ? parsedOutputScale : 4;
-    const finalScale = Math.max(1, Math.min(requestedScale, 4));
-
-    const outW = inputImage.width * 4;
-    const outH = inputImage.height * 4;
-    preview.showDimmedPreview(inputImage, outW, outH);
-    statusBar.message = `Upscaling ${inputImage.width}\u00d7${inputImage.height} via RunPod\u2026`;
-    statusBar.showIndeterminate();
-
-    const { canvas: resultCanvas, scale: actualScale } = await engine.upscale(
-      inputImage,
-      (msg) => { statusBar.message = msg; },
-      signal,
-    );
-
-    const scale = Math.min(finalScale, actualScale);
-    const canvases = this.#createComparisonCanvases(resultCanvas, inputImage, scale);
-    return { ...canvases, scale, comparison: false };
-  }
-
   // --- Settings ---
 
   #restoreSettings() {
@@ -1170,8 +1125,7 @@ class UpscalerApp extends HTMLElement {
           margin-bottom: 0; padding: 0.4rem 0.8rem;
           font-size: 0.85rem; width: auto;
         }
-        upscaler-app .local-controls,
-        upscaler-app .runpod-controls {
+        upscaler-app .local-controls {
           display: inline-flex; flex-wrap: wrap; gap: 0.4rem 0.75rem;
           align-items: center;
         }
@@ -1419,11 +1373,6 @@ class UpscalerApp extends HTMLElement {
         }
       </style>
 
-      <select class="mode-select" hidden>
-        <option value="local" selected>Local (ONNX)</option>
-        <option value="runpod">RunPod Serverless</option>
-      </select>
-
       <div class="controls">
         <span class="local-controls">
           <label>Model:
@@ -1463,15 +1412,6 @@ class UpscalerApp extends HTMLElement {
               <option value="3">3x</option>
               <option value="4" selected>4x (no downscale)</option>
             </select>
-          </label>
-        </span>
-
-        <span class="runpod-controls" style="display:none">
-          <label>Endpoint:
-            <input class="runpod-endpoint" type="text" placeholder="ID or full URL" style="width:28ch">
-          </label>
-          <label>API Key:
-            <input class="runpod-apikey" type="password" placeholder="rp_..." style="width:18ch">
           </label>
         </span>
 
