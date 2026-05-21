@@ -8,6 +8,15 @@ import {
 } from '../custom-models/custom-model-store.js';
 import '../custom-models/custom-model-upload-dialog.js';
 
+// User-facing backend selector returns 'gpu' or 'cpu' (the engine's intent
+// vocabulary). Older builds stored 'webgpu' / 'wasm' in localStorage; this
+// normalizer keeps a returning user from getting a broken dropdown.
+function normalizeIntent(value) {
+  if (value === 'webgpu' || value === 'gpu') return 'gpu';
+  if (value === 'wasm'   || value === 'cpu') return 'cpu';
+  return 'gpu';
+}
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, '&amp;')
@@ -74,10 +83,15 @@ class UpscalerControls extends HTMLElement {
     return Number.isFinite(parsed) ? parsed : 4;
   }
 
+  // The user's load intent: 'gpu' or 'cpu'. Per-model-option overrides via
+  // data-backend take precedence over the global select. Legacy values
+  // ('webgpu', 'wasm') from prior localStorage are normalized so a returning
+  // user doesn't get a broken dropdown.
   get backend() {
-    return this.selectedModelOption?.dataset.backend
+    const raw = this.selectedModelOption?.dataset.backend
       || this.#q('.backend-select')?.value
-      || 'webgpu';
+      || 'gpu';
+    return normalizeIntent(raw);
   }
 
   set isRunning(b) {
@@ -308,7 +322,7 @@ class UpscalerControls extends HTMLElement {
           modelEl.value = this.#previousModelValue;
         } else {
           this.refreshAfterCustomModelChange(customModel.url);
-          this.#emitStatus(`Added "${customModel.label}" (${customModel.scale}x, ~${customModel.sizeMB}MB).`);
+          this.#emitStatus('Model added', `Added "${customModel.label}" (${customModel.scale}x, ~${customModel.sizeMB}MB).`);
           return;
         }
       } else {
@@ -326,7 +340,7 @@ class UpscalerControls extends HTMLElement {
       const updated = await dialog.open({ editModel: selected });
       if (!updated) return;
       this.refreshAfterCustomModelChange(updated.url);
-      this.#emitStatus(`Updated "${updated.label}".`);
+      this.#emitStatus('Model updated', `Updated "${updated.label}".`);
     });
 
     deleteCustomBtn.addEventListener('click', async () => {
@@ -345,7 +359,7 @@ class UpscalerControls extends HTMLElement {
       localStorage.setItem('upscaler_model', modelEl.value);
       this.#updateModelBoundControls();
       this.#updateCustomDeleteVisibility();
-      this.#emitStatus(`Deleted "${selected.label}".`);
+      this.#emitStatus('Model deleted', `Deleted "${selected.label}".`);
     });
 
     this.#q('.tilesize-select').addEventListener('change', () => this.#updateHangWarning());
@@ -381,9 +395,16 @@ class UpscalerControls extends HTMLElement {
     this.#q('.clear-cache-btn').addEventListener('click', () => bubble('clear-cache'));
   }
 
-  #emitStatus(message) {
+  #emitStatus(title, details) {
     this.dispatchEvent(new CustomEvent('status-message', {
-      bubbles: true, detail: { message },
+      bubbles: true,
+      detail: {
+        title,
+        state: 'idle',
+        details: details || '',
+        progress: -1,
+        tileCount: null,
+      },
     }));
   }
 
@@ -524,11 +545,11 @@ class UpscalerControls extends HTMLElement {
     const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const isLargeOnBigTile = sizeMB > 10 && tileSize > 128;
 
-    // fp16 inference effectively requires WebGPU — ORT-Web's WASM EP has very
+    // fp16 inference effectively requires GPU — ORT-Web's WASM EP has very
     // limited fp16 op coverage so most fp16 models throw a kernel-not-found
     // or input-dtype error. Surface this before the user runs.
-    const backend = modelOpt?.dataset.backend || this.#q('.backend-select').value;
-    const isFp16OnCpu = modelOpt?.dataset.precision === 'fp16' && backend !== 'webgpu';
+    const backend = normalizeIntent(modelOpt?.dataset.backend || this.#q('.backend-select').value);
+    const isFp16OnCpu = modelOpt?.dataset.precision === 'fp16' && backend !== 'gpu';
 
     const show = isLargeOnBigTile || isFp16OnCpu;
     warnEl.classList.toggle('visible', show);
@@ -537,7 +558,7 @@ class UpscalerControls extends HTMLElement {
     const messages = [];
     if (isFp16OnCpu) {
       messages.push(
-        `<strong>fp16 model on CPU backend:</strong> this model uses 16-bit precision, which ONNX Runtime's WASM backend has very limited support for. Inference will almost certainly fail with an "unexpected input data type" or "kernel not found" error. Switch <em>Backend</em> to <em>GPU (WebGPU)</em>.`,
+        `<strong>fp16 model on CPU backend:</strong> this model uses 16-bit precision, which ONNX Runtime's CPU/WASM backend has very limited support for. Inference will almost certainly fail with an "unexpected input data type" or "kernel not found" error. Switch <em>Backend</em> to <em>GPU</em>.`,
       );
     }
     if (isLargeOnBigTile) {
@@ -745,8 +766,8 @@ class UpscalerControls extends HTMLElement {
           </button>
           <label>Backend:
             <select class="backend-select">
-              <option value="webgpu">GPU (WebGPU)</option>
-              <option value="wasm">CPU (WASM)</option>
+              <option value="gpu">GPU</option>
+              <option value="cpu">CPU</option>
             </select>
           </label>
           <label>Tile size:

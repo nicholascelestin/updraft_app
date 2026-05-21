@@ -44,6 +44,8 @@
     "features/upscaler/upscale-pipeline.js",
     "features/upscaler/upscaler-app.js",
     "index.html",
+    "lib/backend-events.js",
+    "lib/backend.js",
     "lib/canvas.js",
     "lib/fetch-progress.js",
     "lib/morph.js",

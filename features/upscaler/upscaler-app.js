@@ -1,4 +1,5 @@
 import { morph } from 'lib/morph';
+import { trackBackendEvents, friendlyBackend, realizedIsGpu } from 'lib/backend-events';
 import { Pipeline } from './upscale-pipeline.js';
 import './ui/upscaler-controls.js';
 import './ui/upscaler-canvas-area.js';
@@ -18,13 +19,13 @@ function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, max
   const isFp16DtypeError =
     /Unexpected input data type/i.test(raw) && /tensor\(float16\)/i.test(raw);
   const isFp16KernelMissing =
-    precision === 'fp16' && backend !== 'webgpu' &&
+    precision === 'fp16' && backend !== 'gpu' &&
     (/kernel.*not.*found/i.test(raw) || /not.*supported/i.test(raw) || /no kernel/i.test(raw));
-  if (isFp16DtypeError && backend === 'webgpu') {
+  if (isFp16DtypeError && backend === 'gpu') {
     return `Model precision metadata was stale: this model declares fp16 inputs but the engine had it tagged as fp32. The engine has now corrected itself — try running again. (If the error persists, open the model from the Edit pencil and set Precision = fp16, or re-upload it.) Raw error: ${raw}`;
   }
   if (isFp16DtypeError || isFp16KernelMissing) {
-    return `This model uses fp16 (16-bit) precision, which the CPU/WASM backend does not fully support. Switch Backend to "GPU (WebGPU)" and run again. Raw error: ${raw}`;
+    return `This model uses fp16 (16-bit) precision, which the CPU backend does not fully support. Switch Backend to "GPU" and run again. Raw error: ${raw}`;
   }
 
   const isReshapeWindowError =
@@ -137,13 +138,14 @@ class UpscalerApp extends HTMLElement {
     const canvasArea = this.#q('upscaler-canvas-area');
     const toolbar    = this.#q('upscaler-toolbar');
     const perfMon    = this.#q('perf-monitor');
-    const cropHint   = ' — drag to crop (optional).';
 
-    toolbar.statusBar.message = 'Load an image to begin.';
+    // Empty initial state — no "Ready" copy; icon alone communicates "waiting".
+    toolbar.statusBar.set({ title: '', state: 'idle', details: '', progress: -1, tileCount: null });
 
-    // Status messages from controls (custom-model upload/edit/delete).
+    // Status updates from controls (custom-model upload/edit/delete) carry
+    // their own { title, state, details } payload; forward verbatim.
     this.addEventListener('status-message', (e) => {
-      toolbar.statusBar.message = e.detail.message;
+      toolbar.statusBar.set(e.detail);
     });
 
     // Model change → update upscale button label.
@@ -165,17 +167,28 @@ class UpscalerApp extends HTMLElement {
       canvasArea.showCropping(img);
       toolbar.state = 'ready';
       toolbar.hasCrop = false;
-      toolbar.statusBar.message = `${img.width}×${img.height}${cropHint}`;
-      toolbar.statusBar.hideProgress();
+      toolbar.statusBar.set({
+        title: 'Image loaded',
+        state: 'idle',
+        details: `${img.width}×${img.height}. Drag to crop (optional), then click Upscale.`,
+        progress: -1,
+        tileCount: null,
+      });
     });
 
     canvasArea.addEventListener('crop-changed', (e) => {
       const crop = e.detail.crop;
       const img = canvasArea.image;
       toolbar.hasCrop = !!crop;
-      toolbar.statusBar.message = crop
-        ? `${img.width}×${img.height} — crop ${crop.w}×${crop.h}.`
-        : `${img.width}×${img.height}${cropHint}`;
+      toolbar.statusBar.set(crop ? {
+        title: 'Crop selected',
+        state: 'idle',
+        details: `${img.width}×${img.height}, cropped to ${crop.w}×${crop.h}.`,
+      } : {
+        title: 'Image loaded',
+        state: 'idle',
+        details: `${img.width}×${img.height}. Drag to crop (optional), then click Upscale.`,
+      });
     });
 
     // View mode (toolbar → canvas).
@@ -207,7 +220,11 @@ class UpscalerApp extends HTMLElement {
     this.addEventListener('clear-cache', () => {
       if (this.#running) return;
       this.#pipeline.destroy();
-      toolbar.statusBar.message = 'Model cache cleared.';
+      toolbar.statusBar.set({
+        title: 'Cache cleared',
+        state: 'idle',
+        details: 'Model cache cleared. Next run will re-download.',
+      });
     });
   }
 
@@ -221,10 +238,19 @@ class UpscalerApp extends HTMLElement {
     const existingCrop = canvasArea.currentCrop;
     toolbar.state = 'ready';
     toolbar.hasCrop = !!existingCrop;
-    toolbar.statusBar.message = existingCrop
-      ? `${img.width}×${img.height} — crop ${existingCrop.w}×${existingCrop.h}.`
-      : `${img.width}×${img.height} — drag to crop (optional).`;
-    toolbar.statusBar.hideProgress();
+    toolbar.statusBar.set(existingCrop ? {
+      title: 'Crop selected',
+      state: 'idle',
+      details: `${img.width}×${img.height}, cropped to ${existingCrop.w}×${existingCrop.h}.`,
+      progress: -1,
+      tileCount: null,
+    } : {
+      title: 'Image loaded',
+      state: 'idle',
+      details: `${img.width}×${img.height}. Drag to crop (optional), then click Upscale.`,
+      progress: -1,
+      tileCount: null,
+    });
   }
 
   #reset() {
@@ -236,8 +262,7 @@ class UpscalerApp extends HTMLElement {
     canvasArea.showInitial();
     toolbar.state = 'empty';
     toolbar.hasCrop = false;
-    toolbar.statusBar.message = 'Load an image to begin.';
-    toolbar.statusBar.hideProgress();
+    toolbar.statusBar.set({ title: '', state: 'idle', details: '', progress: -1, tileCount: null });
   }
 
   // ── View-mode persistence (orchestrator-level so it survives across phases) ──
@@ -277,18 +302,62 @@ class UpscalerApp extends HTMLElement {
     controls.isRunning = true;
     toolbar.state = 'running';
 
+    // runState is monotonic: 'running' → 'warning' (stays once warned).
+    // The tracker updates it as backend events arrive; the orchestrator
+    // reads it on completion to pick the final icon color.
+    let runState = 'running';
+    const tracker = trackBackendEvents((ev) => {
+      if (ev.kind === 'attempt') {
+        status.set({ title: `Loading on ${friendlyBackend(ev.backend)}`, state: runState });
+      } else if (ev.kind === 'success') {
+        status.set({ title: `Running on ${friendlyBackend(ev.backend)}`, state: runState });
+      } else if (ev.kind === 'fallback') {
+        runState = 'warning';
+        status.set({ title: `Fallback from ${friendlyBackend(ev.backend)}`, state: runState });
+      } else if (ev.kind === 'skipped') {
+        runState = 'warning';
+        status.set({ title: `Skipping ${friendlyBackend(ev.backend)}`, state: runState });
+      }
+    });
+
     try {
-      status.showProgress(0);
+      status.set({
+        title: 'Loading model',
+        state: 'running',
+        details: '',
+        progress: 0,
+        tileCount: null,
+      });
       const inputImage = canvasArea.croppedImage;
       const requestedOutputScale = controls.outputScale;
 
       const { beforeCanvas, afterCanvas, scale, comparison } =
-        await this.#runPipeline(controls, canvasArea, perfMon, status, signal, inputImage, requestedOutputScale);
+        await this.#runPipeline(controls, canvasArea, perfMon, status, signal, inputImage, requestedOutputScale, () => runState);
 
-      status.hideProgress();
       const outW = inputImage.width * scale;
       const outH = inputImage.height * scale;
-      status.message = `Done: ${inputImage.width}×${inputImage.height} → ${outW}×${outH}.`;
+      const summary = tracker.summary();
+      // The tracker only flags hadFallback when a fallback event fires *this
+      // run*. After a prior runtime fallback (CoreML→CPU), the worker's
+      // session is already on CPU, so the next run produces no fallback
+      // event of its own — yet the user asked for GPU and is silently on
+      // CPU. Treat that intent/reality mismatch as warning-worthy too.
+      const userWantsGpu = controls.backend === 'gpu';
+      const ranOnCpuDespiteIntent = userWantsGpu && summary.activeBackend && !realizedIsGpu(summary.activeBackend);
+      const finalState = (summary.hadFallback || summary.hadSkip || ranOnCpuDespiteIntent) ? 'warning' : 'success';
+      const via = summary.activeBackend ? ` via ${friendlyBackend(summary.activeBackend)}` : '';
+      const detailsLines = [`${inputImage.width}×${inputImage.height} → ${outW}×${outH}${via}`];
+      if (ranOnCpuDespiteIntent && !summary.hadFallback) {
+        detailsLines.push(`Requested GPU but running on ${friendlyBackend(summary.activeBackend)} (prior fallback this session — reload to retry GPU).`);
+      }
+      if (summary.lines.length) detailsLines.push(...summary.lines);
+      status.set({
+        title: 'Done',
+        state: finalState,
+        details: detailsLines.join('\n'),
+        progress: -1,
+        tileCount: null,
+      });
 
       await canvasArea.showResult(beforeCanvas, afterCanvas, {
         downloadName: comparison ? `comparison_${scale}x.png` : `upscaled_${scale}x.png`,
@@ -296,23 +365,37 @@ class UpscalerApp extends HTMLElement {
       toolbar.state = 'done';
     } catch (e) {
       if (e.name === 'AbortError') {
-        status.message = 'Cancelled.';
+        status.set({
+          title: 'Cancelled',
+          state: 'idle',
+          details: 'You stopped this run.',
+          progress: -1,
+          tileCount: null,
+        });
       } else {
         console.error(e);
         const opt = controls.selectedModelOption;
         const parsedMaxTile = parseInt(opt?.dataset?.maxtilesize, 10);
-        status.message = 'Error: ' + formatUpscaleErrorMessage(e, {
+        const errMsg = formatUpscaleErrorMessage(e, {
           layout: opt?.dataset?.layout,
           multipleOf: parseInt(opt?.dataset?.multipleof, 10),
           maxTileSize: Number.isFinite(parsedMaxTile) ? parsedMaxTile : null,
           precision: opt?.dataset?.precision === 'fp16' ? 'fp16' : 'fp32',
           backend: controls.backend,
         });
+        status.set({
+          title: 'Error',
+          state: 'error',
+          details: errMsg,
+          progress: -1,
+          tileCount: null,
+        });
       }
-      status.hideProgress();
       perfMon.stop();
       // Fall back to ready so the user can adjust and retry.
       if (this.#generation === gen) toolbar.state = canvasArea.image ? 'ready' : 'empty';
+    } finally {
+      tracker.stop();
     }
 
     if (this.#generation === gen) {
@@ -322,7 +405,7 @@ class UpscalerApp extends HTMLElement {
     }
   }
 
-  async #runPipeline(controls, canvasArea, perfMon, status, signal, inputImage, requestedOutputScale) {
+  async #runPipeline(controls, canvasArea, perfMon, status, signal, inputImage, requestedOutputScale, getRunState) {
     const modelOpt = controls.selectedModelOption;
     const isBuiltInResampler = !!modelOpt?.value?.startsWith('builtin:');
 
@@ -336,19 +419,22 @@ class UpscalerApp extends HTMLElement {
     const outW = inputImage.width * config.scale;
     const outH = inputImage.height * config.scale;
     canvasArea.showPreview(inputImage, outW, outH);
-    status.message = `Upscaling ${inputImage.width}×${inputImage.height} → ${outW}×${outH}…`;
 
     const result = await this.#pipeline.run(inputImage, config, {
       onProgress(frac, msg) {
-        status.showProgress(frac);
-        status.message = msg;
+        status.set({ progress: frac, details: msg });
       },
       onStage(stage) {
         const label = STEP_LABEL[stage.step] || stage.step;
-        const prefix = label ? `${label}: ` : '';
-        if (typeof stage.progress === 'number') status.showProgress(stage.progress);
-        if (stage.message) status.message = prefix + stage.message;
-        else if (stage.phase === 'start') status.message = `${label}…`;
+        const updates = { state: getRunState() };
+        if (typeof stage.progress === 'number') updates.progress = stage.progress;
+        if (stage.message) {
+          updates.title = label;
+          updates.details = stage.message;
+        } else if (stage.phase === 'start') {
+          updates.title = label;
+        }
+        status.set(updates);
         if (perfMon.visible) perfMon.updateStage(stage);
       },
       onTile: (info) => {
@@ -359,20 +445,38 @@ class UpscalerApp extends HTMLElement {
         } else if (info.step === 'enhanceFaces' && info.composited) {
           canvasArea.drawPreviewTile(info);
         }
-        status.showProgress((info.index + 1) / info.total);
         const label = STEP_LABEL[info.step] || info.step || 'Pass';
+        const progress = (info.index + 1) / info.total;
         if (info.step === 'enhanceFaces') {
           if (info.composited) {
-            status.message = `${label}: face ${(info.faceIndex ?? 0) + 1}/${info.faceTotal ?? '?'} done`;
+            status.set({
+              title: label,
+              state: getRunState(),
+              details: `face ${(info.faceIndex ?? 0) + 1}/${info.faceTotal ?? '?'} done`,
+              progress,
+              tileCount: { done: info.index + 1, total: info.total },
+            });
           } else {
             const faceN = Number.isFinite(info.faceIndex) ? info.faceIndex + 1 : null;
             const faceTotal = Number.isFinite(info.faceTotal) ? info.faceTotal : null;
             const facePrefix = faceN && faceTotal ? `face ${faceN}/${faceTotal}, ` : '';
             const faceTileTotal = Number.isFinite(info.faceTileTotal) ? info.faceTileTotal : info.total;
-            status.message = `${label}: ${facePrefix}tile ${info.index + 1}/${faceTileTotal}`;
+            status.set({
+              title: label,
+              state: getRunState(),
+              details: `${facePrefix}tile ${info.index + 1}/${faceTileTotal}`,
+              progress,
+              tileCount: { done: info.index + 1, total: faceTileTotal },
+            });
           }
         } else {
-          status.message = `${label}: tile ${info.index + 1}/${info.total}`;
+          status.set({
+            title: label,
+            state: getRunState(),
+            details: `tile ${info.index + 1}/${info.total} — ${inputImage.width}×${inputImage.height} → ${outW}×${outH}`,
+            progress,
+            tileCount: { done: info.index + 1, total: info.total },
+          });
         }
         if (perfMon.visible) perfMon.update({
           step: info.step,
@@ -406,8 +510,12 @@ class UpscalerApp extends HTMLElement {
     const outH = inputImage.height * scale;
 
     canvasArea.showPreview(inputImage, outW, outH);
-    status.showProgress(0.25);
-    status.message = `${methodLabel} resampling…`;
+    status.set({
+      title: 'Resampling',
+      state: 'running',
+      details: `${methodLabel} resampling, ${inputImage.width}×${inputImage.height} → ${outW}×${outH}`,
+      progress: 0.25,
+    });
 
     const resultCanvas = document.createElement('canvas');
     resultCanvas.width = outW;
@@ -419,7 +527,7 @@ class UpscalerApp extends HTMLElement {
 
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    status.showProgress(1);
+    status.set({ progress: 1 });
     const outputScale = Math.max(1, Math.min(requestedOutputScale, scale));
     const canvases = makeComparisonCanvases(resultCanvas, inputImage, outputScale);
     return { ...canvases, scale: outputScale, comparison: false };

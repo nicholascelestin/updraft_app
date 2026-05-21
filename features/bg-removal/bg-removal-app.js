@@ -4,6 +4,7 @@
 
 import { morph } from 'lib/morph';
 import { canvasToBlobUrl, imageToBlobUrl } from 'lib/canvas';
+import { trackBackendEvents, friendlyBackend, realizedIsGpu } from 'lib/backend-events';
 import 'components/image-drop-zone';
 import 'components/status-bar';
 import 'components/compare-slider';
@@ -144,8 +145,6 @@ class BgRemovalApp extends HTMLElement {
     const cropper       = this.#q('image-cropper');
     const compareSlider = this.#q('compare-slider');
 
-    const CROP_HINT = ' \u2014 drag to crop (optional).';
-
     const showCompareControls = () => {
       backToCropBtn.style.display = 'inline-block';
       toolbarRight.hidden = false;
@@ -155,7 +154,11 @@ class BgRemovalApp extends HTMLElement {
       toolbarRight.hidden = true;
     };
 
-    statusBar.message = 'Load an image to begin.';
+    statusBar.set({ title: '', state: 'idle', details: '', progress: -1, tileCount: null });
+
+    const idleDetails = (img, crop) => crop
+      ? `${img.width}\u00d7${img.height}, cropped to ${crop.w}\u00d7${crop.h}. Click Remove Background.`
+      : `${img.width}\u00d7${img.height}. Drag to crop (optional), then click Remove Background.`;
 
     const resetToStart = () => {
       this.#loadedImage = null;
@@ -171,8 +174,7 @@ class BgRemovalApp extends HTMLElement {
       cropper.hide();
       compareSlider.hide();
       dropZone.show();
-      statusBar.message = 'Load an image to begin.';
-      statusBar.hideProgress();
+      statusBar.set({ title: '', state: 'idle', details: '', progress: -1, tileCount: null });
     };
 
     const showReady = () => {
@@ -184,14 +186,14 @@ class BgRemovalApp extends HTMLElement {
       dropZone.hide();
       cropper.show(this.#loadedImage);
       const existingCrop = cropper.crop;
-      if (existingCrop) {
-        clearCropBtn.style.display = 'inline-block';
-        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${existingCrop.w}\u00d7${existingCrop.h} \u2014 ready to remove background.`;
-      } else {
-        clearCropBtn.style.display = 'none';
-        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height}${CROP_HINT}`;
-      }
-      statusBar.hideProgress();
+      clearCropBtn.style.display = existingCrop ? 'inline-block' : 'none';
+      statusBar.set({
+        title: existingCrop ? 'Crop selected' : 'Image loaded',
+        state: 'idle',
+        details: idleDetails(this.#loadedImage, existingCrop),
+        progress: -1,
+        tileCount: null,
+      });
     };
 
     dropZone.addEventListener('image-loaded', (e) => {
@@ -208,13 +210,12 @@ class BgRemovalApp extends HTMLElement {
 
     cropper.addEventListener('crop-changed', (e) => {
       const crop = e.detail.crop;
-      if (crop) {
-        clearCropBtn.style.display = 'inline-block';
-        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height} \u2014 crop ${crop.w}\u00d7${crop.h} \u2014 ready to remove background.`;
-      } else {
-        clearCropBtn.style.display = 'none';
-        statusBar.message = `${this.#loadedImage.width}\u00d7${this.#loadedImage.height}${CROP_HINT}`;
-      }
+      clearCropBtn.style.display = crop ? 'inline-block' : 'none';
+      statusBar.set({
+        title: crop ? 'Crop selected' : 'Image loaded',
+        state: 'idle',
+        details: idleDetails(this.#loadedImage, crop),
+      });
     });
 
     clearCropBtn.addEventListener('click', () => {
@@ -256,21 +257,62 @@ class BgRemovalApp extends HTMLElement {
       const inputImage = cropper.extractImage();
       cropper.style.display = 'none';
 
+      // runState is monotonic: 'running' \u2192 'warning' (locked once warned).
+      let runState = 'running';
+      const tracker = trackBackendEvents((ev) => {
+        if (ev.kind === 'attempt') {
+          statusBar.set({ title: `Loading on ${friendlyBackend(ev.backend)}`, state: runState });
+        } else if (ev.kind === 'success') {
+          statusBar.set({ title: `Running on ${friendlyBackend(ev.backend)}`, state: runState });
+        } else if (ev.kind === 'fallback') {
+          runState = 'warning';
+          statusBar.set({ title: `Fallback from ${friendlyBackend(ev.backend)}`, state: runState });
+        } else if (ev.kind === 'skipped') {
+          runState = 'warning';
+          statusBar.set({ title: `Skipping ${friendlyBackend(ev.backend)}`, state: runState });
+        }
+      });
+
       try {
+        statusBar.set({
+          title: 'Loading model',
+          state: 'running',
+          details: '',
+          progress: 0,
+          tileCount: null,
+        });
         await this.#engine.loadModel(BgRemovalApp.BRIA_MODEL_KEY, backendEl.value, (frac, msg) => {
-          statusBar.showProgress(frac);
-          statusBar.message = msg;
+          statusBar.set({ progress: frac, details: msg });
         });
 
-        statusBar.showIndeterminate();
-        statusBar.message = 'Running inference\u2026';
+        statusBar.set({
+          title: 'Removing background',
+          state: runState,
+          details: 'Running inference\u2026',
+          progress: -2,
+        });
 
         const resultCanvas = await this.#engine.removeBackground(inputImage, signal);
 
-        statusBar.hideProgress();
         const w = inputImage.width;
         const h = inputImage.height;
-        statusBar.message = `Done \u2014 ${w}\u00d7${h}. Drag the slider to compare.`;
+        const summary = tracker.summary();
+        const userWantsGpu = backendEl.value === 'gpu';
+        const ranOnCpuDespiteIntent = userWantsGpu && summary.activeBackend && !realizedIsGpu(summary.activeBackend);
+        const finalState = (summary.hadFallback || summary.hadSkip || ranOnCpuDespiteIntent) ? 'warning' : 'success';
+        const via = summary.activeBackend ? ` via ${friendlyBackend(summary.activeBackend)}` : '';
+        const detailsLines = [`${w}\u00d7${h}${via}`];
+        if (ranOnCpuDespiteIntent && !summary.hadFallback) {
+          detailsLines.push(`Requested GPU but running on ${friendlyBackend(summary.activeBackend)} (prior fallback this session \u2014 reload to retry GPU).`);
+        }
+        if (summary.lines.length) detailsLines.push(...summary.lines);
+        statusBar.set({
+          title: 'Done',
+          state: finalState,
+          details: detailsLines.join('\n'),
+          progress: -1,
+          tileCount: null,
+        });
 
         this.#transparentBlobUrl = await canvasToBlobUrl(resultCanvas);
         this.#checkerBlobUrl = await checkerboardComposite(resultCanvas);
@@ -285,12 +327,25 @@ class BgRemovalApp extends HTMLElement {
 
       } catch (e) {
         if (e.name === 'AbortError') {
-          statusBar.message = 'Cancelled.';
+          statusBar.set({
+            title: 'Cancelled',
+            state: 'idle',
+            details: 'You stopped this run.',
+            progress: -1,
+            tileCount: null,
+          });
         } else {
           console.error(e);
-          statusBar.message = 'Error: ' + e.message;
+          statusBar.set({
+            title: 'Error',
+            state: 'error',
+            details: e.message || String(e),
+            progress: -1,
+            tileCount: null,
+          });
         }
-        statusBar.hideProgress();
+      } finally {
+        tracker.stop();
       }
 
       this.#running = false;
@@ -460,8 +515,8 @@ class BgRemovalApp extends HTMLElement {
       <div class="controls">
         <label>Backend:
           <select class="backend-select">
-            <option value="webgpu">GPU (WebGPU)</option>
-            <option value="wasm">CPU (WASM)</option>
+            <option value="gpu">GPU</option>
+            <option value="cpu">CPU</option>
           </select>
         </label>
       </div>

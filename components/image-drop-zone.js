@@ -50,7 +50,7 @@ class ImageDropZone extends HTMLElement {
     reader.onload = () => {
       const img = new Image();
       img.onload = () => {
-        this.dispatchEvent(new CustomEvent('image-loaded', { detail: { image: img } }));
+        this.dispatchEvent(new CustomEvent('image-loaded', { bubbles: true, detail: { image: img } }));
       };
       img.src = reader.result;
     };

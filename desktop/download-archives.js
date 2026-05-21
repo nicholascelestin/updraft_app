@@ -2,12 +2,16 @@
 //
 // We lazy-import fflate so it only loads when the user actually clicks
 // the download button — keeps page-load weight unchanged. The vendored
-// copy lives in /vendor/fflate/index.mjs so this works offline.
+// copy lives in vendor/fflate/index.mjs so this works offline.
+//
+// The URL is relative (no leading slash) so it resolves against the app's
+// mount point rather than the origin root. On a site served at a sub-path
+// like /applications/aitools/v2/ a leading-slash path 404s.
 
 let fflate = null;
 async function getFflate() {
   if (fflate) return fflate;
-  fflate = await import(new URL('/vendor/fflate/index.mjs', document.baseURI).toString());
+  fflate = await import(new URL('vendor/fflate/index.mjs', document.baseURI).toString());
   return fflate;
 }
 

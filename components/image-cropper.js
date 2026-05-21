@@ -88,7 +88,7 @@ class ImageCropper extends HTMLElement {
     this.#render();
     this.#resizeCanvas();
     this.#drawOverlay();
-    this.dispatchEvent(new CustomEvent('crop-changed', { detail: { crop: null } }));
+    this.dispatchEvent(new CustomEvent('crop-changed', { bubbles: true, detail: { crop: null } }));
   }
 
   get crop() { return this.#crop; }
@@ -143,7 +143,7 @@ class ImageCropper extends HTMLElement {
       this.#render();
       this.#resizeCanvas();
       this.#drawOverlay();
-      this.dispatchEvent(new CustomEvent('crop-changed', { detail: { crop: null } }));
+      this.dispatchEvent(new CustomEvent('crop-changed', { bubbles: true, detail: { crop: null } }));
       return;
     }
 
@@ -151,7 +151,7 @@ class ImageCropper extends HTMLElement {
     this.#render();
     this.#resizeCanvas();
     this.#drawOverlay();
-    this.dispatchEvent(new CustomEvent('crop-changed', { detail: { crop: this.#crop } }));
+    this.dispatchEvent(new CustomEvent('crop-changed', { bubbles: true, detail: { crop: this.#crop } }));
   }
 
   #drawOverlay() {

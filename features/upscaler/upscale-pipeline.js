@@ -29,7 +29,11 @@ class EnginePool {
     (slot.engine.destroy ?? slot.engine.release)?.call(slot.engine);
   }
 
-  getUpscaler(tag, { modelUrl, scale, modelValueRange, modelLayout = 'nchw', modelInputMultiple = 1, modelPrecision = 'fp32', upscaleBefore = false, tileBlend = 'overlapCrop', backend, profile = false }) {
+  getUpscaler(tag, { modelUrl, scale, modelValueRange, modelLayout = 'nchw', modelInputMultiple = 1, modelPrecision = 'fp32', upscaleBefore = false, tileBlend = 'overlapCrop', profile = false }) {
+    // Backend isn't a construction-time parameter — the engine's loadModel
+    // handles intent transitions internally (release session, load new). The
+    // pool's identity is purely the things the engine can't change after the
+    // fact: model URL, layout, precision, tile-blend strategy.
     const slot = this.#slots.get(tag);
     if (
       slot &&
@@ -40,11 +44,8 @@ class EnginePool {
       slot.upscaleBefore === upscaleBefore &&
       slot.tileBlend === tileBlend
     ) {
-      const backendOk = !slot.engine.activeBackend || slot.engine.activeBackend === backend;
-      if (backendOk) {
-        slot.engine.profiling = profile;
-        return slot.engine;
-      }
+      slot.engine.profiling = profile;
+      return slot.engine;
     }
     this.#evict(tag);
     const engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, profile });
@@ -52,13 +53,11 @@ class EnginePool {
     return engine;
   }
 
-  getDetector(tag, backend) {
-    const slot = this.#slots.get(tag);
-    if (slot) {
-      const backendOk = !slot.engine.activeBackend || slot.engine.activeBackend === backend;
-      if (backendOk) return slot.engine;
-    }
-    this.#evict(tag);
+  getDetector(tag) {
+    // Backend transitions are handled inside FaceDetectorEngine.loadModel;
+    // the pool just returns the persistent engine instance.
+    let slot = this.#slots.get(tag);
+    if (slot) return slot.engine;
     const engine = new FaceDetectorEngine();
     this.#slots.set(tag, { engine });
     return engine;
@@ -203,7 +202,7 @@ const detectFacesStep = {
   shouldRun: (ctx) => !!ctx.config.face,
   async run(ctx, cb) {
     const { backend, face } = ctx.config;
-    const detector = ctx.pool.getDetector('face-detector', backend);
+    const detector = ctx.pool.getDetector('face-detector');
     emitStage(cb, 'detectFaces', 'loading', { message: 'Loading face detector…' });
     const tLoad = performance.now();
     await detector.loadModel('face-yunet', backend, (progress, message) => {

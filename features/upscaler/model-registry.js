@@ -13,6 +13,14 @@ export const UPSCALER_MODELS = [
   { url: 'models/super_2.onnx', scale: 4, label: 'Apple Super 2 202k', sizeMB: 5.5, multipleOf: 32 },
   { url: 'models/super_3.onnx', scale: 4, label: 'Apple Super 3 244k', sizeMB: 5.5, multipleOf: 32 },
   { url: 'models/super_4.onnx', scale: 4, label: 'Apple Super 4 308k', sizeMB: 5.5, multipleOf: 32 },
+  { url: 'models/super_5.onnx', scale: 4, label: 'Apple Super 5 358k', sizeMB: 5.5, multipleOf: 32 },
+  { url: 'models/super_6.onnx', scale: 4, label: 'Apple Super 6 416k', sizeMB: 5.5, multipleOf: 32 },
+  { url: 'models/super_7.onnx', scale: 4, label: 'Apple Super 7 450k', sizeMB: 5.5, multipleOf: 32 },
+  { url: 'models/super_8.onnx', scale: 4, label: 'Apple Super 8 488k', sizeMB: 5.5, multipleOf: 32 },
+
+
+
+
 
 
   {

@@ -27,6 +27,12 @@ function makeNavItem() {
 }
 
 function mount() {
+  // Inside the Electron app itself there's no point offering a download of
+  // the Electron app. The preload installs `__nativeOrt` on every desktop
+  // load (regardless of AITOOLS_NATIVE=0), so its presence is the
+  // unambiguous "we're already running natively" signal.
+  if (globalThis.__nativeOrt) return;
+
   // Aitools' header has two <ul>s in nav.container-fluid: brand on the
   // left, feature links on the right. We append to the right one.
   const rightNav = document.querySelector('nav.container-fluid > ul:last-child');

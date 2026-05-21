@@ -6,7 +6,7 @@
 //   3. Aitools static tree      (from this origin, via Resource Timing)
 //      + optionally a few hand-picked model files.
 
-import { getModelCache, isCustomModelUrl } from '../lib/fetch-progress.js';
+import { fetchWithProgress } from '../lib/fetch-progress.js';
 
 const _jsonCache = new Map();
 async function fetchJsonOnce(url) {
@@ -60,32 +60,68 @@ export async function fetchStaticBundle(paths, onProgress) {
 /**
  * Stream-fetch a remote URL into an ArrayBuffer with progress reports.
  * `total` is the response's Content-Length (may be 0 if absent).
+ *
+ * Cached in `aitools-build-deps-v1` (separate from the model cache so it
+ * can be invalidated independently). The cache key is the full URL —
+ * since Electron / ORT / Node URLs all bake the version in, bumping a
+ * version in versions.lock.json naturally bypasses old cache entries
+ * without us having to invalidate explicitly.
  */
+const BUILD_CACHE_NAME = 'aitools-build-deps-v1';
+
+async function getBuildCache() {
+  try { return await caches.open(BUILD_CACHE_NAME); }
+  catch { return null; }
+}
+
 export async function fetchRemoteWithProgress(url, onProgress) {
+  const cache = await getBuildCache();
+
+  if (cache) {
+    const cached = await cache.match(url);
+    if (cached) {
+      const total = parseInt(cached.headers.get('content-length') || '0', 10) || 0;
+      const buf = await cached.arrayBuffer();
+      // Jump the progress bar straight to full so the UI doesn't sit at
+      // 0% on a cache hit. Real value beats Content-Length absence.
+      onProgress?.(buf.byteLength, total || buf.byteLength);
+      return buf;
+    }
+  }
+
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`fetch ${url} failed: HTTP ${resp.status}`);
+  const respForCache = resp.clone();
   const total = parseInt(resp.headers.get('content-length') || '0', 10) || 0;
+
+  let buf;
   if (!resp.body) {
-    const buf = await resp.arrayBuffer();
+    buf = await resp.arrayBuffer();
     onProgress?.(buf.byteLength, total || buf.byteLength);
-    return buf;
+  } else {
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.byteLength;
+      onProgress?.(loaded, total);
+    }
+    const finalSize = chunks.reduce((s, c) => s + c.byteLength, 0);
+    const out = new Uint8Array(finalSize);
+    let off = 0;
+    for (const c of chunks) { out.set(c, off); off += c.byteLength; }
+    buf = out.buffer;
   }
-  const reader = resp.body.getReader();
-  const chunks = [];
-  let loaded = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    loaded += value.byteLength;
-    onProgress?.(loaded, total);
-  }
-  // Stitch.
-  const finalSize = chunks.reduce((s, c) => s + c.byteLength, 0);
-  const out = new Uint8Array(finalSize);
-  let off = 0;
-  for (const c of chunks) { out.set(c, off); off += c.byteLength; }
-  return out.buffer;
+
+  // Fire-and-forget cache write. Best-effort: a 250 MB Electron zip can
+  // exceed the browser's per-origin quota on some platforms; on failure
+  // we just lose the optimisation for next time, never the download.
+  if (cache) cache.put(url, respForCache).catch(() => {});
+
+  return buf;
 }
 
 /**
@@ -121,22 +157,35 @@ export async function fetchNpmTarball(name, version, onProgress) {
   return fetchRemoteWithProgress(url, onProgress);
 }
 
+// Node.js binary archive — bundled with the desktop build so users don't
+// need a system Node install. The worker must run under plain Node (not
+// Electron-as-Node) because onnxruntime-node SIGTRAPs inside Electron's V8.
+const NODE_OS = { win32: 'win', darwin: 'darwin', linux: 'linux' };
+const NODE_EXT = { win32: 'zip', darwin: 'tar.gz', linux: 'tar.gz' };
+
+export async function fetchNodeBinary(target, onProgress) {
+  const v = await getVersions();
+  if (!v.nodeUrl || !v.node) throw new Error('versions.lock.json missing `node` / `nodeUrl`');
+  const nodeos = NODE_OS[target.os];
+  const ext    = NODE_EXT[target.os];
+  if (!nodeos || !ext) throw new Error(`No Node bundle for platform ${target.os}`);
+  const url = v.nodeUrl
+    .replaceAll('{version}', v.node)
+    .replaceAll('{nodeos}',  nodeos)
+    .replaceAll('{arch}',    target.arch)
+    .replaceAll('{ext}',     ext);
+  return fetchRemoteWithProgress(url, onProgress);
+}
+
 /**
- * Pull a model's bytes — either from the same-origin /models/X.onnx path
- * (built-in) or from the Cache API (custom upload).
+ * Pull a model's bytes — built-in (same-origin URL) or custom (Cache API).
+ *
+ * Delegates to fetchWithProgress so both kinds reuse the shared model
+ * cache (aitools-models-v1). If the user has already loaded a model in
+ * the web app, the downloader gets a cache hit and skips the re-fetch.
+ * Custom models flow through the same cache-or-throw path the engine uses.
  */
 export async function fetchModelBytes(url) {
-  if (isCustomModelUrl(url)) {
-    const cache = await getModelCache();
-    if (!cache) throw new Error(`Cache API unavailable; can't fetch custom model ${url}`);
-    const cached = await cache.match(url);
-    if (!cached) throw new Error(`Custom model not found in cache: ${url}`);
-    const ab = await cached.arrayBuffer();
-    return new Uint8Array(ab);
-  }
-  // Built-in: fetch from same origin
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`fetch ${url} failed: HTTP ${r.status}`);
-  const ab = await r.arrayBuffer();
+  const ab = await fetchWithProgress(url);
   return new Uint8Array(ab);
 }

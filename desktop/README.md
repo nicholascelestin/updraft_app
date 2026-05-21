@@ -10,18 +10,20 @@ can produce a downloadable build of aitools from the web app), and (b)
 Electron doesn't extend to mobile platforms — the dir name reflects its
 scope honestly.
 
-The aitools tree (`..`) is **not modified** — this directory is fully
-separable. The wrapper:
+The wrapper:
 
 1. Serves `../` over HTTP on a random localhost port.
 2. Opens a `BrowserWindow` against it.
-3. Injects a small monkey-patch into the renderer that intercepts
-   `ort.InferenceSession.create` so per-tile `session.run(...)` calls
-   IPC into the Node main process, where native ORT does the work.
+3. Exposes a small IPC surface (`window.__nativeOrt`) so that
+   `lib/backend.js` in the renderer can route session loads to a Node
+   side-process running `onnxruntime-node`. Per-tile `session.run(...)`
+   calls then IPC into the Node main process, where native ORT does the
+   work.
 
-The aitools renderer thinks it's loading from a normal HTTP origin and
-calling ORT-Web. The fact that inference is happening in Node is invisible
-to every line of code under `../features/`, `../components/`, `../lib/`.
+The renderer's `lib/backend.js` is the only place that knows about the
+native vs web fork: engines call `loadSession(...)` and get back either a
+real ORT-Web session or a thin proxy that wires to native. No monkey-
+patching of ORT-Web's surface; the bridge is explicit.
 
 ## Requirements
 
@@ -267,17 +269,15 @@ The main process logs (in the terminal where you ran `npm run app`) cover:
 
 - The renderer loads `../` over HTTP, same as `serve` would.
 - `desktop/preload.cjs` exposes `window.__nativeOrt` (IPC surface) via
-  `contextBridge`. Aitools never touches this.
-- `desktop/inject.js` is injected on `dom-ready` and monkey-patches
-  `ort.InferenceSession.create`:
-  - WebGPU EP requests throw immediately, which triggers
-    `UpscalerEngine.loadModel`'s existing `try webgpu / catch -> wasm`
-    fallback. Because `activeBackend` is then `'wasm'`, the engine never
-    constructs `GpuFrameExtractor` or `GpuTileRenderer` — the existing CPU
-    readback code path runs unchanged.
-  - The subsequent WASM-EP create call gets intercepted instead. The
-    patch ships the model bytes to the main process, returns a proxy
-    session whose `.run(feeds)` IPCs each per-tile inference to native.
+  `contextBridge` when native is enabled. Aitools never touches it
+  directly — `lib/backend.js` is the engines' single entry point and
+  internally dispatches to either `__nativeOrt.load(...)` (native mode)
+  or `ort.InferenceSession.create(...)` (web mode) based on whether
+  `__nativeOrt` is present.
+- `desktop/inject.js` is injected on `dom-ready` and is now a thin
+  forwarder only: main-process logs → DevTools console; native rung
+  events (`rung-fallback` / `rung-skipped` / `rung-succeeded`) →
+  `aitools:backend-event` so the status bar sees the realized native EP.
 
 No files under `../` change. The aitools tests, the web build, the `serve`
 workflow — all unaffected.

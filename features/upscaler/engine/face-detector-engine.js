@@ -1,4 +1,6 @@
 import { fetchWithProgress } from 'lib/fetch-progress';
+import { loadSession } from 'lib/backend';
+import { dispatchBackendEvent } from 'lib/backend-events';
 
 const DETECTORS = {
   'face-yunet': {
@@ -193,33 +195,53 @@ export class FaceDetectorEngine {
   #session = null;
   #modelBuffer = null;
   #currentDetectorKey = null;
-  #activeBackend = null;
+  #intent = null;
+  // Set by loadSession; kept current by #backendListener so a runtime EP
+  // fallback doesn't leave a stale label that the loadModel early-return
+  // re-announces later.
+  #realizedBackend = null;
+  #backendListener = null;
   get isLoaded() { return this.#session !== null; }
-  get activeBackend() { return this.#activeBackend; }
+  get realizedBackend() { return this.#realizedBackend; }
+  get intent() { return this.#intent; }
   get currentDetector() { return this.#currentDetectorKey; }
 
-  async loadModel(detectorKey = 'face-yunet', backend = 'wasm', onProgress) {
+  #trackRealizedBackend() {
+    if (this.#backendListener) return;
+    this.#backendListener = (e) => {
+      const d = e?.detail;
+      if (d && d.kind === 'success' && typeof d.backend === 'string') {
+        this.#realizedBackend = d.backend;
+      }
+    };
+    document.addEventListener('aitools:backend-event', this.#backendListener);
+  }
+  #untrackRealizedBackend() {
+    if (!this.#backendListener) return;
+    document.removeEventListener('aitools:backend-event', this.#backendListener);
+    this.#backendListener = null;
+  }
+
+  async loadModel(detectorKey = 'face-yunet', intent = 'cpu', onProgress) {
     if (onProgress != null && typeof onProgress !== 'function') {
       console.warn('[FaceDetectorEngine] Ignoring non-function onProgress callback.', {
         type: typeof onProgress,
         value: onProgress,
         detectorKey,
-        backend,
+        intent,
       });
     }
+    intent = normalizeIntent(intent);
     const report = typeof onProgress === 'function' ? onProgress : null;
-    if (this.#session && this.#currentDetectorKey === detectorKey && this.#activeBackend === backend) return;
+    if (this.#session && this.#currentDetectorKey === detectorKey && this.#intent === intent) {
+      if (this.#realizedBackend) {
+        dispatchBackendEvent({ kind: 'success', backend: this.#realizedBackend });
+      }
+      return;
+    }
 
     const cfg = DETECTORS[detectorKey];
     if (!cfg) throw new Error(`Unknown detector: ${detectorKey}`);
-
-    const ort = globalThis.ort;
-    if (!ort) throw new Error('ONNX Runtime not loaded');
-
-    ort.env.wasm.wasmPaths =
-      globalThis.__ORT_WASM_PATHS__ ||
-      new URL('vendor/onnxruntime-web/', document.baseURI).toString();
-    ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
 
     if (this.#session) {
       try { this.#session.release(); } catch {}
@@ -234,28 +256,14 @@ export class FaceDetectorEngine {
     }
 
     report?.(1, 'Loading detector into runtime...');
-    console.info(`[FaceDetectorEngine] Loading detector "${detectorKey}" with backend "${backend}"`);
-    let actualBackend = backend;
-    try {
-      this.#session = await ort.InferenceSession.create(this.#modelBuffer, {
-        executionProviders: [backend],
-        graphOptimizationLevel: 'all',
-      });
-    } catch (e) {
-      if (backend !== 'wasm') {
-        actualBackend = 'wasm';
-        this.#session = await ort.InferenceSession.create(this.#modelBuffer, {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all',
-        });
-      } else {
-        throw e;
-      }
-    }
-
+    console.info(`[FaceDetectorEngine] Loading detector "${detectorKey}" with intent "${intent}"`);
+    const { session, realizedBackend } = await loadSession(this.#modelBuffer, intent);
+    this.#session = session;
+    this.#intent = intent;
+    this.#realizedBackend = realizedBackend;
     this.#currentDetectorKey = detectorKey;
-    this.#activeBackend = actualBackend;
-    console.info(`[FaceDetectorEngine] Detector ready. Active backend: "${actualBackend}"`);
+    this.#trackRealizedBackend();
+    console.info(`[FaceDetectorEngine] Detector ready on ${realizedBackend}`);
     report?.(1, 'Detector loaded.');
   }
 
@@ -341,12 +349,20 @@ export class FaceDetectorEngine {
   }
 
   release() {
+    this.#untrackRealizedBackend();
     if (this.#session) {
       try { this.#session.release(); } catch {}
       this.#session = null;
     }
     this.#modelBuffer = null;
     this.#currentDetectorKey = null;
-    this.#activeBackend = null;
+    this.#intent = null;
+    this.#realizedBackend = null;
   }
+}
+
+function normalizeIntent(value) {
+  if (value === 'webgpu' || value === 'gpu') return 'gpu';
+  if (value === 'wasm'   || value === 'cpu') return 'cpu';
+  return 'cpu';
 }

@@ -27,6 +27,19 @@ function log(level, message) {
   try { process.send({ type: 'log', level, message }); } catch {}
 }
 
+// Two layers of ORT logging to configure: session-level (set on each
+// session below) controls per-session messages; environment-level (set
+// here on `ort.env`) controls the messages ORT emits before/around any
+// session, including graph optimization timing and EP initialization.
+// Both honor ORT_LOGGING_LEVEL; 1=info is default-on so users can see
+// what's happening during the often-slow session.create step.
+{
+  const sev = parseInt(process.env.ORT_LOGGING_LEVEL ?? '1', 10);
+  const levelName = ['verbose', 'info', 'warning', 'error', 'fatal'][sev] || 'info';
+  try { ort.env.logLevel = levelName; } catch (e) { /* ort.env may not exist on old builds */ }
+  log('info', `worker started, ORT_LOGGING_LEVEL=${process.env.ORT_LOGGING_LEVEL ?? '(unset, defaulting)'} → severity=${sev} (${levelName})`);
+}
+
 process.on('uncaughtException', (err) => {
   log('error', `uncaughtException: ${err?.stack || err?.message || String(err)}`);
   // Don't exit — let parent decide whether to respawn based on next signal.
@@ -48,14 +61,36 @@ process.on('disconnect', () => {
   process.exit(0);
 });
 
-async function createSession(tmpPath, rungs) {
+// ORT log severity: 0=verbose, 1=info, 2=warning (default), 3=error, 4=fatal.
+// INFO surfaces session init timing, per-layer EP placement, and graph
+// optimization phases — useful for diagnosing slow loads or unexpected EP
+// fallbacks — without per-op trace spam. Override at launch with
+// ORT_LOGGING_LEVEL=0 (verbose) or =2 (back to warning).
+const DEFAULT_LOG_SEVERITY = parseInt(process.env.ORT_LOGGING_LEVEL ?? '1', 10);
+
+async function createSession(key, hash, tmpPath, rungs) {
   let lastErr = null;
   for (const rung of rungs) {
     try {
-      const session = await ort.InferenceSession.create(tmpPath, rung.config);
+      const session = await ort.InferenceSession.create(tmpPath, {
+        ...rung.config,
+        logSeverityLevel: DEFAULT_LOG_SEVERITY,
+      });
       return { session, ep: rung.name };
     } catch (e) {
       log('warn', `${rung.name} create failed: ${e.message}`);
+      // Tell the host so it can blacklist (CoreML) and surface a backend
+      // fallback event to the status bar. `hash` is sent explicitly so the
+      // host doesn't have to parse it back out of the cacheKey.
+      try {
+        process.send({
+          type: 'rung-failed',
+          key, hash,
+          rung: rung.name,
+          phase: 'create',
+          reason: String(e?.message || e || '').slice(0, 300),
+        });
+      } catch {}
       lastErr = e;
     }
   }
@@ -80,21 +115,22 @@ function tensorToWire(t) {
   return { type: t.type, dims: t.dims, data: ab };
 }
 
-async function handleLoad({ key, tmpPath, rungs }) {
+async function handleLoad({ key, hash, tmpPath, rungs }) {
   if (sessions.has(key)) {
     const e = sessions.get(key);
     return { inputNames: e.session.inputNames, outputNames: e.session.outputNames, rung: e.ep };
   }
   const t0 = Date.now();
-  const { session, ep } = await createSession(tmpPath, rungs);
+  const { session, ep } = await createSession(key, hash, tmpPath, rungs);
   const dt = Date.now() - t0;
-  sessions.set(key, { session, ep, tmpPath, rungs, firstRunDone: false });
+  sessions.set(key, { session, ep, tmpPath, rungs, hash, firstRunDone: false });
   log('info', `loaded ${key} via ${ep} — session.create took ${dt}ms`);
   if (dt > 4000) {
     log('warn', `slow load — likely CoreML/EP graph compilation. Set AITOOLS_NATIVE_EP=cpu for cheaper startup at the cost of per-tile speed.`);
   }
-  // Tell renderer which EP we settled on at load time. If first-run later
-  // triggers a fallback, more rung-failed/rung-succeeded events follow.
+  // Tell renderer which EP we settled on at load time. The renderer's
+  // inject.js forwards this as a backend-event so the status bar shows the
+  // realized native EP (not just the requested intent).
   try { process.send({ type: 'rung-succeeded', key, rung: ep, phase: 'load' }); } catch {}
   return { inputNames: session.inputNames, outputNames: session.outputNames, rung: ep };
 }
@@ -131,19 +167,19 @@ async function handleRun({ key, wireFeeds }) {
       }
       const failedRung = entry.ep;
       log('warn', `${failedRung} runtime error, trying remaining rungs [${remaining.map(r => r.name).join(', ')}]: ${e.message}`);
-      // Tell main which rung blew up + why. Main persists a content-hash
-      // blacklist entry for future loads AND forwards as a model-event
-      // to the renderer for status-bar display.
+      // Tell main which rung blew up + why. Main blacklists the model+CoreML
+      // pairing AND forwards as a model-event for the renderer's status bar.
       try {
         process.send({
           type: 'rung-failed',
-          key,
+          key, hash: entry.hash,
           rung: failedRung,
+          phase: 'runtime',
           reason: String(e?.message || e || '').slice(0, 300),
         });
       } catch {}
       try { await entry.session.release(); } catch {}
-      const { session, ep } = await createSession(entry.tmpPath, remaining);
+      const { session, ep } = await createSession(key, entry.hash, entry.tmpPath, remaining);
       entry.session = session;
       entry.ep = ep;
       log('info', `now serving ${key} via ${ep}`);

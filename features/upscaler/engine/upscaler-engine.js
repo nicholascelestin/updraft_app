@@ -16,12 +16,23 @@ import {
   finalizeGaussianRegion,
 } from './tiling.js';
 import { readMetaEntry, isFp16InputType } from 'lib/onnx-meta';
+import { dispatchBackendEvent } from 'lib/backend-events';
+import { loadSession } from 'lib/backend';
 
 const DEFAULT_SCALE = 4;
 const DEFAULT_OVERLAP = 16;
 
 function clampByte(v) {
   return v < 0 ? 0 : v > 255 ? 255 : (v + 0.5) | 0;
+}
+
+// Normalize the various aliases the caller might pass for backend intent.
+// New code should pass 'gpu' or 'cpu' directly; the legacy ORT-Web strings
+// 'webgpu' and 'wasm' are still accepted so a half-migrated UI keeps working.
+function normalizeIntent(value) {
+  if (value === 'webgpu' || value === 'gpu') return 'gpu';
+  if (value === 'wasm'   || value === 'cpu') return 'cpu';
+  return 'cpu';
 }
 
 function yieldToEventLoop() {
@@ -277,7 +288,18 @@ export class UpscalerEngine {
   #upscaleBefore;
   #tileBlend;
   #profiling = false;
-  #activeBackend = null;
+  // What the user actually got: a label like 'web-webgpu', 'web-wasm',
+  // 'native-coreml/MLProgram', 'native-cpu'. Set by loadSession on every
+  // successful load AND kept current by #backendListener for the rest of
+  // the session — without that, runtime EP fallbacks (e.g. native worker
+  // drops from CoreML to CPU mid-tile) would leave it stale and the
+  // loadModel early-return path would mis-announce on the next run.
+  #realizedBackend = null;
+  #backendListener = null;
+  // What the caller asked for ('gpu' | 'cpu'). The loadModel short-circuit
+  // keys off this so the engine doesn't pointlessly reload when the user
+  // re-runs with the same intent.
+  #intent = null;
   #device = null;
   #gpuRenderer = null;
   #gpuExtractor = null;
@@ -321,51 +343,42 @@ export class UpscalerEngine {
   }
 
   get scale() { return this.#scale; }
-  get activeBackend() { return this.#activeBackend; }
+  // The realized backend label (e.g. 'web-webgpu', 'native-coreml/MLProgram').
+  // For UI display via friendlyBackend; not used for identity checks.
+  get realizedBackend() { return this.#realizedBackend; }
+  // The user's load intent ('gpu' | 'cpu'). EnginePool and loadModel both
+  // key off this for "do we already have the right session?" decisions.
+  get intent() { return this.#intent; }
   get isLoaded() { return this.#session !== null; }
   get profiling() { return this.#profiling; }
   set profiling(v) { this.#profiling = !!v; }
   get modelPrecision() { return this.#modelPrecision; }
 
-  async loadModel(backend = 'wasm', onProgress) {
+  async loadModel(intent = 'cpu', onProgress) {
     if (onProgress != null && typeof onProgress !== 'function') {
       console.warn('[UpscalerEngine] Ignoring non-function onProgress callback.', {
         type: typeof onProgress,
         value: onProgress,
-        backend,
+        intent,
       });
     }
+    intent = normalizeIntent(intent);
     const report = typeof onProgress === 'function' ? onProgress : null;
-    if (this.#session && this.#activeBackend === backend) return;
-    this.#releaseSession();
-
-    const ort = globalThis.ort;
-    if (!ort) throw new Error('ONNX Runtime not loaded — include ort.all.min.js before using UpscalerEngine');
-
-    ort.env.wasm.wasmPaths =
-      globalThis.__ORT_WASM_PATHS__ ||
-      new URL('vendor/onnxruntime-web/', document.baseURI).toString();
-    ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
-
-    if (backend === 'webgpu' && ort.env.webgpu) {
-      ort.env.webgpu.profilingMode = 'default';
+    if (this.#session && this.#intent === intent) {
+      // Reusing the existing session; re-announce so per-run backend
+      // trackers (status bar's "Done via X" line) record a success this run.
+      if (this.#realizedBackend) {
+        dispatchBackendEvent({ kind: 'success', backend: this.#realizedBackend });
+      }
+      return;
     }
+    this.#releaseSession();
 
     if (!this.#modelBuffer) {
       this.#modelBuffer = await fetchWithProgress(this.#modelUrl, report);
     }
 
     report?.(1, 'Loading model into runtime\u2026');
-
-    const sessionOpts = {
-      executionProviders: [
-        backend === 'webgpu'
-          ? { name: 'webgpu', preferredLayout: 'NCHW' }
-          : backend,
-      ],
-      graphOptimizationLevel: 'all',
-      ...(this.#profiling && { enableProfiling: true }),
-    };
 
     // The GPU fast paths (zero-copy input extract via GpuFrameExtractor and
     // zero-readback output render via GpuTileRenderer) both assume fp32
@@ -379,28 +392,19 @@ export class UpscalerEngine {
       this.#modelPrecision !== 'fp16' &&
       this.#modelLayout === 'nchw' &&
       this.#modelInputMultiple === 1;
-    if (backend === 'webgpu' && canUseGpuFastPath) {
-      sessionOpts.preferredOutputLocation = 'gpu-buffer';
+    const sessionLoadOpts = { profile: this.#profiling };
+    if (intent === 'gpu' && canUseGpuFastPath) {
+      sessionLoadOpts.preferredOutputLocation = 'gpu-buffer';
     }
 
-    let actualBackend = backend;
-    try {
-      this.#session = await ort.InferenceSession.create(this.#modelBuffer, sessionOpts);
-    } catch (e) {
-      if (backend !== 'wasm') {
-        console.warn(`[UpscalerEngine] ${backend} backend failed, falling back to WASM. Reason:`, e);
-        report?.(1, `${backend} failed, falling back to WASM\u2026`);
-        sessionOpts.executionProviders = ['wasm'];
-        delete sessionOpts.preferredOutputLocation;
-        delete sessionOpts.enableProfiling;
-        actualBackend = 'wasm';
-        this.#session = await ort.InferenceSession.create(this.#modelBuffer, sessionOpts);
-      } else {
-        throw e;
-      }
-    }
-
-    this.#activeBackend = actualBackend;
+    // loadSession picks between native (desktop bridge) and web (ort-web)
+    // based on whether __nativeOrt is exposed; it dispatches its own
+    // attempt/fallback/success backend-events so we don't need to here.
+    const { session, realizedBackend } = await loadSession(this.#modelBuffer, intent, sessionLoadOpts);
+    this.#session = session;
+    this.#intent = intent;
+    this.#realizedBackend = realizedBackend;
+    this.#trackRealizedBackend();
 
     // Self-correct modelPrecision from the model's declared input dtype.
     // Stale custom-model records (e.g. uploaded before fp16 support existed,
@@ -426,16 +430,19 @@ export class UpscalerEngine {
         this.#modelInputMultiple === 1;
     }
 
-    if (actualBackend === 'webgpu') {
+    if (this.#realizedBackend === 'web-webgpu') {
+      const ort = globalThis.ort;
       try {
         this.#device = await ort.env.webgpu.device;
-        // Install once per device (idempotent across model loads).
-        // If we install here for the first time, the session's shader
-        // modules were compiled by ORT-Web BEFORE the wrapper existed
-        // — release and recreate so all shaders go through it now.
+        // installWebGPUDispatchFix is idempotent across model loads. If we
+        // install it here for the first time, the just-created session's
+        // shader modules were compiled by ORT-Web BEFORE the wrapper
+        // existed — release and recreate so all shaders go through it now.
         if (installWebGPUDispatchFix(this.#device)) {
           await this.#session.release();
-          this.#session = await ort.InferenceSession.create(this.#modelBuffer, sessionOpts);
+          const reloaded = await loadSession(this.#modelBuffer, intent, sessionLoadOpts);
+          this.#session = reloaded.session;
+          this.#realizedBackend = reloaded.realizedBackend;
         }
         if (canUseGpuFastPath) {
           this.#gpuRenderer = new GpuTileRenderer(this.#device);
@@ -748,6 +755,7 @@ export class UpscalerEngine {
   }
 
   #releaseSession() {
+    this.#untrackRealizedBackend();
     this.#gpuRenderer?.destroy();
     this.#gpuRenderer = null;
     this.#gpuExtractor?.destroy();
@@ -755,7 +763,29 @@ export class UpscalerEngine {
     this.#device = null;
     try { this.#session?.release(); } catch {}
     this.#session = null;
-    this.#activeBackend = null;
+    this.#realizedBackend = null;
+    this.#intent = null;
+  }
+
+  // While a session is alive, follow runtime backend changes via the
+  // backend-event channel — the native worker can fall back from CoreML to
+  // CPU between tiles, and that's the only signal we get. Without this the
+  // next loadModel-early-return announces a stale realizedBackend.
+  #trackRealizedBackend() {
+    if (this.#backendListener) return;
+    this.#backendListener = (e) => {
+      const d = e?.detail;
+      if (d && d.kind === 'success' && typeof d.backend === 'string') {
+        this.#realizedBackend = d.backend;
+      }
+    };
+    document.addEventListener('aitools:backend-event', this.#backendListener);
+  }
+
+  #untrackRealizedBackend() {
+    if (!this.#backendListener) return;
+    document.removeEventListener('aitools:backend-event', this.#backendListener);
+    this.#backendListener = null;
   }
 
   #prepareSource(img, srcW, srcH, useGpuInput, perf) {

@@ -5,6 +5,8 @@
  */
 
 import { fetchWithProgress } from 'lib/fetch-progress';
+import { dispatchBackendEvent } from 'lib/backend-events';
+import { loadSession } from 'lib/backend';
 
 const MODELS = {
   'isnet': {
@@ -29,32 +31,58 @@ export class BgRemovalEngine {
   #session = null;
   #modelBuffer = null;
   #currentModelKey = null;
+  #intent = null;
+  // Set by loadSession; kept current by #backendListener so a runtime EP
+  // fallback (worker drops from CoreML to CPU between calls) doesn't leave
+  // a stale label that the loadModel early-return re-announces later.
+  #realizedBackend = null;
+  #backendListener = null;
 
   get isLoaded() { return this.#session !== null; }
   get currentModel() { return this.#currentModelKey; }
+  get realizedBackend() { return this.#realizedBackend; }
+  get intent() { return this.#intent; }
 
-  async loadModel(modelKey, backend = 'wasm', onProgress) {
+  #trackRealizedBackend() {
+    if (this.#backendListener) return;
+    this.#backendListener = (e) => {
+      const d = e?.detail;
+      if (d && d.kind === 'success' && typeof d.backend === 'string') {
+        this.#realizedBackend = d.backend;
+      }
+    };
+    document.addEventListener('aitools:backend-event', this.#backendListener);
+  }
+  #untrackRealizedBackend() {
+    if (!this.#backendListener) return;
+    document.removeEventListener('aitools:backend-event', this.#backendListener);
+    this.#backendListener = null;
+  }
+
+  async loadModel(modelKey, intent = 'cpu', onProgress) {
     if (onProgress != null && typeof onProgress !== 'function') {
       console.warn('[BgRemovalEngine] Ignoring non-function onProgress callback.', {
         type: typeof onProgress,
         value: onProgress,
         modelKey,
-        backend,
+        intent,
       });
     }
+    intent = normalizeIntent(intent);
     const report = typeof onProgress === 'function' ? onProgress : null;
-    if (this.#session && this.#currentModelKey === modelKey) return;
+    if (this.#session && this.#currentModelKey === modelKey && this.#intent === intent) {
+      // Same model + same intent \u2014 re-announce so per-run tracker captures
+      // the active backend label.
+      if (this.#realizedBackend) {
+        dispatchBackendEvent({ kind: 'success', backend: this.#realizedBackend });
+      }
+      return;
+    }
 
     const cfg = MODELS[modelKey];
     if (!cfg) throw new Error(`Unknown model: ${modelKey}`);
 
-    const ort = globalThis.ort;
-    if (!ort) throw new Error('ONNX Runtime not loaded');
-
-    ort.env.wasm.wasmPaths = new URL('vendor/onnxruntime-web/', document.baseURI).toString();
-    ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
-
-    // Release old session if switching models
+    // Release old session if switching models or intent.
     if (this.#session) {
       this.#session.release();
       this.#session = null;
@@ -69,24 +97,12 @@ export class BgRemovalEngine {
 
     report?.(1, 'Loading model into runtime\u2026');
 
-    try {
-      this.#session = await ort.InferenceSession.create(this.#modelBuffer, {
-        executionProviders: [backend],
-        graphOptimizationLevel: 'all',
-      });
-    } catch (e) {
-      if (backend !== 'wasm') {
-        report?.(1, `${backend} failed, falling back to WASM\u2026`);
-        this.#session = await ort.InferenceSession.create(this.#modelBuffer, {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all',
-        });
-      } else {
-        throw e;
-      }
-    }
-
+    const { session, realizedBackend } = await loadSession(this.#modelBuffer, intent);
+    this.#session = session;
+    this.#intent = intent;
+    this.#realizedBackend = realizedBackend;
     this.#currentModelKey = modelKey;
+    this.#trackRealizedBackend();
     report?.(1, 'Model loaded.');
   }
 
@@ -195,11 +211,20 @@ export class BgRemovalEngine {
   }
 
   release() {
+    this.#untrackRealizedBackend();
     if (this.#session) {
       this.#session.release();
       this.#session = null;
     }
     this.#modelBuffer = null;
     this.#currentModelKey = null;
+    this.#intent = null;
+    this.#realizedBackend = null;
   }
+}
+
+function normalizeIntent(value) {
+  if (value === 'webgpu' || value === 'gpu') return 'gpu';
+  if (value === 'wasm'   || value === 'cpu') return 'cpu';
+  return 'cpu';
 }

@@ -10,5 +10,9 @@
   "_npmDepsNote": "onnxruntime-node has runtime require('onnxruntime-common'). The two version strings normally match, but pin them independently so a future ORT release can break that assumption without breaking us. adm-zip and global-agent are install-time only (used by ORT's postinstall to download native binaries) — not needed at runtime.",
 
   "npmTarballUrl": "https://registry.npmjs.org/{name}/-/{name}-{version}.tgz",
-  "_npmTarballUrlNote": "npm registry serves package tarballs with Access-Control-Allow-Origin: *, so no mirror needed. Used for both onnxruntime-node and onnxruntime-common."
+  "_npmTarballUrlNote": "npm registry serves package tarballs with Access-Control-Allow-Origin: *, so no mirror needed. Used for both onnxruntime-node and onnxruntime-common.",
+
+  "node": "22.22.3",
+  "nodeUrl": "https://cdn.npmmirror.com/binaries/node/v{version}/node-v{version}-{nodeos}-{arch}.{ext}",
+  "_nodeUrlNote": "Bundled Node.js binary so users don't need to install Node themselves. onnxruntime-node SIGTRAPs inside Electron's V8, so the worker must run under a real Node binary — see ort-host.cjs for the long version. Pin tracks the latest Node 22 LTS (Jod): Active LTS through April 2026, Maintenance through April 2027 — bumps are safe within the 22.x line. Bumping to a newer major (24+) warrants spot-checking onnxruntime-node compatibility first. npmmirror.com mirrors nodejs.org/dist with permissive CORS, which nodejs.org itself does not. {nodeos} is 'win' on Windows, 'darwin' / 'linux' elsewhere; {ext} is 'zip' on Windows, 'tar.gz' otherwise — both expanded by download-sources.js."
 }

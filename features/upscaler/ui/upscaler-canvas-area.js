@@ -126,15 +126,11 @@ class UpscalerCanvasArea extends HTMLElement {
   }
 
   #wireEvents() {
-    // Re-emit image-loaded so the orchestrator can react (set default view
-    // mode, transition phase). We also stash the image internally so
-    // showCropping can pick it up if the orchestrator calls back into us.
+    // Hold the image reference locally; image-loaded also bubbles up so the
+    // orchestrator can react. crop-changed similarly bubbles from the cropper.
     this.#q('image-drop-zone').addEventListener('image-loaded', (e) => {
       this.#image = e.detail.image;
-      // Event already bubbles by default from the child; nothing to do here
-      // beyond holding the reference.
     });
-    // crop-changed bubbles from image-cropper; orchestrator can listen on us.
   }
 
   #render() {

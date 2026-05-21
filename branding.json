@@ -2,5 +2,7 @@
   "_comment": "App-wide branding — read by the desktop downloader to brand the packaged Electron build (Info.plist CFBundle* fields). Also the canonical source for the app's user-facing name; index.html and other surfaces should align with these strings.",
   "name": "Updraft",
   "displayName": "Updraft",
-  "identifier": "com.aitools.updraft"
+  "identifier": "com.aitools.updraft",
+  "remoteOrigin": "https://nickcelestin.com/applications/aitools/v2/",
+  "_remoteOriginNote": "Canonical deploy URL where models live. lib/fetch-progress.js falls back to this when a built-in model URL 404s locally (typical of desktop builds where the user didn't bundle every model). Trailing slash required. Update when the deploy path changes."
 }

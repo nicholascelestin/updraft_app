@@ -11,7 +11,7 @@
 
 import { detectPlatform, PLATFORM_TARGETS, targetById } from './download-platform.js';
 import { UPSCALER_MODELS } from '../features/upscaler/model-registry.js';
-import { listCustomModels } from '../features/upscaler/custom-model-store.js';
+import { listCustomModels } from '../features/upscaler/custom-models/custom-model-store.js';
 
 let dialog = null;
 
@@ -19,6 +19,7 @@ const TINY_BUILTIN_THRESHOLD_MB = 10;
 const ELECTRON_BASE_ESTIMATE_MB = 250;
 const ORT_NODE_ESTIMATE_MB = 50;
 const STATIC_TREE_ESTIMATE_MB = 95; // aitools static + vendor + WASMs
+const NODE_BINARY_ESTIMATE_MB = 40; // bundled Node binary (compressed ~30-50 MB per platform)
 
 export async function openDownloadModal() {
   if (dialog) {
@@ -64,7 +65,11 @@ function injectStyles() {
   const s = document.createElement('style');
   s.id = 'desktop-download-modal-styles';
   s.textContent = `
-    .desktop-download-modal { max-width: 640px; min-width: 480px; }
+    /* Pico styles the <dialog> itself as the full-viewport backdrop
+       (position: fixed, min-width: 100%, dark bg). Width clamps belong on
+       the inner <article> — the visible card — or the dialog shrinks to a
+       narrow vertical strip and the dark backdrop only covers that strip. */
+    .desktop-download-modal > article { max-width: 640px; min-width: 480px; }
     .desktop-download-modal h3 { margin: 0 0 0.5rem; }
     .desktop-download-modal .platform-row {
       display: flex; gap: 0.75rem; align-items: center; margin: 0.75rem 0 1rem;
@@ -187,7 +192,7 @@ async function renderIdle() {
   dialog._modelChecks = modelChecks;
 
   const updateSize = () => {
-    let mb = ELECTRON_BASE_ESTIMATE_MB + ORT_NODE_ESTIMATE_MB + STATIC_TREE_ESTIMATE_MB;
+    let mb = ELECTRON_BASE_ESTIMATE_MB + ORT_NODE_ESTIMATE_MB + STATIC_TREE_ESTIMATE_MB + NODE_BINARY_ESTIMATE_MB;
     for (const cb of dialog.querySelectorAll('input[data-model-index]')) {
       if (cb.checked) mb += modelChecks[parseInt(cb.dataset.modelIndex, 10)].sizeMB;
     }
@@ -222,6 +227,9 @@ async function startDownload(target, selectedModels) {
       <span class="stage-label" data-stage="ort"      >ORT-Node runtime</span>
       <progress data-stage="ort"      max="100" value="0"></progress>
 
+      <span class="stage-label" data-stage="node"     >Node.js runtime</span>
+      <progress data-stage="node"     max="100" value="0"></progress>
+
       <span class="stage-label" data-stage="static"   >Aitools static + models</span>
       <progress data-stage="static"   max="100" value="0"></progress>
 
@@ -246,7 +254,7 @@ async function startDownload(target, selectedModels) {
   };
 
   try {
-    // Three independent fetches in parallel.
+    // Four independent fetches in parallel.
     const electronP = sources.fetchElectronBase(target, (loaded, total) => {
       setStage('electron', total ? (loaded / total) * 100 : 50);
     });
@@ -259,6 +267,16 @@ async function startDownload(target, selectedModels) {
     const ortCommonP = sources.fetchNpmTarball('onnxruntime-common', versions['onnxruntime-common'] || versions['onnxruntime-node'], (loaded, total) => {
       // Second half of the ort stage bar.
       setStage('ort', 50 + (total ? (loaded / total) * 50 : 25));
+    });
+    // Node.js binary — bundled so users don't need Node installed. Fetch
+    // failures are non-fatal: the build still completes, but the user
+    // will need system Node at launch.
+    const nodeP = sources.fetchNodeBinary(target, (loaded, total) => {
+      setStage('node', total ? (loaded / total) * 100 : 50);
+    }).catch(e => {
+      console.warn('[desktop] Node binary fetch failed, build will proceed without bundled Node:', e?.message || e);
+      dialog.querySelector(`.stage-label[data-stage="node"]`)?.classList.add('done');
+      return null;
     });
 
     // Static + models: serial, with progress within the stage.
@@ -281,12 +299,14 @@ async function startDownload(target, selectedModels) {
     }
     finishStage('static');
 
-    const [electronBuf, ortBuf, ortCommonBuf] = await Promise.all([electronP, ortP, ortCommonP]);
+    const [electronBuf, ortBuf, ortCommonBuf, nodeBuf] = await Promise.all([electronP, ortP, ortCommonP, nodeP]);
     finishStage('electron');
     finishStage('ort');
+    if (nodeBuf) finishStage('node');
 
     const blob = await compose.composeDesktopZip({
       target, electronZipBuf: electronBuf, ortTgzBuf: ortBuf, ortCommonTgzBuf: ortCommonBuf,
+      nodeArchiveBuf: nodeBuf,
       staticFiles, selectedModels: fetchedModels,
       onProgress: (msg) => {
         // We don't get sub-step progress from fflate's async API, so just
@@ -330,8 +350,8 @@ function installHintFor(target) {
       <strong>Next steps</strong> (macOS):
       <ol style="margin: 0.4rem 0 0 1.2rem; padding: 0;">
         <li>Unzip the archive in Finder.</li>
-        <li>Open Terminal in the folder containing <code>Electron.app</code> and run:
-          <pre style="margin: 0.3rem 0; padding: 0.4rem 0.6rem; background: rgba(0,0,0,0.3); border-radius: 3px; font-size: 0.8rem; overflow-x: auto;"><code>xattr -cr Electron.app &amp;&amp; open Electron.app</code></pre>
+        <li>Open Terminal in the folder containing <code>Updraft.app</code> and run:
+          <pre style="margin: 0.3rem 0; padding: 0.4rem 0.6rem; background: rgba(0,0,0,0.3); border-radius: 3px; font-size: 0.8rem; overflow-x: auto;"><code>xattr -cr Updraft.app &amp;&amp; open Updraft.app</code></pre>
           <span style="font-size: 0.75rem; opacity: 0.75;">
             This strips the browser-applied "downloaded from internet" marker. Without it,
             macOS Gatekeeper sees the Electron binary's embedded ad-hoc signature, expects
@@ -340,9 +360,9 @@ function installHintFor(target) {
             the unhelpful "damaged and can't be opened" error.
           </span>
         </li>
-        <li>Subsequent launches: double-click <code>Electron.app</code> normally.</li>
-        <li>Optionally drag <code>Electron.app</code> to <code>/Applications</code>.</li>
-        <li>Models go in <code>Electron.app/Contents/Resources/app/models/</code>.</li>
+        <li>Subsequent launches: double-click <code>Updraft.app</code> normally.</li>
+        <li>Optionally drag <code>Updraft.app</code> to <code>/Applications</code>.</li>
+        <li>Models go in <code>Updraft.app/Contents/Resources/app/models/</code>.</li>
       </ol>`;
   }
   if (target.os === 'win32') {
@@ -353,6 +373,9 @@ function installHintFor(target) {
         <li>Run <code>electron.exe</code>.
             (SmartScreen may warn about the unsigned binary —
             click "More info" → "Run anyway".)</li>
+        <li>You may also need the
+            <a href="https://aka.ms/vs/17/release/vc_redist.x64.exe" target="_blank" rel="noopener">VC++ Redistributable</a>
+            if you don't have it (most modern Windows installs do).</li>
         <li>Models go in <code>resources/app/models/</code>.</li>
       </ol>`;
   }

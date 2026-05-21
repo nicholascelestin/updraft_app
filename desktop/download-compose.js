@@ -20,14 +20,15 @@ import { patchMacInfoPlist, renderSvgToIcns } from './download-branding.js';
  *   electronZipBuf: ArrayBuffer,
  *   ortTgzBuf: ArrayBuffer,
  *   ortCommonTgzBuf: ArrayBuffer,
- *   staticFiles: Record<string, Uint8Array>,   // path (no leading slash) -> bytes
- *   selectedModels: Array<{ outPath: string, bytes: Uint8Array }>,  // outPath relative to appRoot, e.g. 'models/foo.onnx'
+ *   nodeArchiveBuf?: ArrayBuffer,           // bundled Node binary archive (.zip on win, .tar.gz else)
+ *   staticFiles: Record<string, Uint8Array>,
+ *   selectedModels: Array<{ outPath: string, bytes: Uint8Array }>,
  *   onProgress?: (stage: string, done?: number, total?: number) => void,
  * }} args
  * @returns {Promise<Blob>}
  */
 export async function composeDesktopZip({
-  target, electronZipBuf, ortTgzBuf, ortCommonTgzBuf, staticFiles, selectedModels, onProgress,
+  target, electronZipBuf, ortTgzBuf, ortCommonTgzBuf, nodeArchiveBuf, staticFiles, selectedModels, onProgress,
 }) {
   onProgress?.('Unpacking Electron framework');
   /** @type {Record<string, Uint8Array>} */
@@ -47,6 +48,28 @@ export async function composeDesktopZip({
   // throws MODULE_NOT_FOUND on first load and the worker dies.
   /** @type {Record<string, Uint8Array>} */
   const ortCommonFiles = ortCommonTgzBuf ? await untargzBufferToFiles(ortCommonTgzBuf) : {};
+
+  // Bundled Node.js binary — extract just the binary, discard everything
+  // else (npm, lib, share, headers — ~70% of the archive). Placed at a
+  // known relative path that ort-host.cjs checks before searching system
+  // PATHs. See findSystemNode() there.
+  /** @type {Uint8Array | null} */
+  let nodeBinaryBytes = null;
+  if (nodeArchiveBuf) {
+    onProgress?.('Unpacking Node.js runtime');
+    if (target.os === 'win32') {
+      const files = await unzipBufferToFiles(nodeArchiveBuf);
+      const key = Object.keys(files).find(p => /\/node\.exe$/.test(p));
+      if (key) nodeBinaryBytes = files[key];
+    } else {
+      const files = await untargzBufferToFiles(nodeArchiveBuf);
+      const key = Object.keys(files).find(p => /\/bin\/node$/.test(p));
+      if (key) nodeBinaryBytes = files[key];
+    }
+    if (!nodeBinaryBytes) {
+      console.warn('[desktop] Node binary not found in archive — bundled Node will be missing from the build, users will need system Node.');
+    }
+  }
 
   // For macOS targets, render the Updraft icon from aitools' favicon.svg
   // into a multi-size ICNS and patch Info.plist's CFBundle* fields so
@@ -68,7 +91,7 @@ export async function composeDesktopZip({
   const branding = await getBranding();
   const layout = composeLayout({
     target, electronFiles, electronModes, ortFiles, ortCommonFiles,
-    staticFiles, selectedModels, versions, branding, icnsBytes,
+    nodeBinaryBytes, staticFiles, selectedModels, versions, branding, icnsBytes,
   });
 
   onProgress?.('Generating final zip');
@@ -85,21 +108,33 @@ export async function composeDesktopZip({
  *                                          modes (symlinks, executables).
  */
 function composeLayout({
-  target, electronFiles, electronModes, ortFiles, ortCommonFiles, staticFiles, selectedModels, versions, branding, icnsBytes,
+  target, electronFiles, electronModes, ortFiles, ortCommonFiles, nodeBinaryBytes, staticFiles, selectedModels, versions, branding, icnsBytes,
 }) {
   /** @type {Record<string, Uint8Array>} */
   const out = Object.create(null);
   /** @type {Record<string, number>} */
   const attrs = Object.create(null);
 
-  const appRoot = target.appRoot; // e.g. 'Electron.app/Contents/Resources/app/'
+  const appRootIn = target.appRoot; // 'Electron.app/Contents/Resources/app/' on darwin
   const isMac = target.os === 'darwin';
-  // Outer bundle paths on macOS — appRoot is …/Contents/Resources/app/,
-  // and the bundle's Contents/ is two segments up.
-  const macBundlePrefix = isMac ? appRoot.slice(0, appRoot.lastIndexOf('Resources/')) : null;
-  const macOuterSigPrefix = macBundlePrefix ? `${macBundlePrefix}_CodeSignature/` : null;
-  const macInfoPlistPath = macBundlePrefix ? `${macBundlePrefix}Info.plist` : null;
-  const macIcnsPath      = macBundlePrefix ? `${macBundlePrefix}Resources/electron.icns` : null;
+
+  // Rename Electron.app/ → <branding.name>.app/ on macOS so Finder shows
+  // the branded folder name straight out of the zip (before Launch
+  // Services has had a chance to read CFBundleDisplayName from Info.plist).
+  // `rename(p)` maps input paths (from the upstream Electron zip) to
+  // output paths (the composed zip we hand the user).
+  const macBundleRename = isMac ? { from: 'Electron.app/', to: `${branding.name}.app/` } : null;
+  const rename = (p) => macBundleRename && p.startsWith(macBundleRename.from)
+    ? macBundleRename.to + p.slice(macBundleRename.from.length)
+    : p;
+  const appRoot = rename(appRootIn);
+
+  // Paths we MATCH against electronFiles keys must use the original prefix;
+  // paths we EMIT use the renamed prefix (already baked into appRoot).
+  const macBundlePrefixIn   = isMac ? appRootIn.slice(0, appRootIn.lastIndexOf('Resources/')) : null;
+  const macOuterSigPrefixIn = macBundlePrefixIn ? `${macBundlePrefixIn}_CodeSignature/` : null;
+  const macInfoPlistPathIn  = macBundlePrefixIn ? `${macBundlePrefixIn}Info.plist` : null;
+  const macIcnsPathIn       = macBundlePrefixIn ? `${macBundlePrefixIn}Resources/electron.icns` : null;
 
   // ── 1. Carry the Electron framework files through ───────────────────────
   //    - Drop `default_app.asar` so Electron picks up our app/ instead.
@@ -118,18 +153,19 @@ function composeLayout({
   for (const [path, data] of Object.entries(electronFiles)) {
     if (path.endsWith('default_app.asar')) continue;
     if (data.length === 0 && path.endsWith('/')) continue;  // directory entry
-    if (macOuterSigPrefix && path.startsWith(macOuterSigPrefix)) continue;
+    if (macOuterSigPrefixIn && path.startsWith(macOuterSigPrefixIn)) continue;
 
     let bytes = data;
-    if (isMac && path === macInfoPlistPath) {
+    if (isMac && path === macInfoPlistPathIn) {
       bytes = patchMacInfoPlist(data, branding);
-    } else if (isMac && path === macIcnsPath && icnsBytes) {
+    } else if (isMac && path === macIcnsPathIn && icnsBytes) {
       bytes = icnsBytes;
     }
 
-    out[path] = bytes;
+    const outPath = rename(path);
+    out[outPath] = bytes;
     const mode = electronModes[path];
-    if (mode) attrs[path] = mode;
+    if (mode) attrs[outPath] = mode;
   }
 
   // ── 2. Synthesize package.json at the app root ──────────────────────────
@@ -176,6 +212,20 @@ function composeLayout({
     if (!path.startsWith('package/')) continue;
     const rel = path.slice('package/'.length);
     out[ortCommonDestRoot + rel] = data;
+  }
+
+  // ── 4c. Bundled Node.js binary ────────────────────────────────────────
+  //    Placed at appRoot/desktop/node/node.exe (Windows) or
+  //    appRoot/desktop/node/bin/node (Unix). ort-host.cjs's findSystemNode
+  //    checks this path before searching system PATHs, so the desktop app
+  //    works even on machines without Node installed.
+  if (nodeBinaryBytes) {
+    const nodeRelPath = target.os === 'win32' ? 'desktop/node/node.exe' : 'desktop/node/bin/node';
+    const nodeDest = appRoot + nodeRelPath;
+    out[nodeDest] = nodeBinaryBytes;
+    if (target.os !== 'win32') {
+      attrs[nodeDest] = S_IFREG | 0o755;
+    }
   }
 
   // ── 5. Models the user selected (built-in or custom) ────────────────────

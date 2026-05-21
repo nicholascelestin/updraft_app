@@ -183,27 +183,30 @@ class UpscalerToolbar extends HTMLElement {
         }
         upscaler-toolbar .canvas-toolbar status-bar {
           display: inline-flex;
-          flex-direction: column;
-          align-items: stretch;
-          justify-content: center;
-          gap: 0.15rem;
+          align-items: center;
           margin-left: 0.3rem;
+          flex: 1 1 8rem;
           min-width: 0;
-          max-width: 20rem;
+          max-width: 22rem;
         }
         upscaler-toolbar .canvas-toolbar status-bar .status-text {
           font-size: 0.68rem;
           line-height: 1.25;
-          min-height: 0;
           margin-bottom: 0;
           color: #fff;
           mix-blend-mode: difference;
+          flex-shrink: 0;
+          overflow: visible;
         }
         upscaler-toolbar .canvas-toolbar status-bar .progress-track {
-          width: 100%;
-          max-width: 180px;
-          height: 3px;
+          height: 5px;
           margin-bottom: 0;
+          flex: 1 1 10rem;
+          min-width: 3rem;
+        }
+        upscaler-toolbar .canvas-toolbar status-bar .progress-count {
+          font-size: 0.62rem;
+          color: #fff;
           mix-blend-mode: difference;
         }
       </style>
