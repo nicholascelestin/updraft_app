@@ -396,6 +396,15 @@ export class UpscalerEngine {
     if (intent === 'gpu' && canUseGpuFastPath) {
       sessionLoadOpts.preferredOutputLocation = 'gpu-buffer';
     }
+    // ORT's graph optimizer fuses Conv + PReLU pairs into com.microsoft.FusedConv,
+    // but the WebGPU EP only registers a FusedConv kernel for fp32 — not fp16.
+    // The fusion pass runs anyway and produces an unrunnable node on fp16
+    // graphs; the whole session-load then fails and the engine falls back to
+    // WASM. Setting graphOptimizationLevel='disabled' stops the fusion entirely
+    // and lets Conv + PReLU run as separate fp16-supported kernels.
+    if (this.#modelPrecision === 'fp16') {
+      sessionLoadOpts.graphOptimizationLevel = 'disabled';
+    }
 
     // loadSession picks between native (desktop bridge) and web (ort-web)
     // based on whether __nativeOrt is exposed; it dispatches its own

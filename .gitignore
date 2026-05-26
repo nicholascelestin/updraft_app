@@ -25,3 +25,6 @@ models/bak/
 
 # Electron build output
 Electron.app/
+
+# Hugging Face Space build output (git clone of the Space lives here)
+hf-space/

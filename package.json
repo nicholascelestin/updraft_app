@@ -6,7 +6,9 @@
   "scripts": {
     "start": "npx serve -l 8081",
     "deploy": "node deploy.js",
-    "deploy:local": "node deploy.js --local"
+    "deploy:local": "node deploy.js --local",
+    "deploy:hf": "node deploy-hf-space.js",
+    "deploy:hf:push": "node deploy-hf-space.js --push"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1029.0",

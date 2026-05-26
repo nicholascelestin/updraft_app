@@ -32,16 +32,24 @@ import { morph } from 'lib/morph';
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const STATES = ['idle', 'running', 'success', 'warning', 'error'];
 
+const FADE_DELAY_MS = 2000;
+
 class StatusBar extends HTMLElement {
   #title = '';
   #state = 'idle';
   #details = '';
   #progress = -1;
   #tileCount = null;
+  #wake = false;
+  #fadeTimer = null;
 
   connectedCallback() {
     this.classList.add('status-bar');
     this.#render();
+  }
+
+  disconnectedCallback() {
+    if (this.#fadeTimer) { clearTimeout(this.#fadeTimer); this.#fadeTimer = null; }
   }
 
   set(fields) {
@@ -50,7 +58,21 @@ class StatusBar extends HTMLElement {
     if (fields.details !== undefined) this.#details = fields.details;
     if (fields.progress !== undefined) this.#progress = fields.progress;
     if (fields.tileCount !== undefined) this.#tileCount = fields.tileCount;
+    this.#refreshWake();
     this.#render();
+  }
+
+  #refreshWake() {
+    if (this.#fadeTimer) { clearTimeout(this.#fadeTimer); this.#fadeTimer = null; }
+    if (!this.#details) { this.#wake = false; return; }
+    this.#wake = true;
+    if (this.#state !== 'running') {
+      this.#fadeTimer = setTimeout(() => {
+        this.#wake = false;
+        this.#fadeTimer = null;
+        this.#render();
+      }, FADE_DELAY_MS);
+    }
   }
 
   set message(msg) { this.set({ title: msg }); }
@@ -71,6 +93,7 @@ class StatusBar extends HTMLElement {
     morph(this, `
       <style>
         .status-bar .status-row {
+          position: relative;
           display: flex;
           align-items: center;
           gap: 0.4rem;
@@ -78,7 +101,6 @@ class StatusBar extends HTMLElement {
           width: 100%;
         }
         .status-bar .status-icon-wrap {
-          position: relative;
           display: inline-flex;
           align-items: center;
           flex-shrink: 0;
@@ -98,10 +120,10 @@ class StatusBar extends HTMLElement {
           50%      { opacity: 1; }
         }
         .status-bar .status-tooltip {
-          display: none;
           position: absolute;
-          bottom: calc(100% + 0.45rem);
-          left: 0;
+          left: calc(100% + 0.5rem);
+          top: 50%;
+          transform: translateY(-50%);
           background: var(--pico-card-background-color, #1e1e2e);
           color: var(--pico-color, #cdd6f4);
           border: 1px solid var(--pico-muted-border-color);
@@ -116,10 +138,16 @@ class StatusBar extends HTMLElement {
           pointer-events: none;
           box-shadow: 0 2px 8px rgba(0,0,0,.25);
           mix-blend-mode: normal;
+          opacity: 0;
+          visibility: hidden;
+          transition: opacity 0.35s ease, visibility 0s linear 0.35s;
         }
-        .status-bar .status-icon-wrap:hover .status-tooltip,
-        .status-bar .status-icon-wrap:focus-within .status-tooltip {
-          display: block;
+        .status-bar .status-row:hover .status-tooltip,
+        .status-bar .status-row:focus-within .status-tooltip,
+        .status-bar .status-tooltip.auto-visible {
+          opacity: 1;
+          visibility: visible;
+          transition: opacity 0.2s ease, visibility 0s linear 0s;
         }
         .status-bar .status-text {
           font-size: 0.85rem;
@@ -159,10 +187,9 @@ class StatusBar extends HTMLElement {
         }
       </style>
 
-      <div class="status-row">
-        <span class="status-icon-wrap" ${this.#details ? 'tabindex="0"' : ''} aria-label="${esc(ariaLabel)}">
+      <div class="status-row" ${this.#details ? 'tabindex="0"' : ''} aria-label="${esc(ariaLabel)}">
+        <span class="status-icon-wrap">
           <i class="fas fa-circle status-icon ${this.#state}" aria-hidden="true"></i>
-          ${this.#details ? `<span class="status-tooltip" role="tooltip">${esc(this.#details)}</span>` : ''}
         </span>
         <div class="status-text">${esc(this.#title)}</div>
         ${showProgress ? `
@@ -171,6 +198,7 @@ class StatusBar extends HTMLElement {
           </div>
           ${hasTileCount ? `<span class="progress-count">${esc(tileText)}</span>` : ''}
         ` : ''}
+        ${this.#details ? `<span class="status-tooltip${this.#wake ? ' auto-visible' : ''}" role="tooltip">${esc(this.#details)}</span>` : ''}
       </div>
     `);
   }

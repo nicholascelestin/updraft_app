@@ -4,24 +4,16 @@
  */
 
 export const UPSCALER_MODELS = [
-  { url: 'models/4x-UpdraftSmall.onnx', scale: 4, label: 'Updraft Small (Custom)', sizeMB: 1.4, multipleOf: 32 },
-  { url: 'models/4x-ClearRealityV1.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.9 },
-  { url: 'models/DAT_light_x4_dyn_OTF_4.onnx', scale: 4, label: 'DAT Light Restore (DAT-Light OTF)', sizeMB: 5 },
-  { url: 'models/4x-UltraSharpV2_Lite.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)', sizeMB: 30 },
+  { url: 'models/4x-UpdraftSmall_fp16.onnx', scale: 4, label: 'Updraft Small (Custom)', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
+  { url: 'models/4x-ClearRealityV1_fp16.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.0, precision: 'fp16' },
+  { url: 'models/4x-UpdraftBig_fp16.onnx', scale: 4, label: 'Updraft Big (Custom)', sizeMB: 3.3, multipleOf: 32, precision: 'fp16' },
+  { url: 'models/DAT_light_x4_dyn_OTF_4_fp16.onnx', scale: 4, label: 'DAT Light Restore (DAT-Light OTF)', sizeMB: 4.4, precision: 'fp16' },
+  { url: 'models/4x-UltraSharpV2_Lite_fp16.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)', sizeMB: 15, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2.onnx', scale: 4, label: 'UltraSharp V2 (DAT)', sizeMB: 52 },
-  { url: 'models/super.onnx', scale: 4, label: 'Apple Super 188k', sizeMB: 5.5, multipleOf: 32 },
-  { url: 'models/super_2.onnx', scale: 4, label: 'Apple Super 2 202k', sizeMB: 5.5, multipleOf: 32 },
-  { url: 'models/super_3.onnx', scale: 4, label: 'Apple Super 3 244k', sizeMB: 5.5, multipleOf: 32 },
-  { url: 'models/super_4.onnx', scale: 4, label: 'Apple Super 4 308k', sizeMB: 5.5, multipleOf: 32 },
-  { url: 'models/super_5.onnx', scale: 4, label: 'Apple Super 5 358k', sizeMB: 5.5, multipleOf: 32 },
-  { url: 'models/super_6.onnx', scale: 4, label: 'Apple Super 6 416k', sizeMB: 5.5, multipleOf: 32 },
-  { url: 'models/super_7.onnx', scale: 4, label: 'Apple Super 7 450k', sizeMB: 5.5, multipleOf: 32 },
-  { url: 'models/super_8.onnx', scale: 4, label: 'Apple Super 8 488k', sizeMB: 5.5, multipleOf: 32 },
+  
 
-
-
-
-
+  // { url: 'models/ichigo_1_fp16.onnx', scale: 4, label: 'Ichigo 1 200k FP16', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
+  // { url: 'models/ichigo_2_fp16.onnx', scale: 4, label: 'Ichigo 2 300k FP16', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
 
   {
     url: 'models/tinysr_fused.onnx',
