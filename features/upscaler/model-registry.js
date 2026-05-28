@@ -10,7 +10,12 @@ export const UPSCALER_MODELS = [
   { url: 'models/DAT_light_x4_dyn_OTF_4_fp16.onnx', scale: 4, label: 'DAT Light Restore (DAT-Light OTF)', sizeMB: 4.4, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2_Lite_fp16.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)', sizeMB: 15, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2.onnx', scale: 4, label: 'UltraSharp V2 (DAT)', sizeMB: 52 },
-  
+  { url: 'models/vanilla.onnx', scale: 4, label: 'Vanilla', sizeMB: 1 },
+  { url: 'models/recon_exp.onnx', scale: 4, label: 'Recon Expand', sizeMB: 1.1 },
+  { url: 'models/both_exp.onnx', scale: 4, label: 'Both Expand', sizeMB: 1.2 },
+  { url: 'models/feature.onnx', scale: 4, label: 'Feature', sizeMB: 1.2 },
+  { url: 'models/softmax.onnx', scale: 4, label: 'Softmax', sizeMB: 1.2 },
+  { url: 'models/softmax_2.onnx', scale: 4, label: 'Softmax 200k', sizeMB: 1.2 },
 
   // { url: 'models/ichigo_1_fp16.onnx', scale: 4, label: 'Ichigo 1 200k FP16', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
   // { url: 'models/ichigo_2_fp16.onnx', scale: 4, label: 'Ichigo 2 300k FP16', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
