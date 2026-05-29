@@ -1,21 +1,32 @@
 /**
- * <view-mode-controls> — segmented icon-button radio for the canvas view mode.
+ * <view-mode-controls> -- segmented icon-button radio for the canvas view mode.
  *
  * Renders one button per mode; the currently-selected mode is marked with
  * `aria-pressed="true"`. Clicking a different button switches and emits
  * `mode-change` { detail: { mode } }.
- *
- * Mode keys: 'fit-width' | 'fit-height' | 'one-to-one'.
  */
 
+// Canonical mode values. Callers should reference VIEW_MODE.X rather than
+// raw strings so a typo becomes a compile-loud error.
+export const VIEW_MODE = Object.freeze({
+  FIT_WIDTH: 'fit-width',
+  FIT_HEIGHT: 'fit-height',
+  ONE_TO_ONE: 'one-to-one',
+});
+
 const VIEW_MODES = [
-  { key: 'fit-width',   label: 'Fit Width',   icon: 'fa-arrows-left-right' },
-  { key: 'fit-height',  label: 'Fit Height',  icon: 'fa-arrows-up-down' },
-  { key: 'one-to-one',  label: '1:1',         icon: 'fa-vector-square' },
+  { key: VIEW_MODE.FIT_WIDTH,  label: 'Fit Width',   icon: 'fa-arrows-left-right' },
+  { key: VIEW_MODE.FIT_HEIGHT, label: 'Fit Height',  icon: 'fa-arrows-up-down' },
+  { key: VIEW_MODE.ONE_TO_ONE, label: '1:1',         icon: 'fa-vector-square' },
 ];
 
+const VIEW_MODE_VALUES = Object.values(VIEW_MODE);
+export function isViewMode(value) {
+  return VIEW_MODE_VALUES.includes(value);
+}
+
 class ViewModeControls extends HTMLElement {
-  #mode = 'fit-width';
+  #mode = VIEW_MODE.FIT_WIDTH;
 
   connectedCallback() {
     this.#render();

@@ -29,8 +29,18 @@
 
 import { morph } from 'lib/morph';
 
+// Canonical state values for the status bar. Callers should pass STATUS_STATE.X
+// rather than the raw string so a typo becomes a compile-loud error.
+export const STATUS_STATE = Object.freeze({
+  IDLE: 'idle',
+  RUNNING: 'running',
+  SUCCESS: 'success',
+  WARNING: 'warning',
+  ERROR: 'error',
+});
+
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const STATES = ['idle', 'running', 'success', 'warning', 'error'];
+const STATES = Object.values(STATUS_STATE);
 
 const FADE_DELAY_MS = 2000;
 

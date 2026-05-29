@@ -1,5 +1,5 @@
 /**
- * UpscalerEngine — tiled ONNX super-resolution inference.
+ * UpscalerEngine -- tiled ONNX super-resolution inference.
  * Downloads a model, creates a session, runs tiled inference on images.
  * Uses Canvas 2D for pixel I/O in the WASM/WebGL path; GPU paths avoid readback.
  */
@@ -16,23 +16,14 @@ import {
   finalizeGaussianRegion,
 } from './tiling.js';
 import { readMetaEntry, isFp16InputType } from 'lib/onnx-meta';
-import { dispatchBackendEvent } from 'lib/backend-events';
-import { loadSession } from 'lib/backend';
+import { BACKEND_EVENT_KIND, dispatchBackendEvent } from 'lib/backend-events';
+import { INTENT, loadSession, normalizeIntent } from 'lib/backend';
 
 const DEFAULT_SCALE = 4;
 const DEFAULT_OVERLAP = 16;
 
 function clampByte(v) {
   return v < 0 ? 0 : v > 255 ? 255 : (v + 0.5) | 0;
-}
-
-// Normalize the various aliases the caller might pass for backend intent.
-// New code should pass 'gpu' or 'cpu' directly; the legacy ORT-Web strings
-// 'webgpu' and 'wasm' are still accepted so a half-migrated UI keeps working.
-function normalizeIntent(value) {
-  if (value === 'webgpu' || value === 'gpu') return 'gpu';
-  if (value === 'wasm'   || value === 'cpu') return 'cpu';
-  return 'cpu';
 }
 
 function yieldToEventLoop() {
@@ -122,7 +113,7 @@ function chwToImageData(chwData, width, height, valueScale) {
 }
 
 /**
- * Convert HWC float32 data (channels-last: [R,G,B, R,G,B, …] per pixel)
+ * Convert HWC float32 data (channels-last: [R,G,B, R,G,B, ...] per pixel)
  * into an RGBA ImageData. Used when the WebGPU EP returns NHWC-ordered output.
  */
 function hwcToImageData(hwcData, width, height, valueScale) {
@@ -142,7 +133,7 @@ function hwcToImageData(hwcData, width, height, valueScale) {
 }
 
 // ---------------------------------------------------------------------------
-// fp16 packing — ORT-Web fp16 tensors take/return a Uint16Array of IEEE-754
+// fp16 packing -- ORT-Web fp16 tensors take/return a Uint16Array of IEEE-754
 // binary16 bit patterns. We use the platform's Float16Array when available
 // (Chromium 122+, Safari 18.2+) and fall back to a manual packer otherwise.
 // fp16 only kicks in when the model is declared fp16; everything else stays
@@ -216,13 +207,13 @@ function unpackFloat16BitsToFloat32(u16) {
 
 // TODO(ort-web): remove this whole block when ORT-Web fixes
 // program-manager.ts normalizeDispatchGroupSize, which today does a lossy
-// rewrite of dispatch shape (X, 1, 1) → (sqrt(X), sqrt(X), 1) and breaks
+// rewrite of dispatch shape (X, 1, 1) -> (sqrt(X), sqrt(X), 1) and breaks
 // the (X=col, Y=row) contract Conv2DMatMul and MatMul shaders expect.
 //
 // What goes wrong: ORT reshuffles whenever X > maxComputeWorkgroupsPerDimension
 // (65535). Conv2DMatMul/MatMul then treat the synthesised Y as a row-tile
 // index, the row-bounds guard rejects ~99% of writes, and the output
-// buffer is left mostly uninitialised — visible as scrambled output for
+// buffer is left mostly uninitialised -- visible as scrambled output for
 // any model whose post-PixelShuffle activation has H*W > ~2.1M pixels.
 //
 // Workaround: monkey-patch device.createShaderModule to recover the
@@ -276,22 +267,20 @@ function installWebGPUDispatchFix(device) {
 }
 
 export class UpscalerEngine {
+  #model;
+  #overlap;
+  #profiling = false;
+  // Engine-effective precision. Starts as #model.precision; overridden after
+  // load if the session's declared input dtype disagrees (stale custom-model
+  // records can carry the wrong value; the loaded session is the source of
+  // truth). The SRModel itself stays untouched.
+  #actualPrecision;
   #session = null;
   #modelBuffer = null;
-  #modelUrl;
-  #scale;
-  #overlap;
-  #modelValueRange;
-  #modelLayout;
-  #modelInputMultiple;
-  #modelPrecision;
-  #upscaleBefore;
-  #tileBlend;
-  #profiling = false;
   // What the user actually got: a label like 'web-webgpu', 'web-wasm',
   // 'native-coreml/MLProgram', 'native-cpu'. Set by loadSession on every
   // successful load AND kept current by #backendListener for the rest of
-  // the session — without that, runtime EP fallbacks (e.g. native worker
+  // the session -- without that, runtime EP fallbacks (e.g. native worker
   // drops from CoreML to CPU mid-tile) would leave it stale and the
   // loadModel early-return path would mis-announce on the next run.
   #realizedBackend = null;
@@ -304,45 +293,14 @@ export class UpscalerEngine {
   #gpuRenderer = null;
   #gpuExtractor = null;
 
-  constructor({
-    modelUrl,
-    scale = DEFAULT_SCALE,
-    overlap = DEFAULT_OVERLAP,
-    modelValueRange = 1,
-    modelLayout = 'nchw',
-    modelInputMultiple = 1,
-    modelPrecision = 'fp32',
-    // upscaleBefore=true: the model operates in HR pixel space (e.g. a
-    // refiner that takes a pre-upsampled LR image and returns an HR image
-    // at the SAME resolution). Tile coordinates and modelInputMultiple
-    // stay in LR-pixel units (consistent with regular SR models advertised
-    // with scale > 1); the engine bicubic-upsamples LR->HR before tile
-    // extraction and multiplies extraction coords by `scale` so the
-    // backend sees HR tensors. All GPU fast paths remain viable — they're
-    // coordinate-agnostic.
-    upscaleBefore = false,
-    // tileBlend='gaussian' replaces the default half-overlap hard crop
-    // with float32 Gaussian-weighted accumulation. Use for diffusion-
-    // style models with visible tile seams. Costs ~16 bytes/HR-pixel
-    // working memory and forces the CPU readback path (the GPU output
-    // renderer writes directly to the bgra8unorm canvas surface, which
-    // can't host the float32 accumulator).
-    tileBlend = 'overlapCrop',
-    profile = false,
-  }) {
-    this.#modelUrl = modelUrl;
-    this.#scale = scale;
+  constructor(model, { overlap = DEFAULT_OVERLAP, profile = false } = {}) {
+    this.#model = model;
     this.#overlap = overlap;
-    this.#modelValueRange = modelValueRange;
-    this.#modelLayout = modelLayout === 'nhwc' ? 'nhwc' : 'nchw';
-    this.#modelInputMultiple = Number.isFinite(modelInputMultiple) ? Math.max(1, Math.floor(modelInputMultiple)) : 1;
-    this.#modelPrecision = modelPrecision === 'fp16' ? 'fp16' : 'fp32';
-    this.#upscaleBefore = !!upscaleBefore;
-    this.#tileBlend = tileBlend === 'gaussian' ? 'gaussian' : 'overlapCrop';
     this.#profiling = profile;
+    this.#actualPrecision = model.precision;
   }
 
-  get scale() { return this.#scale; }
+  get scale() { return this.#model.scale; }
   // The realized backend label (e.g. 'web-webgpu', 'native-coreml/MLProgram').
   // For UI display via friendlyBackend; not used for identity checks.
   get realizedBackend() { return this.#realizedBackend; }
@@ -352,9 +310,9 @@ export class UpscalerEngine {
   get isLoaded() { return this.#session !== null; }
   get profiling() { return this.#profiling; }
   set profiling(v) { this.#profiling = !!v; }
-  get modelPrecision() { return this.#modelPrecision; }
+  get modelPrecision() { return this.#actualPrecision; }
 
-  async loadModel(intent = 'cpu', onProgress) {
+  async loadModel(intent = INTENT.CPU, onProgress) {
     if (onProgress != null && typeof onProgress !== 'function') {
       console.warn('[UpscalerEngine] Ignoring non-function onProgress callback.', {
         type: typeof onProgress,
@@ -368,41 +326,44 @@ export class UpscalerEngine {
       // Reusing the existing session; re-announce so per-run backend
       // trackers (status bar's "Done via X" line) record a success this run.
       if (this.#realizedBackend) {
-        dispatchBackendEvent({ kind: 'success', backend: this.#realizedBackend });
+        dispatchBackendEvent({ kind: BACKEND_EVENT_KIND.SUCCESS, backend: this.#realizedBackend });
       }
       return;
     }
     this.#releaseSession();
 
     if (!this.#modelBuffer) {
-      this.#modelBuffer = await fetchWithProgress(this.#modelUrl, report);
+      this.#modelBuffer = await fetchWithProgress(this.#model.url, report);
     }
 
-    report?.(1, 'Loading model into runtime\u2026');
+    report?.(1, 'Loading model into runtime...');
+
+    // Reset to the SRModel's declared precision in case a prior load self-
+    // corrected; the new session may have different metadata.
+    this.#actualPrecision = this.#model.precision;
 
     // The GPU fast paths (zero-copy input extract via GpuFrameExtractor and
     // zero-readback output render via GpuTileRenderer) both assume fp32
     // storage buffers in their WGSL shaders. fp16 models go through the
     // standard CPU readback path: ONNX still runs on the GPU, but the tile
-    // tensors round-trip through the CPU as Uint16 bit patterns. We make the
-    // initial decision from the configured precision, then re-validate after
-    // the session is created (the model's declared input dtype is the source
-    // of truth — see comment below).
+    // tensors round-trip through the CPU as Uint16 bit patterns. Initial
+    // decision uses the declared precision; re-validated below against the
+    // session's actual input dtype.
     let canUseGpuFastPath =
-      this.#modelPrecision !== 'fp16' &&
-      this.#modelLayout === 'nchw' &&
-      this.#modelInputMultiple === 1;
+      this.#actualPrecision !== 'fp16' &&
+      this.#model.layout === 'nchw' &&
+      this.#model.multipleOf === 1;
     const sessionLoadOpts = { profile: this.#profiling };
-    if (intent === 'gpu' && canUseGpuFastPath) {
+    if (intent === INTENT.GPU && canUseGpuFastPath) {
       sessionLoadOpts.preferredOutputLocation = 'gpu-buffer';
     }
     // ORT's graph optimizer fuses Conv + PReLU pairs into com.microsoft.FusedConv,
-    // but the WebGPU EP only registers a FusedConv kernel for fp32 — not fp16.
+    // but the WebGPU EP only registers a FusedConv kernel for fp32 -- not fp16.
     // The fusion pass runs anyway and produces an unrunnable node on fp16
     // graphs; the whole session-load then fails and the engine falls back to
     // WASM. Setting graphOptimizationLevel='disabled' stops the fusion entirely
     // and lets Conv + PReLU run as separate fp16-supported kernels.
-    if (this.#modelPrecision === 'fp16') {
+    if (this.#actualPrecision === 'fp16') {
       sessionLoadOpts.graphOptimizationLevel = 'disabled';
     }
 
@@ -415,28 +376,24 @@ export class UpscalerEngine {
     this.#realizedBackend = realizedBackend;
     this.#trackRealizedBackend();
 
-    // Self-correct modelPrecision from the model's declared input dtype.
-    // Stale custom-model records (e.g. uploaded before fp16 support existed,
-    // or before the inspector started reading the right metadata field)
-    // can carry the wrong precision; the model graph itself doesn't lie.
-    // Without this, the engine would build fp32 tensors for an fp16 model
-    // and ORT would throw "Unexpected input data type" at the first run.
+    // Self-correct precision from the loaded session's declared input dtype.
+    // Stale custom-model records can carry the wrong value; the model graph
+    // itself doesn't lie. SRModel stays untouched -- the correction is local
+    // to the engine, and the warning nudges the user to fix the record.
     const sessionInputName = this.#session.inputNames?.[0];
     const sessionInMeta = readMetaEntry(this.#session.inputMetadata, sessionInputName, 0);
     const declaredInputType = sessionInMeta?.type;
-    const detectedPrecision = isFp16InputType(declaredInputType)
-      ? 'fp16'
-      : 'fp32';
-    if (detectedPrecision !== this.#modelPrecision) {
+    const detectedPrecision = isFp16InputType(declaredInputType) ? 'fp16' : 'fp32';
+    if (detectedPrecision !== this.#actualPrecision) {
       console.warn(
-        `[UpscalerEngine] Configured precision (${this.#modelPrecision}) disagrees with the model's declared input dtype (${declaredInputType}); using ${detectedPrecision}. ` +
+        `[UpscalerEngine] Configured precision (${this.#model.precision}) disagrees with the session's declared input dtype (${declaredInputType}); using ${detectedPrecision}. ` +
         `If this is a saved custom model, edit it and set Precision = ${detectedPrecision} to make this explicit.`,
       );
-      this.#modelPrecision = detectedPrecision;
+      this.#actualPrecision = detectedPrecision;
       canUseGpuFastPath =
-        this.#modelPrecision !== 'fp16' &&
-        this.#modelLayout === 'nchw' &&
-        this.#modelInputMultiple === 1;
+        this.#actualPrecision !== 'fp16' &&
+        this.#model.layout === 'nchw' &&
+        this.#model.multipleOf === 1;
     }
 
     if (this.#realizedBackend === 'web-webgpu') {
@@ -446,7 +403,7 @@ export class UpscalerEngine {
         // installWebGPUDispatchFix is idempotent across model loads. If we
         // install it here for the first time, the just-created session's
         // shader modules were compiled by ORT-Web BEFORE the wrapper
-        // existed — release and recreate so all shaders go through it now.
+        // existed -- release and recreate so all shaders go through it now.
         if (installWebGPUDispatchFix(this.#device)) {
           await this.#session.release();
           const reloaded = await loadSession(this.#modelBuffer, intent, sessionLoadOpts);
@@ -472,7 +429,7 @@ export class UpscalerEngine {
   }
 
   async upscale(img, tileSize, { onTile, signal } = {}) {
-    if (!this.#session) throw new Error('Model not loaded — call loadModel() first');
+    if (!this.#session) throw new Error('Model not loaded -- call loadModel() first');
 
     const perf = {
       setup: 0,
@@ -487,13 +444,13 @@ export class UpscalerEngine {
     };
     const tTotal = performance.now();
 
-    const scale = this.#scale;
+    const scale = this.#model.scale;
     const overlap = this.#overlap;
     const srcW = img.videoWidth ?? img.width;
     const srcH = img.videoHeight ?? img.height;
     const outW = srcW * scale;
     const outH = srcH * scale;
-    const gaussianBlend = this.#tileBlend === 'gaussian';
+    const gaussianBlend = this.#model.tileBlend === 'gaussian';
     // The GPU output renderer writes via fragment shader directly to the
     // canvas's bgra8unorm surface, so it can't host the float32
     // accumulator Gaussian blending needs. Force the CPU readback path.
@@ -502,9 +459,9 @@ export class UpscalerEngine {
 
     // In upscaleBefore mode the model takes HR-sized tiles, so we
     // multiply all input-side tile coords/dims by `scale`. The output
-    // side already uses HR coords (tx*scale, outTW=tw*scale, …) for
+    // side already uses HR coords (tx*scale, outTW=tw*scale, ...) for
     // every model, so the GPU output renderer needs no changes.
-    const pixelScale = this.#upscaleBefore ? scale : 1;
+    const pixelScale = this.#model.upscaleBefore ? scale : 1;
 
     // Gaussian accumulator buffers + a per-tile-size weight cache. The
     // accumRGB stores values in [0, 255] before clamping (matching what
@@ -516,8 +473,8 @@ export class UpscalerEngine {
 
     // The WebGPU canvas surface and the renderer's persistent output texture
     // are both bounded by maxTextureDimension2D (commonly 8192, sometimes
-    // 16384). Exceeding this cap doesn't throw — WebGPU pushes a validation
-    // error and the canvas stays black — so we proactively fall back to the
+    // 16384). Exceeding this cap doesn't throw -- WebGPU pushes a validation
+    // error and the canvas stays black -- so we proactively fall back to the
     // CPU readback path whenever the destination is too big. ONNX inference
     // continues to run on WebGPU; only the output rendering path changes.
     if (useGpu) {
@@ -537,7 +494,7 @@ export class UpscalerEngine {
     let extractImg = img;
     let extractW = srcW;
     let extractH = srcH;
-    if (this.#upscaleBefore) {
+    if (this.#model.upscaleBefore) {
       const hrCanvas = document.createElement('canvas');
       hrCanvas.width = outW;
       hrCanvas.height = outH;
@@ -633,7 +590,7 @@ export class UpscalerEngine {
         const tGpu = performance.now();
         this.#gpuRenderer.renderTile(
           results[outputName].gpuBuffer, outTW, outTH,
-          tx * scale, ty * scale, overlap * scale, 1 / this.#modelValueRange,
+          tx * scale, ty * scale, overlap * scale, 1 / this.#model.range,
         );
         this.#gpuRenderer.presentToCanvas();
         renderMs = performance.now() - tGpu;
@@ -670,7 +627,7 @@ export class UpscalerEngine {
             weights = makeGaussianWeights2D(outTH, outTW);
             gaussWeightCache.set(key, weights);
           }
-          const valueScale = 255 / this.#modelValueRange;
+          const valueScale = 255 / this.#model.range;
           accumulateGaussianTile(
             accumRGB, accumW, outW, outH,
             outData, outPaddedTW, outPaddedTH,
@@ -688,7 +645,7 @@ export class UpscalerEngine {
           );
         } else {
           const decode = isNHWC ? hwcToImageData : chwToImageData;
-          const paddedImgData = decode(outData, outPaddedTW, outPaddedTH, 255 / this.#modelValueRange);
+          const paddedImgData = decode(outData, outPaddedTW, outPaddedTH, 255 / this.#model.range);
           const imgData = outPaddedTW === outTW && outPaddedTH === outTH
             ? paddedImgData
             : this.#cropImageData(paddedImgData, outTW, outTH);
@@ -777,14 +734,14 @@ export class UpscalerEngine {
   }
 
   // While a session is alive, follow runtime backend changes via the
-  // backend-event channel — the native worker can fall back from CoreML to
+  // backend-event channel -- the native worker can fall back from CoreML to
   // CPU between tiles, and that's the only signal we get. Without this the
   // next loadModel-early-return announces a stale realizedBackend.
   #trackRealizedBackend() {
     if (this.#backendListener) return;
     this.#backendListener = (e) => {
       const d = e?.detail;
-      if (d && d.kind === 'success' && typeof d.backend === 'string') {
+      if (d && d.kind === BACKEND_EVENT_KIND.SUCCESS && typeof d.backend === 'string') {
         this.#realizedBackend = d.backend;
       }
     };
@@ -817,7 +774,7 @@ export class UpscalerEngine {
   }
 
   #alignToMultiple(value) {
-    const m = this.#modelInputMultiple;
+    const m = this.#model.multipleOf;
     if (!Number.isFinite(m) || m <= 1) return value;
     return Math.ceil(value / m) * m;
   }
@@ -842,14 +799,14 @@ export class UpscalerEngine {
     if (useGpuInput) {
       // GPU input fast path is gated to fp32 in loadModel(), so we only
       // reach here when the model is fp32.
-      const gpuBuf = this.#gpuExtractor.extractTile(tx, ty, tw, th, this.#modelValueRange);
+      const gpuBuf = this.#gpuExtractor.extractTile(tx, ty, tw, th, this.#model.range);
       return ort.Tensor.fromGpuBuffer(gpuBuf, {
         dataType: 'float32',
         dims: [1, 3, th, tw],
         dispose: () => {},
       });
     }
-    const isNHWC = this.#modelLayout === 'nhwc';
+    const isNHWC = this.#model.layout === 'nhwc';
     const extract = isNHWC ? extractTileNHWC : extractTileNCHW;
     const dims = isNHWC ? [1, paddedTH, paddedTW, 3] : [1, 3, paddedTH, paddedTW];
     const f32 = extract(
@@ -860,9 +817,9 @@ export class UpscalerEngine {
       th,
       paddedTW,
       paddedTH,
-      this.#modelValueRange / 255,
+      this.#model.range / 255,
     );
-    if (this.#modelPrecision === 'fp16') {
+    if (this.#actualPrecision === 'fp16') {
       const u16 = packFloat32ToFloat16Bits(f32);
       return new ort.Tensor('float16', u16, dims);
     }

@@ -1,7 +1,7 @@
-/**
- * Shared model definitions for the image and video upscaler features.
- * Single source of truth — all model <select> elements render from this list.
- */
+// Built-in ONNX model catalog. Consumed only by SRModelStore at init.
+// Custom models live in localStorage and flow through the same store.
+// Resamplers (Lanczos, bicubic) are a different concept entirely and live
+// in upscaler-controls.js where they're rendered into the model select.
 
 export const UPSCALER_MODELS = [
   { url: 'models/4x-UpdraftSmall_fp16.onnx', scale: 4, label: 'Updraft Small (Custom)', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
@@ -16,66 +16,24 @@ export const UPSCALER_MODELS = [
   { url: 'models/feature.onnx', scale: 4, label: 'Feature', sizeMB: 1.2 },
   { url: 'models/softmax.onnx', scale: 4, label: 'Softmax', sizeMB: 1.2 },
   { url: 'models/softmax_2.onnx', scale: 4, label: 'Softmax 200k', sizeMB: 1.2 },
+  { url: 'models/softmax_3.onnx', scale: 4, label: 'Softmax 250k', sizeMB: 1.2 },
+  { url: 'models/softmax_4.onnx', scale: 4, label: 'Softmax 300k', sizeMB: 1.2 },
+  { url: 'models/softmax_5.onnx', scale: 4, label: 'Softmax 350k', sizeMB: 1.2 },
+  { url: 'models/softmax_6.onnx', scale: 4, label: 'Softmax 400k', sizeMB: 1.2 },
+  { url: 'models/softmax_7.onnx', scale: 4, label: 'Softmax 441k', sizeMB: 1.2 },
+  { url: 'models/softmax_8.onnx', scale: 4, label: 'Softmax 500k', sizeMB: 1.2 },
+  { url: 'models/softmax_9.onnx', scale: 4, label: 'Softmax 536k', sizeMB: 1.2 },
 
-  // { url: 'models/ichigo_1_fp16.onnx', scale: 4, label: 'Ichigo 1 200k FP16', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
-  // { url: 'models/ichigo_2_fp16.onnx', scale: 4, label: 'Ichigo 2 300k FP16', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
 
   {
     url: 'models/tinysr_fused.onnx',
     scale: 4,
     label: 'TinySR (DiT refiner)',
     sizeMB: 687,
-    multipleOf: 128,        // 128 LR × 4 = 512 HR (the fixed model input)
-    maxTileSize: 128,       // same — every tile pads/crops to exactly 128 LR
+    multipleOf: 128,        
+    maxTileSize: 128,       
     precision: 'fp16',
     upscaleBefore: true,
     tileBlend: 'gaussian',  // diffusion-style: hard-overlap shows seams
-  }
-
+  },
 ];
-
-export const UPSCALER_RESAMPLER_MODELS = [
-  { url: 'builtin:lanczos-4x', scale: 4, label: 'Lanczos' },
-  { url: 'builtin:bicubic-4x', scale: 4, label: 'Bicubic' },
-];
-
-/**
- * Render <option> elements for a model <select>.
- * @param {typeof UPSCALER_MODELS} [models]
- * @param {{ selected?: string, includeResamplers?: boolean }} [opts]
- *   - `selected` is matched against model URL
- *   - `includeResamplers` appends built-in non-ONNX upscale methods
- */
-export function modelOptionsHTML(models = UPSCALER_MODELS, { selected, includeResamplers = false } = {}) {
-  const modelList = includeResamplers
-    ? [...models, ...UPSCALER_RESAMPLER_MODELS]
-    : models;
-
-  return modelList.map(m => {
-    const attrs = [
-      `value="${m.url}"`,
-      `data-scale="${m.scale}"`,
-    ];
-    if (m.range) attrs.push(`data-range="${m.range}"`);
-    if (m.backend) attrs.push(`data-backend="${m.backend}"`);
-    if (m.sizeMB != null) attrs.push(`data-sizemb="${m.sizeMB}"`);
-    if (Number.isFinite(m.maxTileSize)) attrs.push(`data-maxtilesize="${m.maxTileSize}"`);
-    if (Number.isFinite(m.multipleOf) && m.multipleOf > 1) {
-      attrs.push(`data-multipleof="${m.multipleOf}"`);
-    }
-    // Default precision is fp32; only emit data-precision when the model is
-    // fp16 so unannotated registry entries stay legible.
-    if (m.precision === 'fp16') attrs.push(`data-precision="fp16"`);
-    // upscaleBefore=true marks HR-space refiners (e.g. fused diffusion SR
-    // graphs). The engine bicubic-upsamples LR->HR before tiling so the
-    // model sees HR pixel patches; multipleOf / maxTileSize stay in LR units.
-    if (m.upscaleBefore) attrs.push(`data-upscalebefore="true"`);
-    // tileBlend='gaussian' switches the tile stitcher to float32 Gaussian-
-    // weighted accumulation (forces CPU readback path). Use for diffusion-
-    // style models where the default half-overlap hard crop shows seams.
-    if (m.tileBlend === 'gaussian') attrs.push(`data-tileblend="gaussian"`);
-    if (m.url === selected) attrs.push('selected');
-    const sizeStr = m.sizeMB != null ? ` (~${m.sizeMB}MB)` : '';
-    return `<option ${attrs.join(' ')}>${m.label}${sizeStr}</option>`;
-  }).join('\n              ');
-}

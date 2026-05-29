@@ -1,10 +1,19 @@
 import 'components/status-bar';
 import 'components/view-mode-controls';
 
-const STATES = ['empty', 'ready', 'running', 'done'];
+// Canonical toolbar state values. Drives button visibility (vs STATUS_STATE
+// in status-bar, which drives icon color -- different vocabulary on purpose).
+export const TOOLBAR_STATE = Object.freeze({
+  EMPTY: 'empty',
+  READY: 'ready',
+  RUNNING: 'running',
+  DONE: 'done',
+});
+
+const STATES = Object.values(TOOLBAR_STATE);
 
 class UpscalerToolbar extends HTMLElement {
-  #state = 'empty';
+  #state = TOOLBAR_STATE.EMPTY;
   #hasCrop = false;
 
   connectedCallback() {
@@ -58,15 +67,15 @@ class UpscalerToolbar extends HTMLElement {
 
     const s = this.#state;
     const upscaleBtn = this.#q('.upscale-btn');
-    upscaleBtn.disabled = s === 'empty' || s === 'running';
+    upscaleBtn.disabled = s === TOOLBAR_STATE.EMPTY || s === TOOLBAR_STATE.RUNNING;
 
-    setDisplay('.stop-btn',         s === 'running');
-    setDisplay('.startover-btn',    s === 'ready' || s === 'done');
-    setDisplay('.back-to-crop-btn', s === 'done');
-    setDisplay('.clear-crop-btn',   s === 'ready' && this.#hasCrop);
+    setDisplay('.stop-btn',         s === TOOLBAR_STATE.RUNNING);
+    setDisplay('.startover-btn',    s === TOOLBAR_STATE.READY || s === TOOLBAR_STATE.DONE);
+    setDisplay('.back-to-crop-btn', s === TOOLBAR_STATE.DONE);
+    setDisplay('.clear-crop-btn',   s === TOOLBAR_STATE.READY && this.#hasCrop);
 
-    setHidden('.canvas-toolbar-left',  s === 'empty');
-    setHidden('.canvas-toolbar-right', s !== 'done');
+    setHidden('.canvas-toolbar-left',  s === TOOLBAR_STATE.EMPTY);
+    setHidden('.canvas-toolbar-right', s !== TOOLBAR_STATE.DONE);
   }
 
   #wireEvents() {

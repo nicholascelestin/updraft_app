@@ -1,7 +1,4 @@
-/**
- * Step-based upscale pipeline — unified processing for image and video upscaling.
- * Only the Pipeline class is exported; everything else is module-private.
- */
+// Step-based upscale pipeline. Only Pipeline is exported; the rest is private.
 
 import { UpscalerEngine } from './engine/upscaler-engine.js';
 import { FaceDetectorEngine } from './engine/face-detector-engine.js';
@@ -16,7 +13,36 @@ import {
 import { buildTileGrid } from './engine/tiling.js';
 
 // ---------------------------------------------------------------------------
-// Engine pool — caches engines by tag, recreates when config diverges.
+// Tile-size constraints. Some models cap input size (e.g. DAT exports with
+// baked-in window counts); some require a fixed input size (multipleOf ===
+// maxTileSize). Aggregating across the base model + enabled passes gives the
+// effective bounds for one run. Exported for controls' dropdown disabler.
+// ---------------------------------------------------------------------------
+
+export function tileSizeBounds(models) {
+  const floors = models.filter((m) => m?.hasFixedInputSize).map((m) => m.maxTileSize);
+  const caps = models
+    .map((m) => m?.maxTileSize)
+    .filter((v) => Number.isFinite(v) && v >= 1);
+  return {
+    floor: floors.length ? Math.max(...floors) : 0,
+    cap: caps.length ? Math.min(...caps) : Infinity,
+  };
+}
+
+export function computeEffectiveTileSize(models, requested) {
+  const { floor, cap } = tileSizeBounds(models);
+  let size = requested;
+  if (floor > 0 && size > 0 && size < floor) size = floor;
+  if (cap < Infinity && (size <= 0 || size > cap)) size = cap;
+  return size;
+}
+
+// ---------------------------------------------------------------------------
+// Engine pool — caches engines by tag, recreates when the SRModel changes.
+// Identity is enough: SRModels are immutable per URL, and SRModelStore replaces
+// the instance on update, so `slot.model === model` correctly detects both
+// "different model" and "same URL but edited custom record".
 // ---------------------------------------------------------------------------
 
 class EnginePool {
@@ -29,34 +55,20 @@ class EnginePool {
     (slot.engine.destroy ?? slot.engine.release)?.call(slot.engine);
   }
 
-  getUpscaler(tag, { modelUrl, scale, modelValueRange, modelLayout = 'nchw', modelInputMultiple = 1, modelPrecision = 'fp32', upscaleBefore = false, tileBlend = 'overlapCrop', profile = false }) {
-    // Backend isn't a construction-time parameter — the engine's loadModel
-    // handles intent transitions internally (release session, load new). The
-    // pool's identity is purely the things the engine can't change after the
-    // fact: model URL, layout, precision, tile-blend strategy.
+  getUpscaler(tag, model, { profile = false } = {}) {
     const slot = this.#slots.get(tag);
-    if (
-      slot &&
-      slot.modelUrl === modelUrl &&
-      slot.modelLayout === modelLayout &&
-      slot.modelInputMultiple === modelInputMultiple &&
-      slot.modelPrecision === modelPrecision &&
-      slot.upscaleBefore === upscaleBefore &&
-      slot.tileBlend === tileBlend
-    ) {
+    if (slot && slot.model === model) {
       slot.engine.profiling = profile;
       return slot.engine;
     }
     this.#evict(tag);
-    const engine = new UpscalerEngine({ modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, profile });
-    this.#slots.set(tag, { engine, modelUrl, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend });
+    const engine = new UpscalerEngine(model, { profile });
+    this.#slots.set(tag, { engine, model });
     return engine;
   }
 
   getDetector(tag) {
-    // Backend transitions are handled inside FaceDetectorEngine.loadModel;
-    // the pool just returns the persistent engine instance.
-    let slot = this.#slots.get(tag);
+    const slot = this.#slots.get(tag);
     if (slot) return slot.engine;
     const engine = new FaceDetectorEngine();
     this.#slots.set(tag, { engine });
@@ -78,19 +90,8 @@ class EnginePool {
 const tiledUpscaleStep = {
   name: 'tiledUpscale',
   async run(ctx, cb) {
-    const { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, backend, tileSize, profile } = ctx.config;
-    const engine = ctx.pool.getUpscaler('base', {
-      modelUrl,
-      scale,
-      modelValueRange,
-      modelLayout,
-      modelInputMultiple,
-      modelPrecision,
-      upscaleBefore,
-      tileBlend,
-      backend,
-      profile,
-    });
+    const { model, backend, tileSize, profile } = ctx.config;
+    const engine = ctx.pool.getUpscaler('base', model, { profile });
     emitStage(cb, 'tiledUpscale', 'loading', { message: 'Loading base model…' });
     const tLoad = performance.now();
     await engine.loadModel(backend, (frac, msg) => {
@@ -119,21 +120,10 @@ const comparisonStep = {
   shouldRun: (ctx) => !!ctx.config.comparison,
   async run(ctx, cb) {
     const { comparison, backend, tileSize } = ctx.config;
-    const passBackend = comparison.backend || backend;
-    const engine = ctx.pool.getUpscaler('comparison-upscaler', {
-      modelUrl: comparison.modelUrl,
-      scale: comparison.scale,
-      modelValueRange: comparison.modelValueRange,
-      modelLayout: comparison.modelLayout,
-      modelInputMultiple: comparison.modelInputMultiple,
-      modelPrecision: comparison.modelPrecision,
-      upscaleBefore: comparison.upscaleBefore,
-      tileBlend: comparison.tileBlend,
-      backend: passBackend,
-    });
+    const engine = ctx.pool.getUpscaler('comparison-upscaler', comparison.model);
     emitStage(cb, 'comparison', 'loading', { message: 'Loading comparison model…' });
     const tLoad = performance.now();
-    await engine.loadModel(passBackend, (progress, message) => {
+    await engine.loadModel(backend, (progress, message) => {
       emitStage(cb, 'comparison', 'loading', { progress, message });
     });
     const modelLoadMs = Number((performance.now() - tLoad).toFixed(1));
@@ -156,21 +146,10 @@ const blendAllStep = {
   shouldRun: (ctx) => !!ctx.config.all,
   async run(ctx, cb) {
     const { all, backend, tileSize } = ctx.config;
-    const passBackend = all.backend || backend;
-    const engine = ctx.pool.getUpscaler('all-upscaler', {
-      modelUrl: all.modelUrl,
-      scale: all.scale,
-      modelValueRange: all.modelValueRange,
-      modelLayout: all.modelLayout,
-      modelInputMultiple: all.modelInputMultiple,
-      modelPrecision: all.modelPrecision,
-      upscaleBefore: all.upscaleBefore,
-      tileBlend: all.tileBlend,
-      backend: passBackend,
-    });
+    const engine = ctx.pool.getUpscaler('all-upscaler', all.model);
     emitStage(cb, 'blendAll', 'loading', { message: 'Loading all-pass model…' });
     const tLoad = performance.now();
-    await engine.loadModel(passBackend, (progress, message) => {
+    await engine.loadModel(backend, (progress, message) => {
       emitStage(cb, 'blendAll', 'loading', { progress, message });
     });
     const modelLoadMs = Number((performance.now() - tLoad).toFixed(1));
@@ -235,25 +214,14 @@ const enhanceFacesStep = {
   shouldRun: (ctx) => ctx.detections.face?.length > 0,
   async run(ctx, cb) {
     const { face, backend } = ctx.config;
-    const faceBackend = face.backend || backend;
     const { source, scale } = ctx;
 
     let canvas = ensureCanvas(ctx.image);
 
-    const engine = ctx.pool.getUpscaler('face-upscaler', {
-      modelUrl: face.modelUrl,
-      scale: face.scale,
-      modelValueRange: face.modelValueRange,
-      modelLayout: face.modelLayout,
-      modelInputMultiple: face.modelInputMultiple,
-      modelPrecision: face.modelPrecision,
-      upscaleBefore: face.upscaleBefore,
-      tileBlend: face.tileBlend,
-      backend: faceBackend,
-    });
+    const engine = ctx.pool.getUpscaler('face-upscaler', face.model);
     emitStage(cb, 'enhanceFaces', 'loading', { message: 'Loading face enhancer model…' });
     const tLoad = performance.now();
-    await engine.loadModel(faceBackend, (progress, message) => {
+    await engine.loadModel(backend, (progress, message) => {
       emitStage(cb, 'enhanceFaces', 'loading', { progress, message });
     });
     const modelLoadMs = Number((performance.now() - tLoad).toFixed(1));
@@ -264,7 +232,8 @@ const enhanceFacesStep = {
     const faces = ctx.detections.face || [];
     const configuredFaceTileSize = Number.isFinite(face.tileSize) ? face.tileSize : ctx.config.tileSize;
     const agg = {
-      setup: 0, extract: 0, inference: 0, inferenceEstimated: 0, readback: 0, gpuRender: 0, writeTile: 0, dispose: 0, total: 0, tiles: 0, modelLoadMs,
+      setup: 0, extract: 0, inference: 0, inferenceEstimated: 0, readback: 0,
+      gpuRender: 0, writeTile: 0, dispose: 0, total: 0, tiles: 0, modelLoadMs,
     };
 
     for (let faceIndex = 0; faceIndex < faces.length; faceIndex++) {
@@ -282,7 +251,7 @@ const enhanceFacesStep = {
 
       const maxTileForRoi = Math.max(1, Math.min(roi.w, roi.h));
       const requestedTileSize = Number.isFinite(configuredFaceTileSize) ? configuredFaceTileSize : 192;
-      // Honor selected tile size for face patches so large faces are not over-tiled.
+      // Honor selected tile size for face patches so large faces aren't over-tiled.
       const tileSize = requestedTileSize <= 0
         ? 0
         : Math.min(maxTileForRoi, Math.max(64, requestedTileSize));
@@ -382,14 +351,8 @@ function emitStage(cb, step, phase, details = {}) {
 }
 
 const UPSCALE_PERF_KEYS = [
-  'setup',
-  'extract',
-  'inference',
-  'inferenceEstimated',
-  'readback',
-  'gpuRender',
-  'writeTile',
-  'dispose',
+  'setup', 'extract', 'inference', 'inferenceEstimated',
+  'readback', 'gpuRender', 'writeTile', 'dispose',
 ];
 
 function getImageDims(image) {
@@ -411,22 +374,12 @@ function aggregateSessionPerf(stepPerf, ctx, input, config, totalMs) {
   const src = getImageDims(input);
   const out = getImageDims(ctx.image);
   const session = {
-    setup: 0,
-    extract: 0,
-    inference: 0,
-    inferenceEstimated: 0,
-    readback: 0,
-    gpuRender: 0,
-    writeTile: 0,
-    dispose: 0,
-    modelLoad: 0,
-    total: totalMs,
-    tiles: 0,
+    setup: 0, extract: 0, inference: 0, inferenceEstimated: 0,
+    readback: 0, gpuRender: 0, writeTile: 0, dispose: 0,
+    modelLoad: 0, total: totalMs, tiles: 0,
     tileSize: Number.isFinite(config.tileSize) ? config.tileSize : 0,
-    srcW: src.width,
-    srcH: src.height,
-    outW: out.width,
-    outH: out.height,
+    srcW: src.width, srcH: src.height,
+    outW: out.width, outH: out.height,
     pipeline: config.backend === 'webgpu' ? 'gpu' : 'cpu',
   };
 
@@ -510,24 +463,22 @@ export class Pipeline {
   #pool = new EnginePool();
 
   async run(input, config, callbacks) {
-    return runSteps(STEPS, this.#pool, input, config, callbacks);
+    // Authoritative tile-size clamp lives here — controls' UI mirror uses the
+    // same tileSizeBounds helper to disable dropdown options that would get
+    // clamped anyway.
+    const models = [
+      config.model,
+      config.comparison?.model,
+      config.all?.model,
+      config.face?.model,
+    ].filter(Boolean);
+    const effective = { ...config, tileSize: computeEffectiveTileSize(models, config.tileSize) };
+    return runSteps(STEPS, this.#pool, input, effective, callbacks);
   }
 
   async warmup(config, { onProgress } = {}) {
-    const { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, backend, profile } = config;
-    const engine = this.#pool.getUpscaler('base', {
-      modelUrl,
-      scale,
-      modelValueRange,
-      modelLayout,
-      modelInputMultiple,
-      modelPrecision,
-      upscaleBefore,
-      tileBlend,
-      backend,
-      profile,
-    });
-    await engine.loadModel(backend, onProgress);
+    const engine = this.#pool.getUpscaler('base', config.model, { profile: config.profile });
+    await engine.loadModel(config.backend, onProgress);
   }
 
   destroy() {

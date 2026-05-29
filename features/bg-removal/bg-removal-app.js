@@ -4,12 +4,12 @@
 
 import { morph } from 'lib/morph';
 import { canvasToBlobUrl, imageToBlobUrl } from 'lib/canvas';
-import { trackBackendEvents, friendlyBackend, realizedIsGpu } from 'lib/backend-events';
+import { BACKEND_EVENT_KIND, trackBackendEvents, friendlyBackend, realizedIsGpu } from 'lib/backend-events';
 import 'components/image-drop-zone';
-import 'components/status-bar';
+import { STATUS_STATE } from 'components/status-bar';
 import 'components/compare-slider';
 import 'components/image-cropper';
-import 'components/view-mode-controls';
+import { VIEW_MODE, isViewMode } from 'components/view-mode-controls';
 import { BgRemovalEngine } from './bg-removal-engine.js';
 
 /**
@@ -46,8 +46,7 @@ class BgRemovalApp extends HTMLElement {
   #checkerBlobUrl = null;
   #beforeBlobUrl = null;
   #transparentBlobUrl = null;
-  #viewState = { mode: 'fit-width' };
-  static #VIEW_MODES = ['fit-width', 'fit-height', 'one-to-one'];
+  #viewState = { mode: VIEW_MODE.FIT_WIDTH };
 
   connectedCallback() {
     this.#render();
@@ -66,8 +65,8 @@ class BgRemovalApp extends HTMLElement {
 
   #applyViewState() {
     const mode = this.#viewState.mode;
-    const isFitHeight = mode === 'fit-height';
-    const isOneToOne = mode === 'one-to-one';
+    const isFitHeight = mode === VIEW_MODE.FIT_HEIGHT;
+    const isOneToOne = mode === VIEW_MODE.ONE_TO_ONE;
     for (const sel of ['image-cropper', 'compare-slider']) {
       const el = this.#q(sel);
       if (!el) continue;
@@ -81,7 +80,7 @@ class BgRemovalApp extends HTMLElement {
   }
 
   #setMode(mode) {
-    if (!BgRemovalApp.#VIEW_MODES.includes(mode)) return;
+    if (!isViewMode(mode)) return;
     if (this.#viewState.mode === mode) return;
     this.#viewState.mode = mode;
     const vmc = this.#q('view-mode-controls');
@@ -95,12 +94,12 @@ class BgRemovalApp extends HTMLElement {
     const vh = window.innerHeight || 1;
     const imgRatio = image.width / image.height;
     const vpRatio = vw / vh;
-    return imgRatio >= vpRatio ? 'fit-width' : 'fit-height';
+    return imgRatio >= vpRatio ? VIEW_MODE.FIT_WIDTH : VIEW_MODE.FIT_HEIGHT;
   }
 
   #restoreViewState() {
     const savedMode = localStorage.getItem('bgremoval_view_mode');
-    if (BgRemovalApp.#VIEW_MODES.includes(savedMode)) {
+    if (isViewMode(savedMode)) {
       this.#viewState.mode = savedMode;
     }
     this.#q('view-mode-controls').mode = this.#viewState.mode;
@@ -154,7 +153,7 @@ class BgRemovalApp extends HTMLElement {
       toolbarRight.hidden = true;
     };
 
-    statusBar.set({ title: '', state: 'idle', details: '', progress: -1, tileCount: null });
+    statusBar.set({ title: '', state: STATUS_STATE.IDLE, details: '', progress: -1, tileCount: null });
 
     const idleDetails = (img, crop) => crop
       ? `${img.width}\u00d7${img.height}, cropped to ${crop.w}\u00d7${crop.h}. Click Remove Background.`
@@ -174,7 +173,7 @@ class BgRemovalApp extends HTMLElement {
       cropper.hide();
       compareSlider.hide();
       dropZone.show();
-      statusBar.set({ title: '', state: 'idle', details: '', progress: -1, tileCount: null });
+      statusBar.set({ title: '', state: STATUS_STATE.IDLE, details: '', progress: -1, tileCount: null });
     };
 
     const showReady = () => {
@@ -189,7 +188,7 @@ class BgRemovalApp extends HTMLElement {
       clearCropBtn.style.display = existingCrop ? 'inline-block' : 'none';
       statusBar.set({
         title: existingCrop ? 'Crop selected' : 'Image loaded',
-        state: 'idle',
+        state: STATUS_STATE.IDLE,
         details: idleDetails(this.#loadedImage, existingCrop),
         progress: -1,
         tileCount: null,
@@ -213,7 +212,7 @@ class BgRemovalApp extends HTMLElement {
       clearCropBtn.style.display = crop ? 'inline-block' : 'none';
       statusBar.set({
         title: crop ? 'Crop selected' : 'Image loaded',
-        state: 'idle',
+        state: STATUS_STATE.IDLE,
         details: idleDetails(this.#loadedImage, crop),
       });
     });
@@ -258,17 +257,17 @@ class BgRemovalApp extends HTMLElement {
       cropper.style.display = 'none';
 
       // runState is monotonic: 'running' \u2192 'warning' (locked once warned).
-      let runState = 'running';
+      let runState = STATUS_STATE.RUNNING;
       const tracker = trackBackendEvents((ev) => {
-        if (ev.kind === 'attempt') {
+        if (ev.kind === BACKEND_EVENT_KIND.ATTEMPT) {
           statusBar.set({ title: `Loading on ${friendlyBackend(ev.backend)}`, state: runState });
-        } else if (ev.kind === 'success') {
+        } else if (ev.kind === BACKEND_EVENT_KIND.SUCCESS) {
           statusBar.set({ title: `Running on ${friendlyBackend(ev.backend)}`, state: runState });
-        } else if (ev.kind === 'fallback') {
-          runState = 'warning';
+        } else if (ev.kind === BACKEND_EVENT_KIND.FALLBACK) {
+          runState = STATUS_STATE.WARNING;
           statusBar.set({ title: `Fallback from ${friendlyBackend(ev.backend)}`, state: runState });
-        } else if (ev.kind === 'skipped') {
-          runState = 'warning';
+        } else if (ev.kind === BACKEND_EVENT_KIND.SKIPPED) {
+          runState = STATUS_STATE.WARNING;
           statusBar.set({ title: `Skipping ${friendlyBackend(ev.backend)}`, state: runState });
         }
       });
@@ -276,7 +275,7 @@ class BgRemovalApp extends HTMLElement {
       try {
         statusBar.set({
           title: 'Loading model',
-          state: 'running',
+          state: STATUS_STATE.RUNNING,
           details: '',
           progress: 0,
           tileCount: null,
@@ -299,7 +298,7 @@ class BgRemovalApp extends HTMLElement {
         const summary = tracker.summary();
         const userWantsGpu = backendEl.value === 'gpu';
         const ranOnCpuDespiteIntent = userWantsGpu && summary.activeBackend && !realizedIsGpu(summary.activeBackend);
-        const finalState = (summary.hadFallback || summary.hadSkip || ranOnCpuDespiteIntent) ? 'warning' : 'success';
+        const finalState = (summary.hadFallback || summary.hadSkip || ranOnCpuDespiteIntent) ? STATUS_STATE.WARNING : STATUS_STATE.SUCCESS;
         const via = summary.activeBackend ? ` via ${friendlyBackend(summary.activeBackend)}` : '';
         const detailsLines = [`${w}\u00d7${h}${via}`];
         if (ranOnCpuDespiteIntent && !summary.hadFallback) {
@@ -329,7 +328,7 @@ class BgRemovalApp extends HTMLElement {
         if (e.name === 'AbortError') {
           statusBar.set({
             title: 'Cancelled',
-            state: 'idle',
+            state: STATUS_STATE.IDLE,
             details: 'You stopped this run.',
             progress: -1,
             tileCount: null,
@@ -338,7 +337,7 @@ class BgRemovalApp extends HTMLElement {
           console.error(e);
           statusBar.set({
             title: 'Error',
-            state: 'error',
+            state: STATUS_STATE.ERROR,
             details: e.message || String(e),
             progress: -1,
             tileCount: null,

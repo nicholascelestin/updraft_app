@@ -10,8 +10,8 @@
 // user actually clicks Download, so this module stays cheap on page load.
 
 import { detectPlatform, PLATFORM_TARGETS, targetById } from './download-platform.js';
-import { UPSCALER_MODELS } from '../features/upscaler/model-registry.js';
-import { listCustomModels } from '../features/upscaler/custom-models/custom-model-store.js';
+import { modelStore } from '../features/upscaler/sr-model-store.js';
+import { CUSTOM_MODEL_URL_PREFIX } from '../lib/model-cache.js';
 
 let dialog = null;
 
@@ -132,21 +132,22 @@ async function renderIdle() {
     `<option value="${t.id}"${detected?.id === t.id ? ' selected' : ''}>${t.label}</option>`
   ).join('');
 
-  const builtIns = UPSCALER_MODELS.filter(m => !String(m.url).startsWith('builtin:'));
-  const customs = listCustomModels();
-
-  const modelChecks = [
-    ...builtIns.map(m => ({
+  const all = modelStore.list();
+  const modelChecks = all.map(m => {
+    if (m.custom) {
+      const id = m.url.slice(CUSTOM_MODEL_URL_PREFIX.length);
+      return {
+        key: m.url, label: `${m.label} (custom)`, sizeMB: m.sizeMB ?? 0,
+        preChecked: false,
+        kind: 'custom', url: m.url, outPath: `models/${id}.onnx`,
+      };
+    }
+    return {
       key: m.url, label: m.label, sizeMB: m.sizeMB ?? 0,
       preChecked: (m.sizeMB ?? 0) < TINY_BUILTIN_THRESHOLD_MB,
       kind: 'builtin', url: m.url, outPath: m.url, // built-in URLs are already relative paths like 'models/X.onnx'
-    })),
-    ...customs.map(m => ({
-      key: m.url, label: `${m.label} (custom)`, sizeMB: m.sizeMB ?? 0,
-      preChecked: false,
-      kind: 'custom', url: m.url, outPath: `models/${m.id}.onnx`,
-    })),
-  ];
+    };
+  });
 
   setDialog('idle', `
     <h3><i class="fas fa-download"></i> Download Desktop App</h3>

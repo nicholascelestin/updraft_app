@@ -1,9 +1,9 @@
 /**
- * <custom-model-upload-dialog> — modal for uploading a custom ONNX model.
+ * <custom-model-upload-dialog> -- modal for uploading a custom ONNX model.
  *
  * Self-contained UX: file selection, automatic ONNX inspection, manual
  * overrides for scale / range / layout / multiple-of, validation, and save
- * via the custom-model store.
+ * via SRModelStore.
  *
  * Usage:
  *   const dialog = document.querySelector('custom-model-upload-dialog');
@@ -12,8 +12,7 @@
  */
 
 import { morph } from 'lib/morph';
-import { saveCustomModel, updateCustomModelByUrl } from './custom-model-store.js';
-import { inspectCustomModelFile } from './custom-model-inspector.js';
+import { modelStore } from '../sr-model-store.js';
 
 class CustomModelUploadDialog extends HTMLElement {
   connectedCallback() {
@@ -22,14 +21,14 @@ class CustomModelUploadDialog extends HTMLElement {
   }
 
   /**
-   * Show the modal and resolve with the saved CustomModel — or null if the
+   * Show the modal and resolve with the saved SRModel -- or null if the
    * user cancelled or closed the dialog.
    *
    * When `editModel` is provided, the dialog opens in edit mode: the file
    * picker is hidden, fields are pre-filled, auto-detection is skipped, and
    * Save updates the existing record's metadata in place.
    *
-   * @param {{ defaultScale?: number, editModel?: import('./custom-model-store.js').CustomModel }} [opts]
+   * @param {{ defaultScale?: number, editModel?: import('../sr-model.js').SRModel }} [opts]
    */
   open({ defaultScale = 4, editModel = null } = {}) {
     const dialog        = this.querySelector('dialog');
@@ -132,9 +131,9 @@ class CustomModelUploadDialog extends HTMLElement {
           labelInput.value = file.name.replace(/\.onnx$/i, '');
         }
         const sizeHint = parseFloat(sizeMB) > 50
-          ? ' (this model is large — probing may take 30s+)'
-          : ' (probing typically takes 5–20s)';
-        detectLabel.innerHTML = `Auto-detect: <em>ready — click <strong>Analyze model</strong> to probe the file${sizeHint}.</em>`;
+          ? ' (this model is large -- probing may take 30s+)'
+          : ' (probing typically takes 5-20s)';
+        detectLabel.innerHTML = `Auto-detect: <em>ready -- click <strong>Analyze model</strong> to probe the file${sizeHint}.</em>`;
         analyzeBtn.disabled = false;
         analyzeBtn.innerHTML = ANALYZE_BTN_HTML;
       };
@@ -144,10 +143,10 @@ class CustomModelUploadDialog extends HTMLElement {
         const seq = ++inspectSeq;
         errorLabel.textContent = '';
         analyzeBtn.disabled = true;
-        analyzeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analyzing…';
+        analyzeBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Analyzing...';
         saveBtn.disabled = true;
-        detectLabel.textContent = 'Auto-detect: starting — running inference probes (WebGPU when available, otherwise CPU/WASM); this can take a while on large models.';
-        inspectCustomModelFile(file, {
+        detectLabel.textContent = 'Auto-detect: starting -- running inference probes (WebGPU when available, otherwise CPU/WASM); this can take a while on large models.';
+        modelStore.inspect(file, {
           onProgress: (message) => {
             if (seq !== inspectSeq || settled) return;
             detectLabel.textContent = `Auto-detect: ${message}`;
@@ -173,7 +172,7 @@ class CustomModelUploadDialog extends HTMLElement {
             parts.push(`multiple ${result.multipleOf}${suffix}`);
           }
           if (Number.isFinite(result?.maxTileSize)) {
-            parts.push(`max tile ${result.maxTileSize}\u00d7${result.maxTileSize} (probed)`);
+            parts.push(`max tile ${result.maxTileSize}×${result.maxTileSize} (probed)`);
           }
           if (result?.inputType) parts.push(`input ${result.inputType}`);
           if (Number.isFinite(result?.scale)) {
@@ -210,7 +209,7 @@ class CustomModelUploadDialog extends HTMLElement {
         if (isEdit) {
           saveBtn.disabled = true;
           try {
-            const model = updateCustomModelByUrl(editModel.url, {
+            const model = modelStore.updateCustom(editModel.url, {
               label: labelInput.value,
               scale: scaleInput.value,
               range: rangeInput.value,
@@ -245,8 +244,7 @@ class CustomModelUploadDialog extends HTMLElement {
         }
         saveBtn.disabled = true;
         try {
-          const model = await saveCustomModel({
-            file,
+          const model = await modelStore.addCustom(file, {
             label: labelInput.value,
             scale: scaleInput.value,
             range: rangeInput.value,
@@ -427,14 +425,14 @@ class CustomModelUploadDialog extends HTMLElement {
                 <option value="fp16">fp16</option>
               </select>
             </label>
-            <label title="HR-space refiner — the engine bicubic-upsamples LR to HR before feeding tiles to the model. Multiple-of and Max tile stay in LR-pixel units.">
+            <label title="HR-space refiner -- the engine bicubic-upsamples LR to HR before feeding tiles to the model. Multiple-of and Max tile stay in LR-pixel units.">
               Upscale before
               <select class="custom-model-upscalebefore">
                 <option value="false">No</option>
                 <option value="true">Yes</option>
               </select>
             </label>
-            <label title="Tile blend: 'overlap' is a half-overlap hard crop (fast). 'gaussian' is float32 weighted accumulation that hides seams on diffusion-style models — forces CPU readback path.">
+            <label title="Tile blend: 'overlap' is a half-overlap hard crop (fast). 'gaussian' is float32 weighted accumulation that hides seams on diffusion-style models -- forces CPU readback path.">
               Tile blend
               <select class="custom-model-tileblend">
                 <option value="overlapCrop">overlap</option>
@@ -442,7 +440,7 @@ class CustomModelUploadDialog extends HTMLElement {
               </select>
             </label>
           </div>
-          <div class="custom-model-detected">Auto-detect: waiting for model file…</div>
+          <div class="custom-model-detected">Auto-detect: waiting for model file...</div>
           <div class="custom-model-meta">
             <span class="custom-model-size">Model size: -</span>
           </div>

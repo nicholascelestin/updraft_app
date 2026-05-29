@@ -5,8 +5,8 @@
  */
 
 import { fetchWithProgress } from 'lib/fetch-progress';
-import { dispatchBackendEvent } from 'lib/backend-events';
-import { loadSession } from 'lib/backend';
+import { BACKEND_EVENT_KIND, dispatchBackendEvent } from 'lib/backend-events';
+import { INTENT, loadSession, normalizeIntent } from 'lib/backend';
 
 const MODELS = {
   'isnet': {
@@ -47,7 +47,7 @@ export class BgRemovalEngine {
     if (this.#backendListener) return;
     this.#backendListener = (e) => {
       const d = e?.detail;
-      if (d && d.kind === 'success' && typeof d.backend === 'string') {
+      if (d && d.kind === BACKEND_EVENT_KIND.SUCCESS && typeof d.backend === 'string') {
         this.#realizedBackend = d.backend;
       }
     };
@@ -59,7 +59,7 @@ export class BgRemovalEngine {
     this.#backendListener = null;
   }
 
-  async loadModel(modelKey, intent = 'cpu', onProgress) {
+  async loadModel(modelKey, intent = INTENT.CPU, onProgress) {
     if (onProgress != null && typeof onProgress !== 'function') {
       console.warn('[BgRemovalEngine] Ignoring non-function onProgress callback.', {
         type: typeof onProgress,
@@ -74,7 +74,7 @@ export class BgRemovalEngine {
       // Same model + same intent \u2014 re-announce so per-run tracker captures
       // the active backend label.
       if (this.#realizedBackend) {
-        dispatchBackendEvent({ kind: 'success', backend: this.#realizedBackend });
+        dispatchBackendEvent({ kind: BACKEND_EVENT_KIND.SUCCESS, backend: this.#realizedBackend });
       }
       return;
     }
@@ -223,8 +223,3 @@ export class BgRemovalEngine {
   }
 }
 
-function normalizeIntent(value) {
-  if (value === 'webgpu' || value === 'gpu') return 'gpu';
-  if (value === 'wasm'   || value === 'cpu') return 'cpu';
-  return 'cpu';
-}

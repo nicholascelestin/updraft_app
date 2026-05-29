@@ -1,21 +1,9 @@
 import { morph } from 'lib/morph';
-import { modelOptionsHTML } from '../model-registry.js';
-import {
-  deleteCustomModelByUrl,
-  getCustomModelByUrl,
-  getUploadCustomOptionHTML,
-  listCustomModels,
-} from '../custom-models/custom-model-store.js';
-import '../custom-models/custom-model-upload-dialog.js';
-
-// User-facing backend selector returns 'gpu' or 'cpu' (the engine's intent
-// vocabulary). Older builds stored 'webgpu' / 'wasm' in localStorage; this
-// normalizer keeps a returning user from getting a broken dropdown.
-function normalizeIntent(value) {
-  if (value === 'webgpu' || value === 'gpu') return 'gpu';
-  if (value === 'wasm'   || value === 'cpu') return 'cpu';
-  return 'gpu';
-}
+import { INTENT, normalizeIntent } from 'lib/backend';
+import { STATUS_STATE } from 'components/status-bar';
+import { modelStore } from '../sr-model-store.js';
+import { tileSizeBounds } from '../upscale-pipeline.js';
+import './upload-model-dialog.js';
 
 function escapeHtml(value) {
   return String(value)
@@ -27,6 +15,51 @@ function escapeHtml(value) {
 }
 
 const UPLOAD_CUSTOM_VALUE = '__upload_custom__';
+const UPLOAD_CUSTOM_OPTION = `<option value="${UPLOAD_CUSTOM_VALUE}">Upload custom...</option>`;
+
+// Resamplers are not SRModels -- they have no weights and don't go through
+// the pipeline. They share the model <select> for UI grouping only; the app
+// branches on the 'builtin:' URL prefix to run them via canvas drawImage.
+const RESAMPLERS = [
+  { url: 'builtin:lanczos-4x', label: 'Lanczos' },
+  { url: 'builtin:bicubic-4x', label: 'Bicubic' },
+];
+
+function isResamplerUrl(url) {
+  return typeof url === 'string' && url.startsWith('builtin:');
+}
+
+// Pure rule set for the pre-run hang-warning ribbon. Each warning gates a
+// later step that's likely to fail or hang; the controls layer renders them
+// into the tooltip. Future callers (e.g. upload dialog) can reuse this.
+function computeRunWarnings({ model, backend, tileSize }) {
+  const warnings = [];
+  if (!model) return warnings;
+  if (model.precision === 'fp16' && backend !== 'gpu') {
+    warnings.push({
+      kind: 'fp16-on-cpu',
+      message: `<strong>fp16 model on CPU backend:</strong> this model uses 16-bit precision, which ONNX Runtime's CPU/WASM backend has very limited support for. Inference will almost certainly fail with an "unexpected input data type" or "kernel not found" error. Switch <em>Backend</em> to <em>GPU</em>.`,
+    });
+  }
+  if ((model.sizeMB ?? 0) > 10 && tileSize > 128) {
+    warnings.push({
+      kind: 'large-on-big-tile',
+      message: `<strong>Large model with big tiles:</strong> models &gt;10 MB combined with tile sizes above 128 can block the browser's main thread for extended periods, causing the UI to freeze. You may not be able to click Stop until the current tile finishes. Consider reducing the tile size or using a smaller model.`,
+    });
+  }
+  return warnings;
+}
+
+function renderModelOption(model, selectedUrl) {
+  const sizeStr = model.sizeMB != null ? ` (~${model.sizeMB}MB)` : '';
+  const sel = model.url === selectedUrl ? ' selected' : '';
+  return `<option value="${model.url}"${sel}>${escapeHtml(model.label)}${sizeStr}</option>`;
+}
+
+function renderResamplerOption(resampler, selectedUrl) {
+  const sel = resampler.url === selectedUrl ? ' selected' : '';
+  return `<option value="${resampler.url}"${sel}>${escapeHtml(resampler.label)}</option>`;
+}
 
 // Single source of truth for localStorage <-> form control wiring.
 // `kind` is 'value' for inputs/selects, 'checked' for checkboxes.
@@ -55,27 +88,40 @@ function writeControl(el, kind, saved) {
 }
 
 class UpscalerControls extends HTMLElement {
-  #customModels = [];
   #previousModelValue = '';
   #outputBaseLabels = null;
   #isRunning = false;
+  #storeUnsubscribe = null;
 
   connectedCallback() {
     this.#render();
-    this.#customModels = listCustomModels();
     this.#refreshModelSelectOptions(localStorage.getItem('upscaler_model') || undefined);
     this.#setupPersistence();
     this.#wireEvents();
     this.#restoreSettings();
+    const onStoreChange = () => this.#onStoreChange();
+    modelStore.addEventListener('change', onStoreChange);
+    this.#storeUnsubscribe = () => modelStore.removeEventListener('change', onStoreChange);
+  }
+
+  disconnectedCallback() {
+    this.#storeUnsubscribe?.();
+    this.#storeUnsubscribe = null;
   }
 
   #q(sel) { return this.querySelector(sel); }
-  #isBuiltInResampler(modelOpt) { return !!modelOpt?.value?.startsWith('builtin:'); }
 
-  // ── Public surface ─────────────────────────────────────────────────────
+  // -- Public surface -----------------------------------------------------
 
   get selectedModelOption() {
     return this.#q('.model-select')?.selectedOptions?.[0] || null;
+  }
+
+  // The currently-selected SRModel, or null when the user has a resampler or
+  // the upload-custom sentinel selected.
+  get selectedModel() {
+    const url = this.#q('.model-select')?.value;
+    return url ? modelStore.get(url) : null;
   }
 
   get outputScale() {
@@ -83,15 +129,11 @@ class UpscalerControls extends HTMLElement {
     return Number.isFinite(parsed) ? parsed : 4;
   }
 
-  // The user's load intent: 'gpu' or 'cpu'. Per-model-option overrides via
-  // data-backend take precedence over the global select. Legacy values
-  // ('webgpu', 'wasm') from prior localStorage are normalized so a returning
-  // user doesn't get a broken dropdown.
+  // The user's load intent: 'gpu' or 'cpu'. Legacy values from prior
+  // localStorage are normalized so a returning user doesn't get a broken
+  // dropdown.
   get backend() {
-    const raw = this.selectedModelOption?.dataset.backend
-      || this.#q('.backend-select')?.value
-      || 'gpu';
-    return normalizeIntent(raw);
+    return normalizeIntent(this.#q('.backend-select')?.value, INTENT.GPU);
   }
 
   set isRunning(b) {
@@ -100,91 +142,42 @@ class UpscalerControls extends HTMLElement {
     this.#updateCustomDeleteVisibility();
   }
 
-  refreshAfterCustomModelChange(url) {
-    this.#customModels = listCustomModels();
-    this.#refreshModelSelectOptions(url);
-    if (url) {
-      this.#previousModelValue = url;
-      localStorage.setItem('upscaler_model', url);
-    }
-    this.#updateModelBoundControls();
-    this.#updateCustomDeleteVisibility();
-  }
-
   /**
    * Build the Pipeline config from current form state. Caller adds `profile`
-   * from the perf-monitor's visibility — the controls component doesn't see
+   * from the perf-monitor's visibility -- the controls component doesn't see
    * the perf monitor (lives at the orchestrator level).
    */
   get config() {
-    const opt = this.#q('.model-select').selectedOptions[0];
-    const modelUrl = opt.value;
-    const scale = parseInt(opt.dataset.scale, 10) || 4;
-    const modelValueRange = parseInt(opt.dataset.range, 10) || 1;
-    const modelLayout = opt.dataset.layout || 'nchw';
-    const modelInputMultiple = parseInt(opt.dataset.multipleof, 10) || 1;
-    const modelPrecision = opt.dataset.precision === 'fp16' ? 'fp16' : 'fp32';
-    const upscaleBefore = opt.dataset.upscalebefore === 'true';
-    const tileBlend = opt.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop';
-    const backend = opt.dataset.backend || this.#q('.backend-select').value;
-    let tileSize = parseInt(this.#q('.tilesize-select').value, 10);
+    const model = this.selectedModel;
+    const backend = this.backend;
+    const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
+    const config = { model, backend, tileSize };
 
-    const config = { modelUrl, scale, modelValueRange, modelLayout, modelInputMultiple, modelPrecision, upscaleBefore, tileBlend, backend, tileSize };
+    // Comparison runs the base + a second SR pass side-by-side; All/Faces
+    // would mutate the base canvas the slider needs to expose, so they're
+    // suppressed whenever Comparison is on. The UI also disables those rows
+    // -- this is the matching defensive guard at the config layer.
+    if (this.#q('.pass-compare-enabled').checked) {
+      const compareModel = modelStore.get(this.#q('.pass-compare-model').value);
+      if (compareModel) config.comparison = { model: compareModel };
+      return config;
+    }
 
-    const optionsForClamp = [opt];
-
-    // Comparison runs the base + a second SR pass and shows them side-by-
-    // side; All/Faces would mutate the base canvas the slider is supposed to
-    // expose, so we suppress them entirely whenever Comparison is on. The UI
-    // already disables those rows — this is the matching defensive guard at
-    // the config layer.
-    const compareOn = this.#q('.pass-compare-enabled').checked;
-
-    if (compareOn) {
-      const copt = this.#q('.pass-compare-model').selectedOptions[0];
-      if (copt) optionsForClamp.push(copt);
-      config.comparison = {
-        modelUrl: copt?.value || modelUrl,
-        scale: parseInt(copt?.dataset.scale, 10) || scale,
-        modelValueRange: parseInt(copt?.dataset.range, 10) || 1,
-        modelLayout: copt?.dataset.layout || 'nchw',
-        modelInputMultiple: parseInt(copt?.dataset.multipleof, 10) || 1,
-        modelPrecision: copt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
-        upscaleBefore: copt?.dataset.upscalebefore === 'true',
-        tileBlend: copt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
-        backend: copt?.dataset.backend || backend,
-      };
-    } else {
-      if (this.#q('.pass-all-enabled').checked) {
-        const aopt = this.#q('.pass-all-model').selectedOptions[0];
-        if (aopt) optionsForClamp.push(aopt);
+    if (this.#q('.pass-all-enabled').checked) {
+      const allModel = modelStore.get(this.#q('.pass-all-model').value);
+      if (allModel) {
         config.all = {
-          modelUrl: aopt?.value || modelUrl,
-          scale: parseInt(aopt?.dataset.scale, 10) || scale,
-          modelValueRange: parseInt(aopt?.dataset.range, 10) || 1,
-          modelLayout: aopt?.dataset.layout || 'nchw',
-          modelInputMultiple: parseInt(aopt?.dataset.multipleof, 10) || 1,
-          modelPrecision: aopt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
-          upscaleBefore: aopt?.dataset.upscalebefore === 'true',
-          tileBlend: aopt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
-          backend: aopt?.dataset.backend || backend,
+          model: allModel,
           blendOpacity: parseFloat(this.#q('.pass-all-blend').value),
         };
       }
+    }
 
-      if (this.#q('.detector-face-enabled').checked) {
-        const fopt = this.#q('.detector-face-model').selectedOptions[0];
-        if (fopt) optionsForClamp.push(fopt);
+    if (this.#q('.detector-face-enabled').checked) {
+      const faceModel = modelStore.get(this.#q('.detector-face-model').value);
+      if (faceModel) {
         config.face = {
-          modelUrl: fopt?.value || modelUrl,
-          scale: parseInt(fopt?.dataset.scale, 10) || scale,
-          modelValueRange: parseInt(fopt?.dataset.range, 10) || 1,
-          modelLayout: fopt?.dataset.layout || 'nchw',
-          modelInputMultiple: parseInt(fopt?.dataset.multipleof, 10) || 1,
-          modelPrecision: fopt?.dataset.precision === 'fp16' ? 'fp16' : 'fp32',
-          upscaleBefore: fopt?.dataset.upscalebefore === 'true',
-          tileBlend: fopt?.dataset.tileblend === 'gaussian' ? 'gaussian' : 'overlapCrop',
-          backend: fopt?.dataset.backend || backend,
+          model: faceModel,
           paddingPx: parseInt(this.#q('.detector-face-padding').value, 10) || 0,
           featherPx: 16,
           blendOpacity: parseFloat(this.#q('.detector-face-blend').value),
@@ -193,73 +186,38 @@ class UpscalerControls extends HTMLElement {
       }
     }
 
-    // Models with a hard input-size cap (e.g. DAT exports with baked-in
-    // window counts) only accept tiles up to a fixed dim. Clamp the shared
-    // tile size to the strictest selected model. When multipleOf ===
-    // maxTileSize the model has a fixed input size: smaller tiles still
-    // work via edge-replication padding but pay the same per-tile cost over
-    // a smaller real region, so floor to the fixed size too.
-    const fixedSizes = optionsForClamp
-      .map((o) => {
-        const m = parseInt(o?.dataset?.multipleof, 10);
-        const c = parseInt(o?.dataset?.maxtilesize, 10);
-        return (Number.isFinite(m) && Number.isFinite(c) && m === c && m >= 1) ? c : null;
-      })
-      .filter((v) => v != null);
-    if (fixedSizes.length) {
-      const floor = Math.max(...fixedSizes);
-      if (tileSize > 0 && tileSize < floor) tileSize = floor;
-    }
-    const caps = optionsForClamp
-      .map((o) => parseInt(o?.dataset?.maxtilesize, 10))
-      .filter((v) => Number.isFinite(v) && v >= 1);
-    if (caps.length) {
-      const minCap = Math.min(...caps);
-      if (tileSize <= 0 || tileSize > minCap) tileSize = minCap;
-      config.tileSize = tileSize;
-    }
-
     return config;
   }
 
-  // ── Custom model select rendering ──────────────────────────────────────
+  // -- Store change reaction ---------------------------------------------
 
-  #getCustomModelOptionsHTML(selected) {
-    if (!this.#customModels.length) return '';
-    return this.#customModels.map((model) => {
-      const attrs = [
-        `value="${model.url}"`,
-        `data-scale="${model.scale}"`,
-        `data-range="${model.range || 1}"`,
-        `data-layout="${model.layout || 'nchw'}"`,
-        `data-multipleof="${model.multipleOf || 1}"`,
-        `data-sizemb="${model.sizeMB}"`,
-      ];
-      if (Number.isFinite(model.maxTileSize)) {
-        attrs.push(`data-maxtilesize="${model.maxTileSize}"`);
-      }
-      if (model.precision === 'fp16') attrs.push(`data-precision="fp16"`);
-      if (model.url === selected) attrs.push('selected');
-      const sizeStr = model.sizeMB != null ? ` (~${model.sizeMB}MB)` : '';
-      return `<option ${attrs.join(' ')}>${escapeHtml(model.label)}${sizeStr}</option>`;
-    }).join('\n              ');
+  // Fired whenever modelStore mutates (add/update/delete custom). Refresh
+  // dropdowns; keep the user's current selection if it still exists.
+  #onStoreChange() {
+    const modelEl = this.#q('.model-select');
+    const currentValue = modelEl?.value;
+    this.#refreshModelSelectOptions(currentValue);
+    this.#updateModelBoundControls();
+    this.#updateCustomDeleteVisibility();
   }
+
+  // -- Model select rendering --------------------------------------------
 
   #refreshModelSelectOptions(selected) {
     const modelEl = this.#q('.model-select');
     if (!modelEl) return;
+    const models = modelStore.list();
     modelEl.innerHTML = [
-      modelOptionsHTML(undefined, { selected, includeResamplers: true }),
-      this.#getCustomModelOptionsHTML(selected),
-      getUploadCustomOptionHTML(),
-    ].filter(Boolean).join('\n              ');
+      ...models.map((m) => renderModelOption(m, selected)),
+      ...RESAMPLERS.map((r) => renderResamplerOption(r, selected)),
+      UPLOAD_CUSTOM_OPTION,
+    ].join('\n              ');
     if (selected) modelEl.value = selected;
     if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
 
-    // Pass selectors share the same custom-model list as the primary select.
-    // We only refresh their option lists — never their selection — so adding
-    // or editing a custom model from the main select doesn't disturb whatever
-    // the user has chosen for the all-pass / face-pass.
+    // Pass selectors share the model list but never the resampler or
+    // upload-custom options -- they only make sense for actual SR models.
+    // Selection is preserved verbatim per pass selector.
     this.#refreshPassModelSelect('.pass-all-model');
     this.#refreshPassModelSelect('.pass-compare-model');
     this.#refreshPassModelSelect('.detector-face-model');
@@ -269,10 +227,9 @@ class UpscalerControls extends HTMLElement {
     const el = this.#q(selector);
     if (!el) return;
     const previousValue = el.value;
-    el.innerHTML = [
-      modelOptionsHTML(undefined, { selected: previousValue }),
-      this.#getCustomModelOptionsHTML(previousValue),
-    ].filter(Boolean).join('\n              ');
+    el.innerHTML = modelStore.list()
+      .map((m) => renderModelOption(m, previousValue))
+      .join('\n              ');
     if (previousValue) {
       el.value = previousValue;
       if (!el.selectedOptions.length) el.selectedIndex = 0;
@@ -281,7 +238,7 @@ class UpscalerControls extends HTMLElement {
     }
   }
 
-  // ── Persistence ────────────────────────────────────────────────────────
+  // -- Persistence -------------------------------------------------------
 
   #setupPersistence() {
     for (const { selector, key, kind, event } of PERSISTED_CONTROLS) {
@@ -305,7 +262,7 @@ class UpscalerControls extends HTMLElement {
     this.#updateCustomDeleteVisibility();
   }
 
-  // ── Event wiring ───────────────────────────────────────────────────────
+  // -- Event wiring ------------------------------------------------------
 
   #wireEvents() {
     const modelEl = this.#q('.model-select');
@@ -315,14 +272,20 @@ class UpscalerControls extends HTMLElement {
 
     modelEl.addEventListener('change', async () => {
       if (modelEl.value === UPLOAD_CUSTOM_VALUE) {
-        const previousOption = Array.from(modelEl.options).find((opt) => opt.value === this.#previousModelValue);
-        const defaultScale = parseInt(previousOption?.dataset.scale, 10) || 4;
+        const previousModel = modelStore.get(this.#previousModelValue);
+        const defaultScale = previousModel?.scale ?? 4;
         const customModel = await dialog.open({ defaultScale });
         if (!customModel) {
           modelEl.value = this.#previousModelValue;
         } else {
-          this.refreshAfterCustomModelChange(customModel.url);
+          // Store-change subscription refreshes the dropdown; we only need
+          // to point the select at the new model and announce it.
+          modelEl.value = customModel.url;
+          this.#previousModelValue = customModel.url;
+          localStorage.setItem('upscaler_model', customModel.url);
           this.#emitStatus('Model added', `Added "${customModel.label}" (${customModel.scale}x, ~${customModel.sizeMB}MB).`);
+          this.#updateModelBoundControls();
+          this.#updateCustomDeleteVisibility();
           return;
         }
       } else {
@@ -335,30 +298,28 @@ class UpscalerControls extends HTMLElement {
 
     editCustomBtn.addEventListener('click', async () => {
       if (this.#isRunning) return;
-      const selected = getCustomModelByUrl(modelEl.value);
-      if (!selected) return;
+      const selected = modelStore.get(modelEl.value);
+      if (!selected?.custom) return;
       const updated = await dialog.open({ editModel: selected });
       if (!updated) return;
-      this.refreshAfterCustomModelChange(updated.url);
+      modelEl.value = updated.url;
+      this.#previousModelValue = updated.url;
+      localStorage.setItem('upscaler_model', updated.url);
       this.#emitStatus('Model updated', `Updated "${updated.label}".`);
     });
 
     deleteCustomBtn.addEventListener('click', async () => {
       if (this.#isRunning) return;
-      const selected = getCustomModelByUrl(modelEl.value);
-      if (!selected) return;
+      const selected = modelStore.get(modelEl.value);
+      if (!selected?.custom) return;
       const ok = globalThis.confirm(`Delete custom model "${selected.label}"?\n\nThis will remove it from the local model cache.`);
       if (!ok) return;
-      await deleteCustomModelByUrl(selected.url);
-      this.#customModels = listCustomModels();
-      this.#refreshModelSelectOptions();
+      await modelStore.deleteCustom(selected.url);
       if (modelEl.value === UPLOAD_CUSTOM_VALUE && modelEl.options.length > 1) {
         modelEl.selectedIndex = 0;
       }
       this.#previousModelValue = modelEl.value;
       localStorage.setItem('upscaler_model', modelEl.value);
-      this.#updateModelBoundControls();
-      this.#updateCustomDeleteVisibility();
       this.#emitStatus('Model deleted', `Deleted "${selected.label}".`);
     });
 
@@ -366,7 +327,7 @@ class UpscalerControls extends HTMLElement {
     this.#q('.backend-select').addEventListener('change', () => this.#updateHangWarning());
 
     // Toggling a pass on/off or switching its model can change the strictest
-    // selected max-tile cap, so refresh the tile-size dropdown the same way
+    // selected tile-size cap, so refresh the tile-size dropdown the same way
     // a primary-model change does.
     for (const sel of [
       '.pass-all-enabled',
@@ -400,7 +361,7 @@ class UpscalerControls extends HTMLElement {
       bubbles: true,
       detail: {
         title,
-        state: 'idle',
+        state: STATUS_STATE.IDLE,
         details: details || '',
         progress: -1,
         tileCount: null,
@@ -409,15 +370,38 @@ class UpscalerControls extends HTMLElement {
   }
 
   #emitModelChange() {
-    const opt = this.selectedModelOption;
-    const scale = parseInt(opt?.dataset.scale, 10) || 4;
+    const modelUrl = this.#q('.model-select').value;
+    const scale = isResamplerUrl(modelUrl) ? 4 : (modelStore.get(modelUrl)?.scale ?? 4);
     const verb = scale === 1 ? 'Enhance' : 'Upscale';
     this.dispatchEvent(new CustomEvent('model-change', {
-      bubbles: true, detail: { scale, verb, isBuiltInResampler: this.#isBuiltInResampler(opt) },
+      bubbles: true,
+      detail: { scale, verb, isBuiltInResampler: isResamplerUrl(modelUrl) },
     }));
   }
 
-  // ── Model-bound UI sync ────────────────────────────────────────────────
+  // -- Model-bound UI sync -----------------------------------------------
+
+  // Returns the SRModels for currently enabled passes. Resampler and
+  // upload-custom URLs yield no model (filtered out). Used by tile-size and
+  // warning logic.
+  #selectedModels() {
+    const out = [];
+    const main = this.selectedModel;
+    if (main) out.push(main);
+    if (this.#q('.pass-all-enabled')?.checked) {
+      const m = modelStore.get(this.#q('.pass-all-model')?.value);
+      if (m) out.push(m);
+    }
+    if (this.#q('.pass-compare-enabled')?.checked) {
+      const m = modelStore.get(this.#q('.pass-compare-model')?.value);
+      if (m) out.push(m);
+    }
+    if (this.#q('.detector-face-enabled')?.checked) {
+      const m = modelStore.get(this.#q('.detector-face-model')?.value);
+      if (m) out.push(m);
+    }
+    return out;
+  }
 
   #updateModelBoundControls() {
     const modelEl = this.#q('.model-select');
@@ -431,16 +415,17 @@ class UpscalerControls extends HTMLElement {
       ]));
     }
 
-    const modelOpt = modelEl.selectedOptions[0];
-    const scale = parseInt(modelOpt?.dataset.scale, 10) || 4;
+    const modelUrl = modelEl.value;
+    const resampler = isResamplerUrl(modelUrl);
+    const model = resampler ? null : modelStore.get(modelUrl);
+    const scale = model?.scale ?? 4;
     const maxOutputScale = Math.max(1, Math.min(scale, 4));
-    const isBuiltInResampler = this.#isBuiltInResampler(modelOpt);
     const previousOutputScale = parseInt(outputEl.value, 10);
 
     for (const opt of outputEl.options) {
       const optionScale = parseInt(opt.value, 10) || 1;
       const baseLabel = this.#outputBaseLabels.get(opt.value) || `${optionScale}x`;
-      opt.textContent = !isBuiltInResampler && optionScale === maxOutputScale
+      opt.textContent = !resampler && optionScale === maxOutputScale
         ? `${baseLabel} (no downscale)`
         : baseLabel;
       opt.disabled = optionScale > maxOutputScale;
@@ -450,47 +435,26 @@ class UpscalerControls extends HTMLElement {
     const nextOutputScale = Math.max(1, Math.min(maxOutputScale, preferredScale));
     outputEl.value = String(nextOutputScale);
     localStorage.setItem('upscaler_output', outputEl.value);
-    this.#q('.backend-select').disabled = isBuiltInResampler;
-    tileEl.disabled = isBuiltInResampler;
+    this.#q('.backend-select').disabled = resampler;
+    tileEl.disabled = resampler;
 
-    // Strictest tile-size cap from the main model plus enabled pass models.
-    const capCandidates = [modelOpt];
-    if (this.#q('.pass-all-enabled')?.checked) {
-      capCandidates.push(this.#q('.pass-all-model')?.selectedOptions[0]);
-    }
-    if (this.#q('.pass-compare-enabled')?.checked) {
-      capCandidates.push(this.#q('.pass-compare-model')?.selectedOptions[0]);
-    }
-    if (this.#q('.detector-face-enabled')?.checked) {
-      capCandidates.push(this.#q('.detector-face-model')?.selectedOptions[0]);
-    }
-    const caps = capCandidates
-      .map((o) => parseInt(o?.dataset?.maxtilesize, 10))
-      .filter((v) => Number.isFinite(v) && v >= 1);
-    const hasMaxTile = caps.length > 0;
-    const maxTileSize = hasMaxTile ? Math.min(...caps) : Infinity;
-    const fixedSizes = capCandidates
-      .map((o) => {
-        const m = parseInt(o?.dataset?.multipleof, 10);
-        const c = parseInt(o?.dataset?.maxtilesize, 10);
-        return (Number.isFinite(m) && Number.isFinite(c) && m === c && m >= 1) ? c : null;
-      })
-      .filter((v) => v != null);
-    const tileFloor = fixedSizes.length ? Math.max(...fixedSizes) : 0;
+    // Pipeline owns the authoritative clamp; here we just disable dropdown
+    // options that would get clamped, using the same tileSizeBounds helper.
+    const { floor, cap } = tileSizeBounds(this.#selectedModels());
     let largestEnabledTileVal = null;
     for (const opt of tileEl.options) {
-      const optVal = parseInt(opt.value, 10);
-      const isFullImage = optVal === 0;
-      const exceeds = hasMaxTile && (isFullImage || optVal > maxTileSize);
-      const belowFloor = tileFloor > 0 && !isFullImage && optVal < tileFloor;
+      const val = parseInt(opt.value, 10);
+      const isFullImage = val === 0;
+      const exceeds = cap < Infinity && (isFullImage || val > cap);
+      const belowFloor = floor > 0 && !isFullImage && val < floor;
       opt.disabled = exceeds || belowFloor;
-      if (!opt.disabled && Number.isFinite(optVal) && optVal > 0) {
-        if (largestEnabledTileVal === null || optVal > largestEnabledTileVal) {
-          largestEnabledTileVal = optVal;
+      if (!opt.disabled && Number.isFinite(val) && val > 0) {
+        if (largestEnabledTileVal === null || val > largestEnabledTileVal) {
+          largestEnabledTileVal = val;
         }
       }
     }
-    if ((hasMaxTile || tileFloor > 0) && tileEl.selectedOptions[0]?.disabled && largestEnabledTileVal != null) {
+    if ((cap < Infinity || floor > 0) && tileEl.selectedOptions[0]?.disabled && largestEnabledTileVal != null) {
       tileEl.value = String(largestEnabledTileVal);
       localStorage.setItem('upscaler_tilesize', tileEl.value);
     }
@@ -503,13 +467,14 @@ class UpscalerControls extends HTMLElement {
     const modelEl = this.#q('.model-select');
     const editCustomBtn = this.#q('.edit-custom-model-btn');
     const deleteCustomBtn = this.#q('.delete-custom-model-btn');
-    const selected = getCustomModelByUrl(modelEl.value);
-    deleteCustomBtn.hidden = !selected;
-    deleteCustomBtn.disabled = !selected || this.#isRunning;
-    deleteCustomBtn.title = selected ? `Delete custom model "${selected.label}"` : 'Delete selected custom model';
-    editCustomBtn.hidden = !selected;
-    editCustomBtn.disabled = !selected || this.#isRunning;
-    editCustomBtn.title = selected ? `Edit custom model "${selected.label}"` : 'Edit selected custom model';
+    const selected = modelStore.get(modelEl.value);
+    const isCustom = !!selected?.custom;
+    deleteCustomBtn.hidden = !isCustom;
+    deleteCustomBtn.disabled = !isCustom || this.#isRunning;
+    deleteCustomBtn.title = isCustom ? `Delete custom model "${selected.label}"` : 'Delete selected custom model';
+    editCustomBtn.hidden = !isCustom;
+    editCustomBtn.disabled = !isCustom || this.#isRunning;
+    editCustomBtn.title = isCustom ? `Edit custom model "${selected.label}"` : 'Edit selected custom model';
   }
 
   #updateInputMirrors() {
@@ -518,9 +483,9 @@ class UpscalerControls extends HTMLElement {
     this.#q('.detector-face-blend-val').textContent = this.#q('.detector-face-blend').value;
   }
 
-  // When Comparison is on, the All/Faces passes are mutually exclusive — they
-  // would muddy what the slider is showing. Disable their controls and dim
-  // the rows, but leave the underlying values untouched so toggling
+  // When Comparison is on, the All/Faces passes are mutually exclusive --
+  // they would muddy what the slider is showing. Disable their controls and
+  // dim the rows, but leave the underlying values untouched so toggling
   // Comparison off restores the user's prior pass setup verbatim.
   #syncComparisonExclusion() {
     const compareOn = !!this.#q('.pass-compare-enabled')?.checked;
@@ -536,40 +501,21 @@ class UpscalerControls extends HTMLElement {
   #updateHangWarning() {
     const warnEl = this.#q('.hang-warn');
     const tipEl = this.#q('.hang-warn-tip');
-    const modelOpt = this.#q('.model-select').selectedOptions[0];
-    if (this.#isBuiltInResampler(modelOpt)) {
+    const modelUrl = this.#q('.model-select').value;
+    if (isResamplerUrl(modelUrl)) {
       warnEl.classList.remove('visible');
       return;
     }
-    const sizeMB = parseFloat(modelOpt?.dataset.sizemb) || 0;
+    const model = modelStore.get(modelUrl);
     const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
-    const isLargeOnBigTile = sizeMB > 10 && tileSize > 128;
-
-    // fp16 inference effectively requires GPU — ORT-Web's WASM EP has very
-    // limited fp16 op coverage so most fp16 models throw a kernel-not-found
-    // or input-dtype error. Surface this before the user runs.
-    const backend = normalizeIntent(modelOpt?.dataset.backend || this.#q('.backend-select').value);
-    const isFp16OnCpu = modelOpt?.dataset.precision === 'fp16' && backend !== 'gpu';
-
-    const show = isLargeOnBigTile || isFp16OnCpu;
-    warnEl.classList.toggle('visible', show);
-    if (!show) return;
-
-    const messages = [];
-    if (isFp16OnCpu) {
-      messages.push(
-        `<strong>fp16 model on CPU backend:</strong> this model uses 16-bit precision, which ONNX Runtime's CPU/WASM backend has very limited support for. Inference will almost certainly fail with an "unexpected input data type" or "kernel not found" error. Switch <em>Backend</em> to <em>GPU</em>.`,
-      );
+    const warnings = computeRunWarnings({ model, backend: this.backend, tileSize });
+    warnEl.classList.toggle('visible', warnings.length > 0);
+    if (warnings.length) {
+      tipEl.innerHTML = warnings.map((w) => w.message).join('<br><br>');
     }
-    if (isLargeOnBigTile) {
-      messages.push(
-        `<strong>Large model with big tiles:</strong> models &gt;10 MB combined with tile sizes above 128 can block the browser's main thread for extended periods, causing the UI to freeze. You may not be able to click Stop until the current tile finishes. Consider reducing the tile size or using a smaller model.`,
-      );
-    }
-    tipEl.innerHTML = messages.join('<br><br>');
   }
 
-  // ── Template ───────────────────────────────────────────────────────────
+  // -- Template ----------------------------------------------------------
 
   #render() {
     morph(this, `
@@ -728,7 +674,7 @@ class UpscalerControls extends HTMLElement {
         upscaler-controls .hang-warn .hang-warn-tip {
           display: none;
           position: absolute;
-          bottom: calc(100% + 0.45rem);
+          top: calc(100% + 0.45rem);
           left: 50%;
           transform: translateX(-50%);
           background: var(--pico-card-background-color, #1e1e2e);
@@ -753,10 +699,7 @@ class UpscalerControls extends HTMLElement {
       <div class="controls">
         <span class="local-controls">
           <label>Model:
-            <select class="model-select">
-              ${modelOptionsHTML(undefined, { includeResamplers: true })}
-              ${getUploadCustomOptionHTML()}
-            </select>
+            <select class="model-select"></select>
           </label>
           <button class="secondary outline edit-custom-model-btn" type="button" hidden title="Edit selected custom model" aria-label="Edit selected custom model">
             <i class="fas fa-pen"></i>
@@ -812,9 +755,7 @@ class UpscalerControls extends HTMLElement {
             Comparison
           </label>
           <label class="model-control">
-            <select class="pass-compare-model" aria-label="Comparison pass model">
-              ${modelOptionsHTML()}
-            </select>
+            <select class="pass-compare-model" aria-label="Comparison pass model"></select>
           </label>
         </div>
         <div class="detector-row pass-all-row">
@@ -823,9 +764,7 @@ class UpscalerControls extends HTMLElement {
             All (full image blend)
           </label>
           <label class="model-control">
-            <select class="pass-all-model" aria-label="All pass model">
-              ${modelOptionsHTML()}
-            </select>
+            <select class="pass-all-model" aria-label="All pass model"></select>
           </label>
           <label class="range-control" title="Blend opacity of the secondary full-image pass over the base upscale">
             Blend:
@@ -841,9 +780,7 @@ class UpscalerControls extends HTMLElement {
             Faces (YuNet)
           </label>
           <label class="model-control">
-            <select class="detector-face-model" aria-label="Face pass model">
-              ${modelOptionsHTML(undefined, { selected: 'models/RMBN_M4C8_FACES_x4.onnx' })}
-            </select>
+            <select class="detector-face-model" aria-label="Face pass model"></select>
           </label>
           <label class="range-control" title="Blend opacity of the face patch over the base upscale (1 = full replace, lower = transparent blend)">
             Blend:

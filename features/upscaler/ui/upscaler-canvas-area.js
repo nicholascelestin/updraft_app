@@ -2,10 +2,11 @@ import 'components/image-drop-zone';
 import 'components/image-cropper';
 import './upscale-preview.js';
 import 'components/compare-slider';
+import { VIEW_MODE, isViewMode } from 'components/view-mode-controls';
 
 class UpscalerCanvasArea extends HTMLElement {
   #image = null;
-  #viewMode = 'fit-width';
+  #viewMode = VIEW_MODE.FIT_WIDTH;
 
   connectedCallback() {
     this.#render();
@@ -32,7 +33,7 @@ class UpscalerCanvasArea extends HTMLElement {
 
   get viewMode() { return this.#viewMode; }
   set viewMode(mode) {
-    if (!['fit-width', 'fit-height', 'one-to-one'].includes(mode)) return;
+    if (!isViewMode(mode)) return;
     if (mode === this.#viewMode) return;
     this.#viewMode = mode;
     this.#applyViewState();
@@ -48,7 +49,7 @@ class UpscalerCanvasArea extends HTMLElement {
     const vh = window.innerHeight || 1;
     const imgRatio = image.width / image.height;
     const vpRatio = vw / vh;
-    return imgRatio >= vpRatio ? 'fit-width' : 'fit-height';
+    return imgRatio >= vpRatio ? VIEW_MODE.FIT_WIDTH : VIEW_MODE.FIT_HEIGHT;
   }
 
   showInitial() {
@@ -115,8 +116,8 @@ class UpscalerCanvasArea extends HTMLElement {
 
   #applyViewState() {
     const mode = this.#viewMode;
-    const isFitHeight = mode === 'fit-height';
-    const isOneToOne = mode === 'one-to-one';
+    const isFitHeight = mode === VIEW_MODE.FIT_HEIGHT;
+    const isOneToOne = mode === VIEW_MODE.ONE_TO_ONE;
     for (const sel of ['image-cropper', 'upscale-preview', 'compare-slider']) {
       const el = this.#q(sel);
       if (!el) continue;

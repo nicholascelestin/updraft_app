@@ -1,6 +1,10 @@
 import { morph } from 'lib/morph';
-import { trackBackendEvents, friendlyBackend, realizedIsGpu } from 'lib/backend-events';
+import { BACKEND_EVENT_KIND, trackBackendEvents, friendlyBackend, realizedIsGpu } from 'lib/backend-events';
+import { STATUS_STATE } from 'components/status-bar';
+import { VIEW_MODE, isViewMode } from 'components/view-mode-controls';
+import { TOOLBAR_STATE } from './ui/upscaler-toolbar.js';
 import { Pipeline } from './upscale-pipeline.js';
+import { modelStore } from './sr-model-store.js';
 import './ui/upscaler-controls.js';
 import './ui/upscaler-canvas-area.js';
 import './ui/upscaler-toolbar.js';
@@ -9,12 +13,16 @@ import './ui/perf-monitor.js';
 /**
  * Format a pipeline/inference error for end users.
  * Detects the ONNX reshape-window-size failure and adds a remediation hint
- * derived from the model's declared layout/multiple-of/maxTileSize and any
- * dimensions the runtime reported in the raw error. Pure: caller passes the
- * relevant model facts so this function stays DOM-free and unit-testable.
+ * derived from the model's layout/multipleOf/maxTileSize and any dimensions
+ * the runtime reported in the raw error. Pure: caller passes the SRModel and
+ * backend so this stays DOM-free and unit-testable.
  */
-function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, maxTileSize = null, precision = 'fp32', backend = null } = {}) {
+function formatUpscaleErrorMessage(error, { model, backend = null } = {}) {
   const raw = error?.message || String(error || 'Unknown error');
+  const layout = model?.layout ?? 'nchw';
+  const multipleOf = model?.multipleOf ?? 1;
+  const maxTileSize = model?.maxTileSize ?? null;
+  const precision = model?.precision ?? 'fp32';
 
   const isFp16DtypeError =
     /Unexpected input data type/i.test(raw) && /tensor\(float16\)/i.test(raw);
@@ -22,7 +30,7 @@ function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, max
     precision === 'fp16' && backend !== 'gpu' &&
     (/kernel.*not.*found/i.test(raw) || /not.*supported/i.test(raw) || /no kernel/i.test(raw));
   if (isFp16DtypeError && backend === 'gpu') {
-    return `Model precision metadata was stale: this model declares fp16 inputs but the engine had it tagged as fp32. The engine has now corrected itself — try running again. (If the error persists, open the model from the Edit pencil and set Precision = fp16, or re-upload it.) Raw error: ${raw}`;
+    return `Model precision metadata was stale: this model declares fp16 inputs but the engine had it tagged as fp32. The engine has now corrected itself -- try running again. (If the error persists, open the model from the Edit pencil and set Precision = fp16, or re-upload it.) Raw error: ${raw}`;
   }
   if (isFp16DtypeError || isFp16KernelMissing) {
     return `This model uses fp16 (16-bit) precision, which the CPU backend does not fully support. Switch Backend to "GPU" and run again. Raw error: ${raw}`;
@@ -46,7 +54,7 @@ function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, max
 
   // When the model is known to have a hard input-size cap (detected by the
   // inspector or set manually), the right remediation is to reduce tile size,
-  // not to bump Multiple-of — bumping it would push padded edge tiles past
+  // not to bump Multiple-of -- bumping it would push padded edge tiles past
   // the cap.
   if (Number.isFinite(maxTileSize) && maxTileSize >= 1) {
     return `Model reshape failed: this model only accepts inputs up to ${maxTileSize}×${maxTileSize}. Reduce Tile size to ≤ ${maxTileSize} and set Multiple-of = ${maxTileSize} so edge tiles get padded back into range. Raw error: ${raw}`;
@@ -68,7 +76,7 @@ function formatUpscaleErrorMessage(error, { layout = 'nchw', multipleOf = 1, max
   const specificHint = inferredMultiple > 8
     ? ` Based on the reported reshape, try Multiple-of ${inferredMultiple} first.`
     : '';
-  return `Model reshape failed (likely window-size constraint). Try setting Multiple-of to ${suggestedMultiple} (common values: 8/16/32/64) and/or switch Layout to ${altLayout}.${specificHint} If reducing the tile size below ~64 makes it work, the model may have a hard upper bound — set "Max tile" on the custom model. Raw error: ${raw}`;
+  return `Model reshape failed (likely window-size constraint). Try setting Multiple-of to ${suggestedMultiple} (common values: 8/16/32/64) and/or switch Layout to ${altLayout}.${specificHint} If reducing the tile size below ~64 makes it work, the model may have a hard upper bound -- set "Max tile" on the custom model. Raw error: ${raw}`;
 }
 
 const STEP_LABEL = {
@@ -139,8 +147,8 @@ class UpscalerApp extends HTMLElement {
     const toolbar    = this.#q('upscaler-toolbar');
     const perfMon    = this.#q('perf-monitor');
 
-    // Empty initial state — no "Ready" copy; icon alone communicates "waiting".
-    toolbar.statusBar.set({ title: '', state: 'idle', details: '', progress: -1, tileCount: null });
+    // Empty initial state -- no "Ready" copy; icon alone communicates "waiting".
+    toolbar.statusBar.set({ title: '', state: STATUS_STATE.IDLE, details: '', progress: -1, tileCount: null });
 
     // Status updates from controls (custom-model upload/edit/delete) carry
     // their own { title, state, details } payload; forward verbatim.
@@ -148,12 +156,12 @@ class UpscalerApp extends HTMLElement {
       toolbar.statusBar.set(e.detail);
     });
 
-    // Model change → update upscale button label.
+    // Model change -> update upscale button label.
     this.addEventListener('model-change', (e) => {
       toolbar.setUpscaleLabel(`${e.detail.verb} ${e.detail.scale}x`);
     });
 
-    // Image loaded → switch to ready phase, pick a default view mode that
+    // Image loaded -> switch to ready phase, pick a default view mode that
     // keeps the whole image on screen.
     canvasArea.addEventListener('image-loaded', (e) => {
       if (this.#running) {
@@ -165,11 +173,11 @@ class UpscalerApp extends HTMLElement {
       const img = e.detail.image;
       this.#setMode(canvasArea.defaultModeForImage(img));
       canvasArea.showCropping(img);
-      toolbar.state = 'ready';
+      toolbar.state = TOOLBAR_STATE.READY;
       toolbar.hasCrop = false;
       toolbar.statusBar.set({
         title: 'Image loaded',
-        state: 'idle',
+        state: STATUS_STATE.IDLE,
         details: `${img.width}×${img.height}. Drag to crop (optional), then click Upscale.`,
         progress: -1,
         tileCount: null,
@@ -182,16 +190,16 @@ class UpscalerApp extends HTMLElement {
       toolbar.hasCrop = !!crop;
       toolbar.statusBar.set(crop ? {
         title: 'Crop selected',
-        state: 'idle',
+        state: STATUS_STATE.IDLE,
         details: `${img.width}×${img.height}, cropped to ${crop.w}×${crop.h}.`,
       } : {
         title: 'Image loaded',
-        state: 'idle',
+        state: STATUS_STATE.IDLE,
         details: `${img.width}×${img.height}. Drag to crop (optional), then click Upscale.`,
       });
     });
 
-    // View mode (toolbar → canvas).
+    // View mode (toolbar -> canvas).
     toolbar.addEventListener('view-mode-change', (e) => {
       this.#setMode(e.detail.mode);
       canvasArea.snapCenterVisible();
@@ -222,7 +230,7 @@ class UpscalerApp extends HTMLElement {
       this.#pipeline.destroy();
       toolbar.statusBar.set({
         title: 'Cache cleared',
-        state: 'idle',
+        state: STATUS_STATE.IDLE,
         details: 'Model cache cleared. Next run will re-download.',
       });
     });
@@ -236,17 +244,17 @@ class UpscalerApp extends HTMLElement {
     const img = canvasArea.image;
     canvasArea.showCropping(img);
     const existingCrop = canvasArea.currentCrop;
-    toolbar.state = 'ready';
+    toolbar.state = TOOLBAR_STATE.READY;
     toolbar.hasCrop = !!existingCrop;
     toolbar.statusBar.set(existingCrop ? {
       title: 'Crop selected',
-      state: 'idle',
+      state: STATUS_STATE.IDLE,
       details: `${img.width}×${img.height}, cropped to ${existingCrop.w}×${existingCrop.h}.`,
       progress: -1,
       tileCount: null,
     } : {
       title: 'Image loaded',
-      state: 'idle',
+      state: STATUS_STATE.IDLE,
       details: `${img.width}×${img.height}. Drag to crop (optional), then click Upscale.`,
       progress: -1,
       tileCount: null,
@@ -260,9 +268,9 @@ class UpscalerApp extends HTMLElement {
     const canvasArea = this.#q('upscaler-canvas-area');
     const toolbar = this.#q('upscaler-toolbar');
     canvasArea.showInitial();
-    toolbar.state = 'empty';
+    toolbar.state = TOOLBAR_STATE.EMPTY;
     toolbar.hasCrop = false;
-    toolbar.statusBar.set({ title: '', state: 'idle', details: '', progress: -1, tileCount: null });
+    toolbar.statusBar.set({ title: '', state: STATUS_STATE.IDLE, details: '', progress: -1, tileCount: null });
   }
 
   // ── View-mode persistence (orchestrator-level so it survives across phases) ──
@@ -278,7 +286,7 @@ class UpscalerApp extends HTMLElement {
 
   #restoreViewState() {
     const saved = localStorage.getItem('upscaler_view_mode');
-    const mode = ['fit-width', 'fit-height', 'one-to-one'].includes(saved) ? saved : 'fit-width';
+    const mode = isViewMode(saved) ? saved : VIEW_MODE.FIT_WIDTH;
     this.#q('upscaler-canvas-area').viewMode = mode;
     this.#q('upscaler-toolbar').viewMode = mode;
   }
@@ -300,22 +308,22 @@ class UpscalerApp extends HTMLElement {
     const signal = this.#abortController.signal;
 
     controls.isRunning = true;
-    toolbar.state = 'running';
+    toolbar.state = TOOLBAR_STATE.RUNNING;
 
-    // runState is monotonic: 'running' → 'warning' (stays once warned).
+    // runState is monotonic: RUNNING -> WARNING (stays once warned).
     // The tracker updates it as backend events arrive; the orchestrator
     // reads it on completion to pick the final icon color.
-    let runState = 'running';
+    let runState = STATUS_STATE.RUNNING;
     const tracker = trackBackendEvents((ev) => {
-      if (ev.kind === 'attempt') {
+      if (ev.kind === BACKEND_EVENT_KIND.ATTEMPT) {
         status.set({ title: `Loading on ${friendlyBackend(ev.backend)}`, state: runState });
-      } else if (ev.kind === 'success') {
+      } else if (ev.kind === BACKEND_EVENT_KIND.SUCCESS) {
         status.set({ title: `Running on ${friendlyBackend(ev.backend)}`, state: runState });
-      } else if (ev.kind === 'fallback') {
-        runState = 'warning';
+      } else if (ev.kind === BACKEND_EVENT_KIND.FALLBACK) {
+        runState = STATUS_STATE.WARNING;
         status.set({ title: `Fallback from ${friendlyBackend(ev.backend)}`, state: runState });
-      } else if (ev.kind === 'skipped') {
-        runState = 'warning';
+      } else if (ev.kind === BACKEND_EVENT_KIND.SKIPPED) {
+        runState = STATUS_STATE.WARNING;
         status.set({ title: `Skipping ${friendlyBackend(ev.backend)}`, state: runState });
       }
     });
@@ -323,7 +331,7 @@ class UpscalerApp extends HTMLElement {
     try {
       status.set({
         title: 'Loading model',
-        state: 'running',
+        state: STATUS_STATE.RUNNING,
         details: '',
         progress: 0,
         tileCount: null,
@@ -338,17 +346,17 @@ class UpscalerApp extends HTMLElement {
       const outH = inputImage.height * scale;
       const summary = tracker.summary();
       // The tracker only flags hadFallback when a fallback event fires *this
-      // run*. After a prior runtime fallback (CoreML→CPU), the worker's
+      // run*. After a prior runtime fallback (CoreML->CPU), the worker's
       // session is already on CPU, so the next run produces no fallback
-      // event of its own — yet the user asked for GPU and is silently on
+      // event of its own -- yet the user asked for GPU and is silently on
       // CPU. Treat that intent/reality mismatch as warning-worthy too.
       const userWantsGpu = controls.backend === 'gpu';
       const ranOnCpuDespiteIntent = userWantsGpu && summary.activeBackend && !realizedIsGpu(summary.activeBackend);
-      const finalState = (summary.hadFallback || summary.hadSkip || ranOnCpuDespiteIntent) ? 'warning' : 'success';
+      const finalState = (summary.hadFallback || summary.hadSkip || ranOnCpuDespiteIntent) ? STATUS_STATE.WARNING : STATUS_STATE.SUCCESS;
       const via = summary.activeBackend ? ` via ${friendlyBackend(summary.activeBackend)}` : '';
-      const detailsLines = [`${inputImage.width}×${inputImage.height} → ${outW}×${outH}${via}`];
+      const detailsLines = [`${inputImage.width}×${inputImage.height} -> ${outW}×${outH}${via}`];
       if (ranOnCpuDespiteIntent && !summary.hadFallback) {
-        detailsLines.push(`Requested GPU but running on ${friendlyBackend(summary.activeBackend)} (prior fallback this session — reload to retry GPU).`);
+        detailsLines.push(`Requested GPU but running on ${friendlyBackend(summary.activeBackend)} (prior fallback this session -- reload to retry GPU).`);
       }
       if (summary.lines.length) detailsLines.push(...summary.lines);
       status.set({
@@ -362,30 +370,25 @@ class UpscalerApp extends HTMLElement {
       await canvasArea.showResult(beforeCanvas, afterCanvas, {
         downloadName: comparison ? `comparison_${scale}x.png` : `upscaled_${scale}x.png`,
       });
-      toolbar.state = 'done';
+      toolbar.state = TOOLBAR_STATE.DONE;
     } catch (e) {
       if (e.name === 'AbortError') {
         status.set({
           title: 'Cancelled',
-          state: 'idle',
+          state: STATUS_STATE.IDLE,
           details: 'You stopped this run.',
           progress: -1,
           tileCount: null,
         });
       } else {
         console.error(e);
-        const opt = controls.selectedModelOption;
-        const parsedMaxTile = parseInt(opt?.dataset?.maxtilesize, 10);
         const errMsg = formatUpscaleErrorMessage(e, {
-          layout: opt?.dataset?.layout,
-          multipleOf: parseInt(opt?.dataset?.multipleof, 10),
-          maxTileSize: Number.isFinite(parsedMaxTile) ? parsedMaxTile : null,
-          precision: opt?.dataset?.precision === 'fp16' ? 'fp16' : 'fp32',
+          model: modelStore.get(controls.selectedModelOption?.value),
           backend: controls.backend,
         });
         status.set({
           title: 'Error',
-          state: 'error',
+          state: STATUS_STATE.ERROR,
           details: errMsg,
           progress: -1,
           tileCount: null,
@@ -393,7 +396,7 @@ class UpscalerApp extends HTMLElement {
       }
       perfMon.stop();
       // Fall back to ready so the user can adjust and retry.
-      if (this.#generation === gen) toolbar.state = canvasArea.image ? 'ready' : 'empty';
+      if (this.#generation === gen) toolbar.state = canvasArea.image ? TOOLBAR_STATE.READY : TOOLBAR_STATE.EMPTY;
     } finally {
       tracker.stop();
     }
@@ -416,8 +419,8 @@ class UpscalerApp extends HTMLElement {
     const config = { ...controls.config, profile: perfMon.visible };
     if (perfMon.visible) perfMon.start(config.backend);
 
-    const outW = inputImage.width * config.scale;
-    const outH = inputImage.height * config.scale;
+    const outW = inputImage.width * config.model.scale;
+    const outH = inputImage.height * config.model.scale;
     canvasArea.showPreview(inputImage, outW, outH);
 
     const result = await this.#pipeline.run(inputImage, config, {
@@ -473,7 +476,7 @@ class UpscalerApp extends HTMLElement {
           status.set({
             title: label,
             state: getRunState(),
-            details: `tile ${info.index + 1}/${info.total} — ${inputImage.width}×${inputImage.height} → ${outW}×${outH}`,
+            details: `tile ${info.index + 1}/${info.total} -- ${inputImage.width}×${inputImage.height} -> ${outW}×${outH}`,
             progress,
             tileCount: { done: info.index + 1, total: info.total },
           });
@@ -512,8 +515,8 @@ class UpscalerApp extends HTMLElement {
     canvasArea.showPreview(inputImage, outW, outH);
     status.set({
       title: 'Resampling',
-      state: 'running',
-      details: `${methodLabel} resampling, ${inputImage.width}×${inputImage.height} → ${outW}×${outH}`,
+      state: STATUS_STATE.RUNNING,
+      details: `${methodLabel} resampling, ${inputImage.width}×${inputImage.height} -> ${outW}×${outH}`,
       progress: 0.25,
     });
 

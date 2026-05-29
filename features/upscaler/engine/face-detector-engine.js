@@ -1,6 +1,6 @@
 import { fetchWithProgress } from 'lib/fetch-progress';
-import { loadSession } from 'lib/backend';
-import { dispatchBackendEvent } from 'lib/backend-events';
+import { INTENT, loadSession, normalizeIntent } from 'lib/backend';
+import { BACKEND_EVENT_KIND, dispatchBackendEvent } from 'lib/backend-events';
 
 const DETECTORS = {
   'face-yunet': {
@@ -210,7 +210,7 @@ export class FaceDetectorEngine {
     if (this.#backendListener) return;
     this.#backendListener = (e) => {
       const d = e?.detail;
-      if (d && d.kind === 'success' && typeof d.backend === 'string') {
+      if (d && d.kind === BACKEND_EVENT_KIND.SUCCESS && typeof d.backend === 'string') {
         this.#realizedBackend = d.backend;
       }
     };
@@ -222,7 +222,7 @@ export class FaceDetectorEngine {
     this.#backendListener = null;
   }
 
-  async loadModel(detectorKey = 'face-yunet', intent = 'cpu', onProgress) {
+  async loadModel(detectorKey = 'face-yunet', intent = INTENT.CPU, onProgress) {
     if (onProgress != null && typeof onProgress !== 'function') {
       console.warn('[FaceDetectorEngine] Ignoring non-function onProgress callback.', {
         type: typeof onProgress,
@@ -235,7 +235,7 @@ export class FaceDetectorEngine {
     const report = typeof onProgress === 'function' ? onProgress : null;
     if (this.#session && this.#currentDetectorKey === detectorKey && this.#intent === intent) {
       if (this.#realizedBackend) {
-        dispatchBackendEvent({ kind: 'success', backend: this.#realizedBackend });
+        dispatchBackendEvent({ kind: BACKEND_EVENT_KIND.SUCCESS, backend: this.#realizedBackend });
       }
       return;
     }
@@ -361,8 +361,3 @@ export class FaceDetectorEngine {
   }
 }
 
-function normalizeIntent(value) {
-  if (value === 'webgpu' || value === 'gpu') return 'gpu';
-  if (value === 'wasm'   || value === 'cpu') return 'cpu';
-  return 'cpu';
-}
