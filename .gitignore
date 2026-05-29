@@ -28,3 +28,4 @@ Electron.app/
 
 # Hugging Face Space build output (git clone of the Space lives here)
 hf-space/
+deploy-hf-space.js
