@@ -20,8 +20,10 @@ node_modules/
 # Deploy script (contains AWS account/bucket info)
 deploy.js
 
-# Model backup artifacts
-models/bak/
+# Model weights — large binaries, not tracked in git.
+# Keep the directory itself present via models/.gitkeep.
+models/*
+!models/.gitkeep
 
 # Electron build output
 Electron.app/
