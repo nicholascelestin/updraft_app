@@ -10,19 +10,8 @@ export const UPSCALER_MODELS = [
   { url: 'models/DAT_light_x4_dyn_OTF_4_fp16.onnx', scale: 4, label: 'DAT Light Restore (DAT-Light OTF)', sizeMB: 4.4, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2_Lite_fp16.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)', sizeMB: 15, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2.onnx', scale: 4, label: 'UltraSharp V2 (DAT)', sizeMB: 52 },
-  { url: 'models/vanilla.onnx', scale: 4, label: 'Vanilla', sizeMB: 1 },
-  { url: 'models/recon_exp.onnx', scale: 4, label: 'Recon Expand', sizeMB: 1.1 },
-  { url: 'models/both_exp.onnx', scale: 4, label: 'Both Expand', sizeMB: 1.2 },
-  { url: 'models/feature.onnx', scale: 4, label: 'Feature', sizeMB: 1.2 },
-  { url: 'models/softmax.onnx', scale: 4, label: 'Softmax', sizeMB: 1.2 },
-  { url: 'models/softmax_2.onnx', scale: 4, label: 'Softmax 200k', sizeMB: 1.2 },
-  { url: 'models/softmax_3.onnx', scale: 4, label: 'Softmax 250k', sizeMB: 1.2 },
-  { url: 'models/softmax_4.onnx', scale: 4, label: 'Softmax 300k', sizeMB: 1.2 },
-  { url: 'models/softmax_5.onnx', scale: 4, label: 'Softmax 350k', sizeMB: 1.2 },
-  { url: 'models/softmax_6.onnx', scale: 4, label: 'Softmax 400k', sizeMB: 1.2 },
-  { url: 'models/softmax_7.onnx', scale: 4, label: 'Softmax 441k', sizeMB: 1.2 },
-  { url: 'models/softmax_8.onnx', scale: 4, label: 'Softmax 500k', sizeMB: 1.2 },
-  { url: 'models/softmax_9.onnx', scale: 4, label: 'Softmax 536k', sizeMB: 1.2 },
+  // { url: 'models/softmax_8.onnx', scale: 4, label: 'Softmax 500k', sizeMB: 1.2 },
+  // { url: 'models/softmax_9.onnx', scale: 4, label: 'Softmax 536k', sizeMB: 1.2 },
 
 
   {
