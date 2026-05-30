@@ -4,16 +4,12 @@
 // in upscaler-controls.js where they're rendered into the model select.
 
 export const UPSCALER_MODELS = [
-  { url: 'models/4x-UpdraftSmall_fp16.onnx', scale: 4, label: 'Updraft Small (Custom)', sizeMB: 0.8, multipleOf: 32, precision: 'fp16' },
+  { url: 'models/4x-UpdraftSmall_V2_fp16.onnx', scale: 4, label: 'Updraft Small (Custom)', sizeMB: 1.2, multipleOf: 32, precision: 'fp16' },
   { url: 'models/4x-ClearRealityV1_fp16.onnx', scale: 4, label: 'ClearReality (SPAN)', sizeMB: 1.0, precision: 'fp16' },
   { url: 'models/4x-UpdraftBig_fp16.onnx', scale: 4, label: 'Updraft Big (Custom)', sizeMB: 3.3, multipleOf: 32, precision: 'fp16' },
   { url: 'models/DAT_light_x4_dyn_OTF_4_fp16.onnx', scale: 4, label: 'DAT Light Restore (DAT-Light OTF)', sizeMB: 4.4, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2_Lite_fp16.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)', sizeMB: 15, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2.onnx', scale: 4, label: 'UltraSharp V2 (DAT)', sizeMB: 52 },
-  // { url: 'models/softmax_8.onnx', scale: 4, label: 'Softmax 500k', sizeMB: 1.2 },
-  // { url: 'models/softmax_9.onnx', scale: 4, label: 'Softmax 536k', sizeMB: 1.2 },
-
-
   {
     url: 'models/tinysr_fused.onnx',
     scale: 4,
