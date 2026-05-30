@@ -28,6 +28,7 @@ function humanStepName(step) {
     blendAll: 'All-pass blend',
     detectFaces: 'Face detection',
     enhanceFaces: 'Face enhance',
+    colorMatch: 'Color match',
     pipeline: 'Pipeline',
   };
   return names[step] || step || '—';

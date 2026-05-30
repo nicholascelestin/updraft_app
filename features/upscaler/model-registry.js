@@ -10,6 +10,9 @@ export const UPSCALER_MODELS = [
   { url: 'models/DAT_light_x4_dyn_OTF_4_fp16.onnx', scale: 4, label: 'DAT Light Restore (DAT-Light OTF)', sizeMB: 4.4, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2_Lite_fp16.onnx', scale: 4, label: 'UltraSharp V2 Lite (RealPLKSR)', sizeMB: 15, precision: 'fp16' },
   { url: 'models/4x-UltraSharpV2.onnx', scale: 4, label: 'UltraSharp V2 (DAT)', sizeMB: 52 },
+  { url: 'models/super_again.onnx', scale: 4, label: 'Super Again (Custom)', sizeMB: 1.2 },
+  { url: 'models/super_again_1.onnx', scale: 4, label: 'Super Again 1 (Custom)', sizeMB: 1.2 },
+  
   {
     url: 'models/tinysr_fused.onnx',
     scale: 4,

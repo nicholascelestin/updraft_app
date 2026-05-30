@@ -9,6 +9,7 @@ import {
   computeFeatherPx,
   ensureCanvas,
   blendCanvas,
+  matchColorToReference,
 } from 'lib/canvas';
 import { buildTileGrid } from './engine/tiling.js';
 
@@ -329,11 +330,37 @@ const enhanceFacesStep = {
   },
 };
 
+// Runs last so it corrects the final composited result (and the comparison
+// pass, when present). The reference is always the original LR input, which
+// the pipeline carries on ctx.source untouched.
+const colorMatchStep = {
+  name: 'colorMatch',
+  shouldRun: (ctx) => !!ctx.config.colorMatch,
+  async run(ctx, cb) {
+    emitStage(cb, 'colorMatch', 'running', { message: 'Matching color to input…' });
+    const t = performance.now();
+    const image = matchColorToReference(ensureCanvas(ctx.image), ctx.source);
+    let comparisonImage = ctx.comparisonImage;
+    if (comparisonImage) {
+      comparisonImage = matchColorToReference(ensureCanvas(comparisonImage), ctx.source);
+    }
+    return {
+      ...ctx,
+      image,
+      comparisonImage,
+      stepPerf: {
+        ...(ctx.stepPerf || {}),
+        colorMatch: { total: Number((performance.now() - t).toFixed(1)) },
+      },
+    };
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Step runner
 // ---------------------------------------------------------------------------
 
-const STEPS = [tiledUpscaleStep, comparisonStep, blendAllStep, detectFacesStep, enhanceFacesStep];
+const STEPS = [tiledUpscaleStep, comparisonStep, blendAllStep, detectFacesStep, enhanceFacesStep, colorMatchStep];
 
 function getImageSize(image) {
   if (!image) return null;

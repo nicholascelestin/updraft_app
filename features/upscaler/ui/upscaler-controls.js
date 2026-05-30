@@ -67,6 +67,7 @@ const PERSISTED_CONTROLS = [
   { selector: '.tilesize-select',         key: 'upscaler_tilesize',                kind: 'value',   event: 'change' },
   { selector: '.backend-select',          key: 'upscaler_backend',                 kind: 'value',   event: 'change' },
   { selector: '.output-select',           key: 'upscaler_output',                  kind: 'value',   event: 'change' },
+  { selector: '.color-match-enabled',     key: 'upscaler_color_match',             kind: 'checked', event: 'change' },
   { selector: '.pass-all-enabled',        key: 'upscaler_pass_all_enabled',        kind: 'checked', event: 'change' },
   { selector: '.pass-all-blend',          key: 'upscaler_pass_all_blend',          kind: 'value',   event: 'input' },
   { selector: '.pass-all-model',          key: 'upscaler_pass_all_model',          kind: 'value',   event: 'change' },
@@ -152,6 +153,10 @@ class UpscalerControls extends HTMLElement {
     const backend = this.backend;
     const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const config = { model, backend, tileSize };
+
+    // Post-process: re-tint the SR result to the LR input's color. Applies in
+    // every mode (including Comparison), so it's set before the early returns.
+    if (this.#q('.color-match-enabled').checked) config.colorMatch = true;
 
     // Comparison runs the base + a second SR pass side-by-side; All/Faces
     // would mutate the base canvas the slider needs to expose, so they're
@@ -732,6 +737,10 @@ class UpscalerControls extends HTMLElement {
               <option value="3">3x</option>
               <option value="4" selected>4x (no downscale)</option>
             </select>
+          </label>
+          <label class="color-match-control" title="Re-tint the upscaled result to match the input's color and brightness, keeping the recovered detail. Fixes hue/exposure drift some models introduce.">
+            <input class="color-match-enabled" type="checkbox">
+            Color match
           </label>
         </span>
 
