@@ -339,10 +339,11 @@ const colorMatchStep = {
   async run(ctx, cb) {
     emitStage(cb, 'colorMatch', 'running', { message: 'Matching color to input…' });
     const t = performance.now();
-    const image = matchColorToReference(ensureCanvas(ctx.image), ctx.source);
+    const opts = { matchContrast: !!ctx.config.matchContrast };
+    const image = matchColorToReference(ensureCanvas(ctx.image), ctx.source, opts);
     let comparisonImage = ctx.comparisonImage;
     if (comparisonImage) {
-      comparisonImage = matchColorToReference(ensureCanvas(comparisonImage), ctx.source);
+      comparisonImage = matchColorToReference(ensureCanvas(comparisonImage), ctx.source, opts);
     }
     return {
       ...ctx,

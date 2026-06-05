@@ -52,6 +52,7 @@
     "lib/model-cache.js",
     "lib/morph.js",
     "lib/onnx-meta.js",
+    "lib/ort-loader.js",
     "vendor/fflate/index.mjs",
     "vendor/font-awesome/css/all.min.css",
     "vendor/font-awesome/webfonts/fa-brands-400.ttf",

@@ -3,6 +3,7 @@
 // hard input-size cap. Called by SRModelStore when adding a custom model.
 
 import { readMetaEntry, isFp16InputType } from 'lib/onnx-meta';
+import { ensureOrt } from 'lib/ort-loader';
 
 const PROBE_SIZE = 64;
 const MAX_TILE_PROBE_SIZES = [128, 256];
@@ -186,9 +187,12 @@ const DEFAULT_RESULT = {
 export async function inspectOnnxFile(file, { onProgress } = {}) {
   if (!(file instanceof File)) throw new Error('Expected an ONNX file.');
   const report = typeof onProgress === 'function' ? onProgress : null;
-  const ort = globalThis.ort;
-  if (!ort?.InferenceSession) {
-    return { ...DEFAULT_RESULT, notes: ['ONNX Runtime not loaded yet; using defaults (4x, range 1).'] };
+  let ort;
+  try {
+    ort = await ensureOrt();
+  } catch (err) {
+    console.warn('[inspectOnnxFile] ORT-Web failed to load:', err);
+    return { ...DEFAULT_RESULT, notes: ['ONNX Runtime failed to load; using defaults (4x, range 1).'] };
   }
 
   report?.('reading ONNX metadata and loading session…');
