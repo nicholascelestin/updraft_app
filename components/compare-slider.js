@@ -329,7 +329,7 @@ class CompareSlider extends HTMLElement {
           border-radius: var(--pico-border-radius, 4px);
           cursor: col-resize; user-select: none; max-width: 100%;
         }
-        .compare:not(.expanded):not(.native-size) {
+        .compare:not(.expanded):not(.native-size):not(.zoomed) {
           width: 100%;
           max-width: 100%;
           aspect-ratio: var(--ar, auto);
@@ -438,6 +438,31 @@ class CompareSlider extends HTMLElement {
         }
         .compare.native-size .compare-after {
           width: auto;
+          max-width: none;
+          height: auto;
+          display: block;
+        }
+        /* zoomed: like native-size, but the after canvas is sized to
+           natural-width × --zoom (and the before-wrap/handle track it via the
+           stage's max-content box, exactly as in native-size). */
+        .compare.zoomed {
+          width: 100%;
+          max-width: 100%;
+          height: calc(100vh - 1rem);
+          max-height: calc(100vh - 1rem);
+          aspect-ratio: auto;
+          overflow: auto;
+          cursor: default;
+          display: flex;
+        }
+        .compare.zoomed .compare-stage {
+          margin: auto;
+          width: max-content;
+          height: max-content;
+          flex: 0 0 auto;
+        }
+        .compare.zoomed .compare-after {
+          width: calc(var(--natural-w, 100%) * var(--zoom, 1));
           max-width: none;
           height: auto;
           display: block;

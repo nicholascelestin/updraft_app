@@ -2,8 +2,12 @@
  * <view-mode-controls> -- segmented icon-button radio for the canvas view mode.
  *
  * Renders one button per mode; the currently-selected mode is marked with
- * `aria-pressed="true"`. Clicking a different button switches and emits
+ * `aria-pressed="true"`. Clicking a button switches mode and emits
  * `mode-change` { detail: { mode } }.
+ *
+ * Set `active = false` to clear the pressed state entirely -- used when a
+ * sibling control (the zoom slider) has taken over the view, so the segment
+ * shows no selection until a mode is clicked again.
  */
 
 // Canonical mode values. Callers should reference VIEW_MODE.X rather than
@@ -27,6 +31,9 @@ export function isViewMode(value) {
 
 class ViewModeControls extends HTMLElement {
   #mode = VIEW_MODE.FIT_WIDTH;
+  // When false, no mode button is shown pressed -- used while an explicit zoom
+  // (owned by a sibling control) has taken over the view.
+  #active = true;
 
   connectedCallback() {
     this.#render();
@@ -41,12 +48,23 @@ class ViewModeControls extends HTMLElement {
     this.#render();
   }
 
+  get active() { return this.#active; }
+  set active(b) {
+    const v = !!b;
+    if (this.#active === v) return;
+    this.#active = v;
+    this.#render();
+  }
+
   #onClick = (e) => {
     const btn = e.target.closest('button[data-mode]');
     if (!btn) return;
     e.stopPropagation();
-    if (btn.dataset.mode === this.#mode) return;
+    // Re-selecting the current mode is a no-op only when we're already the
+    // active control; if a zoom had taken over, the click reclaims selection.
+    if (btn.dataset.mode === this.#mode && this.#active) return;
     this.#mode = btn.dataset.mode;
+    this.#active = true;
     this.#render();
     this.dispatchEvent(new CustomEvent('mode-change', { detail: { mode: this.#mode } }));
   };
@@ -54,7 +72,7 @@ class ViewModeControls extends HTMLElement {
   #render() {
     const buttons = VIEW_MODES.map(m => `
       <button type="button" class="secondary outline" data-mode="${m.key}"
-              aria-pressed="${m.key === this.#mode}"
+              aria-pressed="${this.#active && m.key === this.#mode}"
               title="${m.label}" aria-label="${m.label}">
         <i class="fas ${m.icon}"></i>
       </button>

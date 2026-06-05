@@ -1,5 +1,6 @@
 import 'components/status-bar';
 import 'components/view-mode-controls';
+import 'components/zoom-control';
 
 // Canonical toolbar state values. Drives button visibility (vs STATUS_STATE
 // in status-bar, which drives icon color -- different vocabulary on purpose).
@@ -42,6 +43,15 @@ class UpscalerToolbar extends HTMLElement {
   set viewMode(mode) {
     const vmc = this.#q('view-mode-controls');
     if (vmc) vmc.mode = mode;
+  }
+
+  get zoomControl() { return this.#q('zoom-control'); }
+
+  // Whether the view-mode segment shows a pressed button. False while an
+  // explicit zoom owns the view (so only the zoom button reads as selected).
+  set viewModeActive(b) {
+    const vmc = this.#q('view-mode-controls');
+    if (vmc) vmc.active = b;
   }
 
   setUpscaleLabel(label) {
@@ -96,6 +106,18 @@ class UpscalerToolbar extends HTMLElement {
     this.#q('view-mode-controls').addEventListener('mode-change', (e) => {
       this.dispatchEvent(new CustomEvent('view-mode-change', {
         bubbles: true, detail: { mode: e.detail.mode },
+      }));
+    });
+
+    // Same pattern for the zoom control: opening asks the orchestrator to seed
+    // the slider with the current effective zoom; dragging requests a new one.
+    const zoom = this.#q('zoom-control');
+    zoom.addEventListener('zoom-open', () => {
+      this.dispatchEvent(new CustomEvent('zoom-open', { bubbles: true }));
+    });
+    zoom.addEventListener('zoom-change', (e) => {
+      this.dispatchEvent(new CustomEvent('zoom-change', {
+        bubbles: true, detail: { value: e.detail.value },
       }));
     });
   }
@@ -232,6 +254,7 @@ class UpscalerToolbar extends HTMLElement {
             <i class="fas fa-stop"></i> <span class="btn-label">Stop</span>
           </button>
           <view-mode-controls></view-mode-controls>
+          <zoom-control></zoom-control>
           <button class="clear-crop-btn secondary outline" style="display:none" type="button" title="Clear the selected crop region">
             <i class="fas fa-eraser"></i> <span class="btn-label">Clear Selection</span>
           </button>

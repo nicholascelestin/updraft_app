@@ -69,7 +69,7 @@ class UpscalePreview extends HTMLElement {
     morph(this, `
       <style>
         .upscale-preview { display: none; position: relative; }
-        .upscale-preview:not(.expanded) {
+        .upscale-preview:not(.expanded):not(.native-size):not(.zoomed) {
           width: 100%;
           max-width: 100%;
           aspect-ratio: var(--ar, auto);
@@ -95,6 +95,23 @@ class UpscalePreview extends HTMLElement {
         .upscale-preview.native-size canvas {
           margin: auto;
           width: auto;
+          height: auto;
+          max-width: none;
+          flex: 0 0 auto;
+        }
+        /* zoomed: explicit scale factor (natural-width × --zoom). */
+        .upscale-preview.zoomed {
+          width: 100%;
+          max-width: 100%;
+          height: calc(100vh - 1rem);
+          max-height: calc(100vh - 1rem);
+          overflow: auto;
+          display: flex;
+          margin-inline: auto;
+        }
+        .upscale-preview.zoomed canvas {
+          margin: auto;
+          width: calc(var(--natural-w, 100%) * var(--zoom, 1));
           height: auto;
           max-width: none;
           flex: 0 0 auto;

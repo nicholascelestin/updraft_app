@@ -172,7 +172,9 @@ class UpscalerApp extends HTMLElement {
         this.#abortController = null;
       }
       const img = e.detail.image;
+      toolbar.zoomControl.close();
       this.#setMode(canvasArea.defaultModeForImage(img));
+      this.#syncZoomSelection();
       canvasArea.showCropping(img);
       toolbar.state = TOOLBAR_STATE.READY;
       toolbar.hasCrop = false;
@@ -200,10 +202,33 @@ class UpscalerApp extends HTMLElement {
       });
     });
 
-    // View mode (toolbar -> canvas).
+    // View mode (toolbar -> canvas). Picking a discrete mode also exits any
+    // explicit zoom and closes the slider. clearZoom re-applies the mode's
+    // layout even when #setMode would no-op (same mode the zoom overrode).
     toolbar.addEventListener('view-mode-change', (e) => {
+      toolbar.zoomControl.close();
+      canvasArea.clearZoom();
       this.#setMode(e.detail.mode);
+      this.#syncZoomSelection();
       canvasArea.snapCenterVisible();
+    });
+
+    // Zoom slider opened -> seed it with the zoom currently on screen so the
+    // act of opening doesn't change anything. Dragging applies a new zoom and
+    // hands "selected" status to the zoom button (it no longer matches a mode).
+    toolbar.addEventListener('zoom-open', () => {
+      const z = canvasArea.getEffectiveZoom();
+      if (z) toolbar.zoomControl.value = z;
+    });
+    toolbar.addEventListener('zoom-change', (e) => {
+      canvasArea.setZoom(e.detail.value);
+      this.#syncZoomSelection();
+    });
+
+    // Keep the always-visible zoom readout in step with the on-screen zoom,
+    // whichever mode (or explicit zoom) is producing it.
+    canvasArea.addEventListener('effective-zoom-change', (e) => {
+      toolbar.zoomControl.value = e.detail.value;
     });
 
     // Button events from toolbar.
@@ -283,6 +308,17 @@ class UpscalerApp extends HTMLElement {
     canvasArea.viewMode = mode;
     toolbar.viewMode = mode;
     localStorage.setItem('upscaler_view_mode', mode);
+  }
+
+  // Exactly one of {view-mode segment, zoom button} reads as selected: the
+  // zoom button wins whenever an explicit zoom is active (it matches none of
+  // the fit/1:1 presets), otherwise the matching view-mode button does.
+  #syncZoomSelection() {
+    const canvasArea = this.#q('upscaler-canvas-area');
+    const toolbar = this.#q('upscaler-toolbar');
+    const zoomed = canvasArea.zoom != null;
+    toolbar.zoomControl.selected = zoomed;
+    toolbar.viewModeActive = !zoomed;
   }
 
   #restoreViewState() {
