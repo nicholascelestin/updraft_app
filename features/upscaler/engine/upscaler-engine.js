@@ -354,7 +354,13 @@ export class UpscalerEngine {
       this.#model.layout === 'nchw' &&
       this.#model.multipleOf === 1;
     const sessionLoadOpts = { profile: this.#profiling };
-    if (intent === INTENT.GPU && canUseGpuFastPath) {
+    // preferredOutputLocation is a *load-time* option, so it's bound here from the
+    // declared precision -- before the self-correction below can flip fp16->fp32
+    // and re-enable canUseGpuFastPath. gpuOutputBound records whether GPU output
+    // was actually bound, so the renderer can't later read .gpuBuffer on a tensor
+    // that's still CPU-resident (model with declared fp16 but real fp32 IO).
+    const gpuOutputBound = intent === INTENT.GPU && canUseGpuFastPath;
+    if (gpuOutputBound) {
       sessionLoadOpts.preferredOutputLocation = 'gpu-buffer';
     }
     // ORT's graph optimizer fuses Conv + PReLU pairs into com.microsoft.FusedConv,
@@ -410,7 +416,13 @@ export class UpscalerEngine {
           this.#session = reloaded.session;
           this.#realizedBackend = reloaded.realizedBackend;
         }
-        if (canUseGpuFastPath) {
+        // Only run the zero-readback GPU output renderer if the session was
+        // actually loaded with GPU output binding. When the self-correction
+        // above re-enables canUseGpuFastPath for a declared-fp16/real-fp32-IO
+        // model, the output still lives on the CPU; reading .gpuBuffer would
+        // throw "data is not stored as a WebGPU buffer". Such models fall
+        // through to the CPU readback path instead.
+        if (canUseGpuFastPath && gpuOutputBound) {
           this.#gpuRenderer = new GpuTileRenderer(this.#device);
         }
         if (canUseGpuFastPath && typeof ort.Tensor.fromGpuBuffer === 'function') {
