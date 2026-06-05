@@ -331,15 +331,16 @@ const enhanceFacesStep = {
 };
 
 // Runs last so it corrects the final composited result (and the comparison
-// pass, when present). The reference is always the original LR input, which
-// the pipeline carries on ctx.source untouched.
+// pass, when present), matching the result's tone -- color, brightness, and
+// contrast -- back to the reference. The reference is always the original LR
+// input, which the pipeline carries on ctx.source untouched.
 const colorMatchStep = {
   name: 'colorMatch',
   shouldRun: (ctx) => !!ctx.config.colorMatch,
   async run(ctx, cb) {
-    emitStage(cb, 'colorMatch', 'running', { message: 'Matching color to input…' });
+    emitStage(cb, 'colorMatch', 'running', { message: 'Matching tone to input…' });
     const t = performance.now();
-    const opts = { matchContrast: !!ctx.config.matchContrast };
+    const opts = { matchContrast: true };
     const image = matchColorToReference(ensureCanvas(ctx.image), ctx.source, opts);
     let comparisonImage = ctx.comparisonImage;
     if (comparisonImage) {

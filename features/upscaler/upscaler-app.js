@@ -85,7 +85,7 @@ const STEP_LABEL = {
   blendAll: 'All-pass',
   detectFaces: 'Detecting',
   enhanceFaces: 'Faces',
-  colorMatch: 'Color match',
+  colorMatch: 'Preserve tone',
 };
 
 function scaleCanvasToOutput(srCanvas, image, outputScale) {

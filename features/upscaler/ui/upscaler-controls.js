@@ -67,8 +67,7 @@ const PERSISTED_CONTROLS = [
   { selector: '.tilesize-select',         key: 'upscaler_tilesize',                kind: 'value',   event: 'change' },
   { selector: '.backend-select',          key: 'upscaler_backend',                 kind: 'value',   event: 'change' },
   { selector: '.output-select',           key: 'upscaler_output',                  kind: 'value',   event: 'change' },
-  { selector: '.color-match-enabled',     key: 'upscaler_color_match',             kind: 'checked', event: 'change' },
-  { selector: '.color-match-contrast',    key: 'upscaler_color_match_contrast',    kind: 'checked', event: 'change' },
+  { selector: '.preserve-tone-enabled',   key: 'upscaler_preserve_tone',           kind: 'checked', event: 'change' },
   { selector: '.pass-all-enabled',        key: 'upscaler_pass_all_enabled',        kind: 'checked', event: 'change' },
   { selector: '.pass-all-blend',          key: 'upscaler_pass_all_blend',          kind: 'value',   event: 'input' },
   { selector: '.pass-all-model',          key: 'upscaler_pass_all_model',          kind: 'value',   event: 'change' },
@@ -155,13 +154,10 @@ class UpscalerControls extends HTMLElement {
     const tileSize = parseInt(this.#q('.tilesize-select').value, 10);
     const config = { model, backend, tileSize };
 
-    // Post-process: re-tint the SR result to the LR input's color. Applies in
+    // Post-process: re-tint and re-tone the SR result back to the LR input's
+    // color, brightness, and contrast, keeping the recovered detail. Applies in
     // every mode (including Comparison), so it's set before the early returns.
-    if (this.#q('.color-match-enabled').checked) {
-      config.colorMatch = true;
-      // Contrast match is a sub-option of color match; meaningless on its own.
-      if (this.#q('.color-match-contrast').checked) config.matchContrast = true;
-    }
+    if (this.#q('.preserve-tone-enabled').checked) config.colorMatch = true;
 
     // Comparison runs the base + a second SR pass side-by-side; All/Faces
     // would mutate the base canvas the slider needs to expose, so they're
@@ -267,7 +263,6 @@ class UpscalerControls extends HTMLElement {
     if (!modelEl.selectedOptions.length) modelEl.selectedIndex = 0;
     this.#previousModelValue = modelEl.value;
     this.#syncComparisonExclusion();
-    this.#syncColorMatchContrast();
     this.#updateModelBoundControls();
     this.#updateInputMirrors();
     this.#updateCustomDeleteVisibility();
@@ -352,7 +347,6 @@ class UpscalerControls extends HTMLElement {
     }
 
     this.#q('.pass-compare-enabled').addEventListener('change', () => this.#syncComparisonExclusion());
-    this.#q('.color-match-enabled').addEventListener('change', () => this.#syncColorMatchContrast());
 
     const wireMirror = (selector, mirrorSelector) => {
       this.#q(selector).addEventListener('input', (e) => {
@@ -499,16 +493,6 @@ class UpscalerControls extends HTMLElement {
   // they would muddy what the slider is showing. Disable their controls and
   // dim the rows, but leave the underlying values untouched so toggling
   // Comparison off restores the user's prior pass setup verbatim.
-  // Contrast match only applies on top of color match, so disable (and visually
-  // dim) it whenever color match is off.
-  #syncColorMatchContrast() {
-    const on = !!this.#q('.color-match-enabled')?.checked;
-    const ctrl = this.#q('.color-match-contrast');
-    const label = this.#q('.color-match-contrast-control');
-    if (ctrl) ctrl.disabled = !on;
-    if (label) label.classList.toggle('passes-disabled', !on);
-  }
-
   #syncComparisonExclusion() {
     const compareOn = !!this.#q('.pass-compare-enabled')?.checked;
     const otherRows = this.querySelectorAll('.detector-row:not(.pass-compare-row)');
@@ -755,13 +739,9 @@ class UpscalerControls extends HTMLElement {
               <option value="4" selected>4x (no downscale)</option>
             </select>
           </label>
-          <label class="color-match-control" title="Re-tint the upscaled result to match the input's color and brightness, keeping the recovered detail. Fixes hue/exposure drift some models introduce.">
-            <input class="color-match-enabled" type="checkbox">
-            Color match
-          </label>
-          <label class="color-match-contrast-control" title="Also scale the recovered detail to match the input's per-channel contrast (std-dev), not just its color/brightness. Pulls a model that upscales punchier or flatter than the source back toward the input.">
-            <input class="color-match-contrast" type="checkbox">
-            Match contrast
+          <label class="preserve-tone-control" title="Re-tint and re-tone the upscaled result to match the input's color, brightness, and contrast, keeping the recovered detail. Fixes hue/exposure/contrast drift some models introduce.">
+            <input class="preserve-tone-enabled" type="checkbox">
+            Preserve Tone
           </label>
         </span>
 
