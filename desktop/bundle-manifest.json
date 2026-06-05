@@ -39,6 +39,7 @@
     "features/upscaler/ui/perf-monitor.js",
     "features/upscaler/ui/upload-model-dialog.js",
     "features/upscaler/ui/upscale-preview.js",
+    "features/upscaler/ui/upscale-result.js",
     "features/upscaler/ui/upscaler-canvas-area.js",
     "features/upscaler/ui/upscaler-controls.js",
     "features/upscaler/ui/upscaler-toolbar.js",

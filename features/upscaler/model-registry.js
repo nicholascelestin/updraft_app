@@ -32,6 +32,8 @@ export const UPSCALER_MODELS = [
   { url: 'models/yes_red_17_fp16.onnx', scale: 4, label: 'Yasss 17 FP16 862k (Custom)', sizeMB: 1.2 },
   { url: 'models/yes_red_18_fp16.onnx', scale: 4, label: 'Yasss 18 FP16 893k (Custom)', sizeMB: 1.2 },
   { url: 'models/yes_red_19_fp16.onnx', scale: 4, label: 'Yasss 19 FP16 947k (Custom)', sizeMB: 1.2 },
+  { url: 'models/yes_red_20_fp16.onnx', scale: 4, label: 'Yasss 20 FP16 979k (Custom)', sizeMB: 1.2 },
+
 
 
   { url: 'models/adist_1.onnx', scale: 4, label: 'Adist 1 823k (Custom)', sizeMB: 1.2 },

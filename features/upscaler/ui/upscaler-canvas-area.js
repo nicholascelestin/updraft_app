@@ -1,7 +1,7 @@
 import 'components/image-drop-zone';
 import 'components/image-cropper';
 import './upscale-preview.js';
-import 'components/compare-slider';
+import './upscale-result.js';
 import { VIEW_MODE, isViewMode } from 'components/view-mode-controls';
 import { ZOOM_MIN, ZOOM_MAX } from 'components/zoom-control';
 
@@ -19,13 +19,34 @@ class UpscalerCanvasArea extends HTMLElement {
     // The on-screen zoom of the fit modes depends on the viewport, so keep the
     // readout honest across resizes.
     window.addEventListener('resize', this.#onResize);
+    // Wheel over the canvas zooms toward the cursor. passive:false so we can
+    // suppress the page scroll while a zoomable stage is showing.
+    this.addEventListener('wheel', this.#onWheel, { passive: false });
   }
 
   disconnectedCallback() {
     window.removeEventListener('resize', this.#onResize);
+    this.removeEventListener('wheel', this.#onWheel);
   }
 
   #onResize = () => this.#emitEffectiveZoom();
+
+  #onWheel = (e) => {
+    // Only engage when there's something measurable to zoom (a visible canvas);
+    // otherwise let the page scroll normally.
+    const current = this.#zoom ?? this.getEffectiveZoom();
+    if (current == null) return;
+    e.preventDefault();
+    // Normalise across deltaMode (pixels / lines / pages) so a notch feels the
+    // same on a mouse wheel and a trackpad.
+    let dy = e.deltaY;
+    if (e.deltaMode === 1) dy *= 16;
+    else if (e.deltaMode === 2) dy *= 100;
+    const step = Math.exp(-dy * 0.0015);
+    this.zoomAround(current * step, e.clientX, e.clientY);
+    // Let the orchestrator repaint the zoom button as the active control.
+    this.dispatchEvent(new CustomEvent('wheel-zoom', { bubbles: true }));
+  };
 
   #q(sel) { return this.querySelector(sel); }
 
@@ -80,6 +101,45 @@ class UpscalerCanvasArea extends HTMLElement {
     this.#applyViewStatePreservingCenter();
   }
 
+  /**
+   * Apply an explicit zoom factor while keeping the image point under the
+   * given viewport coordinates pinned in place -- the natural behaviour for
+   * wheel-zoom, where the spot under the cursor shouldn't drift. Falls back to
+   * a no-op when nothing measurable is on screen.
+   */
+  zoomAround(factor, clientX, clientY) {
+    const n = Number(factor);
+    if (!Number.isFinite(n)) return;
+    const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, n));
+
+    // Record which image-relative point (0..1 within the canvas) sits under
+    // the cursor *before* the resize, so we can put it back afterwards.
+    const before = this.#visibleCanvas();
+    let u = 0.5, v = 0.5;
+    if (before) {
+      const r = before.getBoundingClientRect();
+      if (r.width && r.height) {
+        u = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+        v = Math.max(0, Math.min(1, (clientY - r.top) / r.height));
+      }
+    }
+
+    this.#zoom = clamped;
+    this.#applyViewState();
+
+    // After the new layout, nudge the stage's scroll so the same image point
+    // lands back under the cursor. getBoundingClientRect forces the reflow we
+    // need first. When the content now fits (not scrollable) the assignment
+    // simply clamps to 0 and the image stays centred -- which is fine.
+    const stage = this.#visibleStage();
+    const after = this.#visibleCanvas();
+    if (stage && after) {
+      const r = after.getBoundingClientRect();
+      stage.scrollLeft += (r.left + u * r.width) - clientX;
+      stage.scrollTop += (r.top + v * r.height) - clientY;
+    }
+  }
+
   // Re-apply the view state while keeping whatever was under the visible
   // stage's centre still centred -- shared by zoom and view-mode changes.
   #applyViewStatePreservingCenter() {
@@ -131,14 +191,14 @@ class UpscalerCanvasArea extends HTMLElement {
   showInitial() {
     this.#q('image-cropper').hide();
     this.#q('upscale-preview').hide();
-    this.#q('compare-slider').hide();
+    this.#q('upscale-result').hide();
     this.#q('image-drop-zone').show();
   }
 
   showCropping(image) {
     this.#image = image;
     this.#q('upscale-preview').hide();
-    this.#q('compare-slider').hide();
+    this.#q('upscale-result').hide();
     this.#q('image-drop-zone').hide();
     this.#q('image-cropper').show(image);
     this.#emitEffectiveZoom();
@@ -146,7 +206,7 @@ class UpscalerCanvasArea extends HTMLElement {
 
   showPreview(image, outW, outH) {
     this.#q('image-cropper').style.display = 'none';
-    this.#q('compare-slider').hide();
+    this.#q('upscale-result').hide();
     this.#q('upscale-preview').showDimmedPreview(image, outW, outH);
     this.#emitEffectiveZoom();
     // Upscale just started -- bring the workspace fully into view, same as the
@@ -165,14 +225,14 @@ class UpscalerCanvasArea extends HTMLElement {
     const anchor = from ? this.#captureScrollCenter(from) : null;
     this.#q('image-cropper').style.display = 'none';
     this.#q('upscale-preview').hide();
-    await this.#q('compare-slider').show(beforeCanvas, afterCanvas, opts);
+    await this.#q('upscale-result').show(beforeCanvas, afterCanvas, opts);
     this.#applyViewState();
-    if (anchor) this.#restoreScrollCenter(this.#q('compare-slider'), anchor);
+    if (anchor) this.#restoreScrollCenter(this.#q('upscale-result'), anchor);
   }
 
   clearCrop() { this.#q('image-cropper').clearCrop(); }
-  openInTab() { this.#q('compare-slider').openInTab(); }
-  download()  { this.#q('compare-slider').download(); }
+  openInTab() { this.#q('upscale-result').openInTab(); }
+  download()  { this.#q('upscale-result').download(); }
 
   /**
    * Scroll the currently-visible stage into view -- used whenever a change
@@ -193,19 +253,19 @@ class UpscalerCanvasArea extends HTMLElement {
   // ── Internal ───────────────────────────────────────────────────────────
 
   #visibleStage() {
-    for (const sel of ['compare-slider', 'upscale-preview', 'image-cropper', 'image-drop-zone']) {
+    for (const sel of ['upscale-result', 'upscale-preview', 'image-cropper', 'image-drop-zone']) {
       const el = this.#q(sel);
       if (el && el.offsetParent !== null) return el;
     }
     return null;
   }
 
-  // The drawing surface of whichever stage is on screen. compare-slider has
+  // The drawing surface of whichever stage is on screen. upscale-result has
   // two canvases; the "after" one carries the natural dimensions we measure.
   #visibleCanvas() {
     const stage = this.#visibleStage();
     if (!stage) return null;
-    return stage.querySelector('canvas.compare-after') || stage.querySelector('canvas');
+    return stage.querySelector('canvas.result-after') || stage.querySelector('canvas');
   }
 
   #applyViewState() {
@@ -215,7 +275,7 @@ class UpscalerCanvasArea extends HTMLElement {
     // suppressed while it's active.
     const isFitHeight = !zoomed && mode === VIEW_MODE.FIT_HEIGHT;
     const isOneToOne = !zoomed && mode === VIEW_MODE.ONE_TO_ONE;
-    for (const sel of ['image-cropper', 'upscale-preview', 'compare-slider']) {
+    for (const sel of ['image-cropper', 'upscale-preview', 'upscale-result']) {
       const el = this.#q(sel);
       if (!el) continue;
       el.classList.toggle('expanded', isFitHeight);
@@ -260,7 +320,7 @@ class UpscalerCanvasArea extends HTMLElement {
       <image-drop-zone></image-drop-zone>
       <image-cropper></image-cropper>
       <upscale-preview></upscale-preview>
-      <compare-slider></compare-slider>
+      <upscale-result></upscale-result>
     `;
   }
 }

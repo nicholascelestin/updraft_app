@@ -131,11 +131,18 @@ class UpscalerApp extends HTMLElement {
   #abortController = null;
   #running = false;
   #generation = 0;
+  #onWindowScroll = () => this.#syncScrollNavDirection();
 
   connectedCallback() {
     this.#render();
     this.#wire();
     this.#restoreViewState();
+    this.#syncScrollNavDirection();
+    window.addEventListener('scroll', this.#onWindowScroll, { passive: true });
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener('scroll', this.#onWindowScroll);
   }
 
   #q(sel) { return this.querySelector(sel); }
@@ -231,6 +238,21 @@ class UpscalerApp extends HTMLElement {
       toolbar.zoomControl.value = e.detail.value;
     });
 
+    // The result viewer reveals the other layer while the user holds it;
+    // surface that with the toolbar badge, labelled for whichever layer is in
+    // view (the original "LR" normally, or a model name in Comparison mode).
+    canvasArea.addEventListener('lr-view-change', (e) => {
+      toolbar.setCompareBadge(e.detail.showing, e.detail.label);
+    });
+
+    // Wheel-zoom applies the zoom inside the canvas (cursor-anchored); the
+    // orchestrator only needs to hand the "selected" status to the zoom button
+    // and close the slider, matching the slider-driven path above.
+    canvasArea.addEventListener('wheel-zoom', () => {
+      toolbar.zoomControl.close();
+      this.#syncZoomSelection();
+    });
+
     // Button events from toolbar.
     toolbar.addEventListener('upscale-click',     () => this.#runUpscale());
     toolbar.addEventListener('stop-click',        () => this.#abortController?.abort());
@@ -243,6 +265,10 @@ class UpscalerApp extends HTMLElement {
       this.#showReady();
     });
     toolbar.addEventListener('clear-crop-click',  () => canvasArea.clearCrop());
+    toolbar.addEventListener('scroll-top-click',  () => {
+      if (this.#isNearTop()) canvasArea.snapCenterVisible();
+      else window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
     toolbar.addEventListener('open-in-tab-click', () => canvasArea.openInTab());
     toolbar.addEventListener('download-click',    () => canvasArea.download());
 
@@ -321,6 +347,16 @@ class UpscalerApp extends HTMLElement {
     toolbar.viewModeActive = !zoomed;
   }
 
+  #isNearTop() {
+    return (window.scrollY || window.pageYOffset || 0) <= 80;
+  }
+
+  #syncScrollNavDirection() {
+    const toolbar = this.#q('upscaler-toolbar');
+    if (!toolbar) return;
+    toolbar.scrollNavDirection = this.#isNearTop() ? 'down' : 'up';
+  }
+
   #restoreViewState() {
     const saved = localStorage.getItem('upscaler_view_mode');
     const mode = isViewMode(saved) ? saved : VIEW_MODE.FIT_WIDTH;
@@ -376,7 +412,7 @@ class UpscalerApp extends HTMLElement {
       const inputImage = canvasArea.croppedImage;
       const requestedOutputScale = controls.outputScale;
 
-      const { beforeCanvas, afterCanvas, scale, comparison } =
+      const { beforeCanvas, afterCanvas, scale, comparison, beforeLabel, afterLabel } =
         await this.#runPipeline(controls, canvasArea, perfMon, status, signal, inputImage, requestedOutputScale, () => runState);
 
       const outW = inputImage.width * scale;
@@ -406,6 +442,8 @@ class UpscalerApp extends HTMLElement {
 
       await canvasArea.showResult(beforeCanvas, afterCanvas, {
         downloadName: comparison ? `comparison_${scale}x.png` : `upscaled_${scale}x.png`,
+        beforeLabel,
+        afterLabel,
       });
       toolbar.state = TOOLBAR_STATE.DONE;
     } catch (e) {
@@ -534,10 +572,24 @@ class UpscalerApp extends HTMLElement {
     const outputScale = Math.max(1, Math.min(requestedOutputScale, result.scale));
     if (config.comparison && result.comparisonImage) {
       const canvases = makeComparisonPairCanvases(result.image, result.comparisonImage, inputImage, outputScale);
-      return { ...canvases, scale: outputScale, comparison: true };
+      // Comparison is SR-vs-SR: the held (before) layer is the base model's
+      // output, the default (after) layer is the comparison model's.
+      return {
+        ...canvases,
+        scale: outputScale,
+        comparison: true,
+        beforeLabel: config.model?.label || 'Model 1',
+        afterLabel: config.comparison.model?.label || 'Model 2',
+      };
     }
     const canvases = makeComparisonCanvases(result.image, inputImage, outputScale);
-    return { ...canvases, scale: outputScale, comparison: false };
+    return {
+      ...canvases,
+      scale: outputScale,
+      comparison: false,
+      beforeLabel: 'LR',
+      afterLabel: 'HR',
+    };
   }
 
   async #runBuiltInResample(inputImage, modelUrl, requestedOutputScale, canvasArea, status, signal) {
@@ -570,7 +622,13 @@ class UpscalerApp extends HTMLElement {
     status.set({ progress: 1 });
     const outputScale = Math.max(1, Math.min(requestedOutputScale, scale));
     const canvases = makeComparisonCanvases(resultCanvas, inputImage, outputScale);
-    return { ...canvases, scale: outputScale, comparison: false };
+    return {
+      ...canvases,
+      scale: outputScale,
+      comparison: false,
+      beforeLabel: 'LR',
+      afterLabel: 'HR',
+    };
   }
 
   // ── Template ───────────────────────────────────────────────────────────

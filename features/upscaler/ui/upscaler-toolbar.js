@@ -16,9 +16,11 @@ const STATES = Object.values(TOOLBAR_STATE);
 class UpscalerToolbar extends HTMLElement {
   #state = TOOLBAR_STATE.EMPTY;
   #hasCrop = false;
+  #scrollNavDirection = 'up';
 
   connectedCallback() {
     this.#render();
+    this.scrollNavDirection = this.#scrollNavDirection;
     this.#wireEvents();
     this.#applyState();
   }
@@ -37,6 +39,27 @@ class UpscalerToolbar extends HTMLElement {
   set hasCrop(b) {
     this.#hasCrop = !!b;
     this.#applyState();
+  }
+
+  // Reflect which result layer is currently on screen. The badge is always
+  // present once a result exists (visibility is driven by toolbar state); only
+  // its glyph + label swap here. `peeking` is true while the user holds to see
+  // the "before" layer (the original LR, or model 1 in Comparison); false for
+  // the default layer (the HR/SR result, or model 2). The two-eye metaphor is
+  // lifted from the old slider handle.
+  setCompareBadge(peeking, label) {
+    const el = this.#q('.compare-indicator');
+    if (!el) return;
+    const icon = el.querySelector('.compare-icon');
+    if (icon) {
+      icon.classList.toggle('fa-eye-low-vision', !!peeking);
+      icon.classList.toggle('fa-eye', !peeking);
+    }
+    if (label != null) {
+      const labelEl = el.querySelector('.compare-label');
+      if (labelEl) labelEl.textContent = label;
+      el.setAttribute('aria-label', `Showing ${label}`);
+    }
   }
 
   get viewMode() { return this.#q('view-mode-controls').mode; }
@@ -63,6 +86,26 @@ class UpscalerToolbar extends HTMLElement {
   // orchestrator can write progress/messages directly during a run.
   get statusBar() { return this.#q('status-bar'); }
 
+  // Center nav button mode:
+  // - "up"   => scroll to page top controls
+  // - "down" => jump back to the canvas workspace
+  set scrollNavDirection(dir) {
+    const next = dir === 'down' ? 'down' : 'up';
+    this.#scrollNavDirection = next;
+    const icon = this.#q('.scroll-nav-icon');
+    const btn = this.#q('.scroll-top-btn');
+    if (icon) {
+      icon.classList.toggle('fa-arrow-up', next === 'up');
+      icon.classList.toggle('fa-arrow-down', next === 'down');
+    }
+    if (btn) {
+      const toTop = next === 'up';
+      const label = toTop ? 'Back to top controls' : 'Back to canvas';
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+    }
+  }
+
   // ── Internal ───────────────────────────────────────────────────────────
 
   #applyState() {
@@ -84,8 +127,12 @@ class UpscalerToolbar extends HTMLElement {
     setDisplay('.back-to-crop-btn', s === TOOLBAR_STATE.DONE);
     setDisplay('.clear-crop-btn',   s === TOOLBAR_STATE.READY && this.#hasCrop);
 
-    setHidden('.canvas-toolbar-left',  s === TOOLBAR_STATE.EMPTY);
-    setHidden('.canvas-toolbar-right', s !== TOOLBAR_STATE.DONE);
+    setHidden('.canvas-toolbar-left',   s === TOOLBAR_STATE.EMPTY);
+    setHidden('.canvas-toolbar-center', s === TOOLBAR_STATE.EMPTY);
+    setHidden('.canvas-toolbar-right',  s !== TOOLBAR_STATE.DONE);
+    // The compare badge belongs to a finished result; it's always shown there
+    // (labelled for whichever layer is in view) and hidden in every other phase.
+    setHidden('.compare-indicator', s !== TOOLBAR_STATE.DONE);
   }
 
   #wireEvents() {
@@ -100,6 +147,7 @@ class UpscalerToolbar extends HTMLElement {
     this.#q('.back-to-crop-btn' ).addEventListener('click', fire('back-to-crop-click'));
     this.#q('.open-in-tab-btn'  ).addEventListener('click', fire('open-in-tab-click'));
     this.#q('.download-btn'     ).addEventListener('click', fire('download-click'));
+    this.#q('.scroll-top-btn'   ).addEventListener('click', fire('scroll-top-click'));
 
     // Re-emit view-mode-controls' change as a bubbling event so the
     // orchestrator can forward to canvas-area without poking through.
@@ -167,6 +215,14 @@ class UpscalerToolbar extends HTMLElement {
           right: 0.75rem;
           max-width: calc(100% - 1.5rem);
           pointer-events: auto;
+        }
+        upscaler-toolbar .canvas-toolbar-center {
+          position: absolute;
+          top: 0;
+          left: 50%;
+          transform: translateX(-50%);
+          pointer-events: auto;
+          z-index: 1;
         }
         upscaler-toolbar .canvas-toolbar[hidden] {
           display: none;
@@ -240,6 +296,54 @@ class UpscalerToolbar extends HTMLElement {
           color: #fff;
           mix-blend-mode: difference;
         }
+        /* The compare badge surfaces only while the user holds the result
+           viewer to peek at the other layer. Matches the toolbar's outline
+           buttons (transparent fill, mix-blend-mode) so it reads as part of
+           this section rather than a floating chip. */
+        upscaler-toolbar .canvas-toolbar .compare-indicator {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.25rem;
+          margin-left: 0.3rem;
+          padding: 0.1rem 0.45rem;
+          flex: 0 0 auto;
+          border-radius: 999px;
+          background: transparent;
+          border: 1px solid currentColor;
+          color: #fff;
+          mix-blend-mode: difference;
+          font-size: 0.66rem;
+          font-weight: 600;
+          line-height: 1.2;
+          letter-spacing: 0.02em;
+          white-space: nowrap;
+        }
+        upscaler-toolbar .canvas-toolbar .compare-indicator[hidden] {
+          display: none;
+        }
+        upscaler-toolbar .canvas-toolbar .compare-indicator .fas {
+          font-size: 0.82em;
+          margin-right: 0;
+          flex: 0 0 auto;
+        }
+        /* Long model names (Comparison mode) shouldn't blow out the toolbar;
+           clip with an ellipsis instead. */
+        upscaler-toolbar .canvas-toolbar .compare-indicator .compare-label {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          max-width: 14rem;
+        }
+        upscaler-toolbar .canvas-toolbar-center .scroll-top-btn {
+          padding: 0.2rem 0.45rem;
+          min-width: 0;
+          border-radius: 999px;
+          font-size: 0.68rem;
+          opacity: 0.85;
+        }
+        upscaler-toolbar .canvas-toolbar-center .scroll-top-btn .fas {
+          margin-right: 0.2rem;
+        }
       </style>
 
       <div class="canvas-toolbar-stack-left">
@@ -262,7 +366,15 @@ class UpscalerToolbar extends HTMLElement {
             <i class="fas fa-xmark"></i> <span class="btn-label">Clear</span>
           </button>
           <status-bar></status-bar>
+          <span class="compare-indicator" hidden aria-label="Showing upscaled result">
+            <i class="fas fa-eye compare-icon"></i><span class="compare-label">HR</span>
+          </span>
         </div>
+      </div>
+      <div class="canvas-toolbar canvas-toolbar-center" hidden>
+        <button class="scroll-top-btn secondary outline" type="button" title="Back to top controls" aria-label="Back to top controls">
+          <i class="fas fa-arrow-up scroll-nav-icon"></i><i class="fas fa-sliders"></i>
+        </button>
       </div>
       <div class="canvas-toolbar canvas-toolbar-right" hidden>
         <button class="open-in-tab-btn secondary outline" type="button" title="Open the upscaled image in a new tab">
