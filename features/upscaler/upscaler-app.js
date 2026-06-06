@@ -86,6 +86,7 @@ const STEP_LABEL = {
   detectFaces: 'Detecting',
   enhanceFaces: 'Faces',
   colorMatch: 'Preserve tone',
+  restoreAlpha: 'Transparency',
 };
 
 function scaleCanvasToOutput(srCanvas, image, outputScale) {
@@ -131,18 +132,11 @@ class UpscalerApp extends HTMLElement {
   #abortController = null;
   #running = false;
   #generation = 0;
-  #onWindowScroll = () => this.#syncScrollNavDirection();
 
   connectedCallback() {
     this.#render();
     this.#wire();
     this.#restoreViewState();
-    this.#syncScrollNavDirection();
-    window.addEventListener('scroll', this.#onWindowScroll, { passive: true });
-  }
-
-  disconnectedCallback() {
-    window.removeEventListener('scroll', this.#onWindowScroll);
   }
 
   #q(sel) { return this.querySelector(sel); }
@@ -265,10 +259,6 @@ class UpscalerApp extends HTMLElement {
       this.#showReady();
     });
     toolbar.addEventListener('clear-crop-click',  () => canvasArea.clearCrop());
-    toolbar.addEventListener('scroll-top-click',  () => {
-      if (this.#isNearTop()) canvasArea.snapCenterVisible();
-      else window.scrollTo({ top: 0, behavior: 'smooth' });
-    });
     toolbar.addEventListener('open-in-tab-click', () => canvasArea.openInTab());
     toolbar.addEventListener('download-click',    () => canvasArea.download());
 
@@ -345,16 +335,6 @@ class UpscalerApp extends HTMLElement {
     const zoomed = canvasArea.zoom != null;
     toolbar.zoomControl.selected = zoomed;
     toolbar.viewModeActive = !zoomed;
-  }
-
-  #isNearTop() {
-    return (window.scrollY || window.pageYOffset || 0) <= 80;
-  }
-
-  #syncScrollNavDirection() {
-    const toolbar = this.#q('upscaler-toolbar');
-    if (!toolbar) return;
-    toolbar.scrollNavDirection = this.#isNearTop() ? 'down' : 'up';
   }
 
   #restoreViewState() {

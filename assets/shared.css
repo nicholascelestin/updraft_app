@@ -4,6 +4,10 @@
     --pico-font-size: 100%;
     scrollbar-width: thin;
     scrollbar-color: var(--pico-secondary-border) var(--pico-background-color);
+    /* Backdrop behind canvases (preview workspace + the result viewer). Doubles
+       as what shows through transparent output pixels. Neutral dark gray reads
+       better than pure black. */
+    --workspace-bg: #1e1e1e;
 }
 
 /* Nav brand */

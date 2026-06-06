@@ -19,8 +19,9 @@ class UpscalerCanvasArea extends HTMLElement {
     // The on-screen zoom of the fit modes depends on the viewport, so keep the
     // readout honest across resizes.
     window.addEventListener('resize', this.#onResize);
-    // Wheel over the canvas zooms toward the cursor. passive:false so we can
-    // suppress the page scroll while a zoomable stage is showing.
+    // Plain wheel scrolls/pans the (always-scrollable) stage natively; only a
+    // modifier or trackpad-pinch (ctrl/meta) zooms toward the cursor.
+    // passive:false so we can suppress the browser page-zoom while pinching.
     this.addEventListener('wheel', this.#onWheel, { passive: false });
   }
 
@@ -32,8 +33,11 @@ class UpscalerCanvasArea extends HTMLElement {
   #onResize = () => this.#emitEffectiveZoom();
 
   #onWheel = (e) => {
-    // Only engage when there's something measurable to zoom (a visible canvas);
-    // otherwise let the page scroll normally.
+    // A plain wheel notch pans the stage -- the workspace is always a scroll
+    // container now, so let the browser handle it. Zoom only when the user opts
+    // in with a modifier (ctrl/cmd), which is also what a trackpad pinch sends.
+    if (!(e.ctrlKey || e.metaKey)) return;
+    // Only engage when there's something measurable to zoom (a visible canvas).
     const current = this.#zoom ?? this.getEffectiveZoom();
     if (current == null) return;
     e.preventDefault();

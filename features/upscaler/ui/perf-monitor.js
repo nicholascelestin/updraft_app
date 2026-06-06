@@ -29,6 +29,7 @@ function humanStepName(step) {
     detectFaces: 'Face detection',
     enhanceFaces: 'Face enhance',
     colorMatch: 'Preserve tone',
+    restoreAlpha: 'Transparency',
     pipeline: 'Pipeline',
   };
   return names[step] || step || '—';

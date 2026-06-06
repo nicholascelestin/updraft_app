@@ -237,73 +237,64 @@ class UpscaleResult extends HTMLElement {
     const bh = this.#beforeCanvas?.height || ah;
     morph(this, `
       <style>
+        /* The result viewer is always a viewport-sized scroll container, so the
+           image can be panned (drag / scrollbar / trackpad) in every view mode
+           -- not only when explicitly zoomed. The view modes change how the
+           stage canvas is sized inside this constant box; smaller-than-box
+           content centers, larger content scrolls (margin:auto keeps both edges
+           reachable while overflowing). */
         .result-view {
           display: none; position: relative;
           border: 1px solid var(--pico-muted-border-color, #333);
           border-radius: var(--pico-border-radius, 4px);
-          overflow: hidden;
+          overflow: auto;
           user-select: none; -webkit-user-select: none;
-          cursor: grab; max-width: 100%;
-        }
-        .result-view.panning { cursor: grabbing; }
-        .result-view.is-visible { display: block; }
-
-        .result-view.is-visible:not(.expanded):not(.native-size):not(.zoomed) {
-          width: 100%;
-          max-width: 100%;
-          aspect-ratio: var(--ar, auto);
-          margin-inline: auto;
-        }
-        .result-view.is-visible.expanded {
-          height: calc(100vh - 1rem);
-          width: calc((100vh - 1rem) * var(--ar-num, 1));
-          max-width: none;
-          margin-inline: auto;
-        }
-        /* native-size / zoomed render at native (or scaled) pixel dimensions
-           inside a workspace-sized scroll container, centered when smaller
-           than the workspace and pannable when larger. */
-        .result-view.is-visible.native-size,
-        .result-view.is-visible.zoomed {
-          width: 100%;
-          max-width: 100%;
+          cursor: grab;
+          width: 100%; max-width: 100%;
           height: calc(100vh - 1rem);
           max-height: calc(100vh - 1rem);
-          aspect-ratio: auto;
-          overflow: auto;
-          display: flex;
         }
+        .result-view.panning { cursor: grabbing; }
+        .result-view.is-visible { display: flex; }
 
         .result-view .result-stage {
           position: relative;
-          display: block;
-          width: 100%;
-        }
-        .result-view.native-size .result-stage,
-        .result-view.zoomed .result-stage {
           margin: auto;
+          flex: 0 0 auto;
           width: max-content;
           height: max-content;
-          flex: 0 0 auto;
+        }
+        /* fit-width: stage spans the box width; the after canvas fills it and
+           overflows (pans) vertically when the image is taller than the box. */
+        .result-view.is-visible:not(.expanded):not(.native-size):not(.zoomed) .result-stage {
+          width: 100%;
+        }
+        .result-view.is-visible:not(.expanded):not(.native-size):not(.zoomed) .result-after {
+          width: 100%; height: auto; max-width: 100%;
+        }
+        /* fit-height: stage spans the box height; overflow horizontally. */
+        .result-view.is-visible.expanded .result-stage {
+          height: 100%;
+        }
+        .result-view.is-visible.expanded .result-after {
+          height: 100%; width: auto; max-width: none;
+        }
+        /* 1:1 -- native pixels. */
+        .result-view.is-visible.native-size .result-after {
+          width: auto; height: auto; max-width: none;
+        }
+        /* explicit zoom factor (natural width × --zoom). */
+        .result-view.is-visible.zoomed .result-after {
+          width: calc(var(--natural-w, 100%) * var(--zoom, 1));
+          height: auto; max-width: none;
         }
 
         .result-view canvas {
           display: block;
-          width: 100%;
-          height: auto;
-          max-width: 100%;
-          background: #000;
+          /* Matches the preview workspace; also what shows through transparent
+             output pixels (see --workspace-bg in shared.css). */
+          background: var(--workspace-bg, #1e1e1e);
           pointer-events: none;
-        }
-        .result-view.native-size .result-after {
-          width: auto;
-          max-width: none;
-          height: auto;
-        }
-        .result-view.zoomed .result-after {
-          width: calc(var(--natural-w, 100%) * var(--zoom, 1));
-          max-width: none;
-          height: auto;
         }
 
         /* The LR (before) canvas overlays the SR one exactly and is hidden

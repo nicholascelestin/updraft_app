@@ -10,6 +10,8 @@ import {
   ensureCanvas,
   blendCanvas,
   matchColorToReference,
+  hasTransparency,
+  applyAlphaMask,
 } from 'lib/canvas';
 import { buildTileGrid } from './engine/tiling.js';
 
@@ -358,11 +360,39 @@ const colorMatchStep = {
   },
 };
 
+// Runs dead last so it masks the fully-composited result (every prior pass
+// emits an opaque canvas because the SR models are RGB-only). Transparent
+// regions of the original input are restored to transparent in the output,
+// rather than showing whatever RGB the model hallucinated underneath. Skipped
+// entirely for opaque inputs. ctx.source is the untouched original input.
+const restoreAlphaStep = {
+  name: 'restoreAlpha',
+  shouldRun: (ctx) => hasTransparency(ctx.source),
+  async run(ctx, cb) {
+    emitStage(cb, 'restoreAlpha', 'running', { message: 'Restoring transparency…' });
+    const t = performance.now();
+    const image = applyAlphaMask(ensureCanvas(ctx.image), ctx.source);
+    let comparisonImage = ctx.comparisonImage;
+    if (comparisonImage) {
+      comparisonImage = applyAlphaMask(ensureCanvas(comparisonImage), ctx.source);
+    }
+    return {
+      ...ctx,
+      image,
+      comparisonImage,
+      stepPerf: {
+        ...(ctx.stepPerf || {}),
+        restoreAlpha: { total: Number((performance.now() - t).toFixed(1)) },
+      },
+    };
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Step runner
 // ---------------------------------------------------------------------------
 
-const STEPS = [tiledUpscaleStep, comparisonStep, blendAllStep, detectFacesStep, enhanceFacesStep, colorMatchStep];
+const STEPS = [tiledUpscaleStep, comparisonStep, blendAllStep, detectFacesStep, enhanceFacesStep, colorMatchStep, restoreAlphaStep];
 
 function getImageSize(image) {
   if (!image) return null;

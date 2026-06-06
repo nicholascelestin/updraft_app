@@ -24,7 +24,7 @@ class UpscalePreview extends HTMLElement {
     this.style.setProperty('--ar-num', `${outW / outH}`);
     this.style.setProperty('--natural-w', `${outW}px`);
     this.#render();
-    this.style.display = 'block';
+    this.style.display = 'flex';
 
     const canvas = this.querySelector('canvas');
     canvas.width = outW;
@@ -68,62 +68,50 @@ class UpscalePreview extends HTMLElement {
   #render() {
     morph(this, `
       <style>
-        .upscale-preview { display: none; position: relative; }
-        .upscale-preview:not(.expanded):not(.native-size):not(.zoomed) {
-          width: 100%;
-          max-width: 100%;
-          aspect-ratio: var(--ar, auto);
-          margin-inline: auto;
-        }
-        .upscale-preview.expanded {
-          height: calc(100vh - 1rem);
-          width: calc((100vh - 1rem) * var(--ar-num, 1));
-          max-width: none;
-          margin-inline: auto;
-        }
-        /* native-size: canvas at its natural pixel dimensions, centered in
-           a workspace-sized scroll container. Mirrors the compare-slider. */
-        .upscale-preview.native-size {
+        /* Always a viewport-sized scroll container so the preview can be panned
+           in every view mode (see image-cropper for the rationale). The view
+           modes only change how the canvas is sized inside this constant box. */
+        .upscale-preview {
+          display: none;
+          position: relative;
           width: 100%;
           max-width: 100%;
           height: calc(100vh - 1rem);
           max-height: calc(100vh - 1rem);
           overflow: auto;
-          display: flex;
           margin-inline: auto;
-        }
-        .upscale-preview.native-size canvas {
-          margin: auto;
-          width: auto;
-          height: auto;
-          max-width: none;
-          flex: 0 0 auto;
-        }
-        /* zoomed: explicit scale factor (natural-width × --zoom). */
-        .upscale-preview.zoomed {
-          width: 100%;
-          max-width: 100%;
-          height: calc(100vh - 1rem);
-          max-height: calc(100vh - 1rem);
-          overflow: auto;
-          display: flex;
-          margin-inline: auto;
-        }
-        .upscale-preview.zoomed canvas {
-          margin: auto;
-          width: calc(var(--natural-w, 100%) * var(--zoom, 1));
-          height: auto;
-          max-width: none;
-          flex: 0 0 auto;
         }
         .upscale-preview canvas {
           display: block;
+          margin: auto;
+          flex: 0 0 auto;
+          background: var(--workspace-bg, #1e1e1e);
+          border: 1px solid var(--pico-muted-border-color, #333);
+          border-radius: var(--pico-border-radius, 4px);
+        }
+        /* fit-width: fill the box width; pan vertically when taller. */
+        .upscale-preview:not(.expanded):not(.native-size):not(.zoomed) canvas {
           width: 100%;
           height: auto;
           max-width: 100%;
-          border: 1px solid var(--pico-muted-border-color, #333);
-          border-radius: var(--pico-border-radius, 4px);
-          background: #000;
+        }
+        /* fit-height: fill the box height; pan horizontally when wider. */
+        .upscale-preview.expanded canvas {
+          height: 100%;
+          width: auto;
+          max-width: none;
+        }
+        /* 1:1 -- native pixels. */
+        .upscale-preview.native-size canvas {
+          width: auto;
+          height: auto;
+          max-width: none;
+        }
+        /* explicit zoom factor (natural width × --zoom). */
+        .upscale-preview.zoomed canvas {
+          width: calc(var(--natural-w, 100%) * var(--zoom, 1));
+          height: auto;
+          max-width: none;
         }
       </style>
       <canvas></canvas>

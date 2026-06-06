@@ -16,11 +16,9 @@ const STATES = Object.values(TOOLBAR_STATE);
 class UpscalerToolbar extends HTMLElement {
   #state = TOOLBAR_STATE.EMPTY;
   #hasCrop = false;
-  #scrollNavDirection = 'up';
 
   connectedCallback() {
     this.#render();
-    this.scrollNavDirection = this.#scrollNavDirection;
     this.#wireEvents();
     this.#applyState();
   }
@@ -86,26 +84,6 @@ class UpscalerToolbar extends HTMLElement {
   // orchestrator can write progress/messages directly during a run.
   get statusBar() { return this.#q('status-bar'); }
 
-  // Center nav button mode:
-  // - "up"   => scroll to page top controls
-  // - "down" => jump back to the canvas workspace
-  set scrollNavDirection(dir) {
-    const next = dir === 'down' ? 'down' : 'up';
-    this.#scrollNavDirection = next;
-    const icon = this.#q('.scroll-nav-icon');
-    const btn = this.#q('.scroll-top-btn');
-    if (icon) {
-      icon.classList.toggle('fa-arrow-up', next === 'up');
-      icon.classList.toggle('fa-arrow-down', next === 'down');
-    }
-    if (btn) {
-      const toTop = next === 'up';
-      const label = toTop ? 'Back to top controls' : 'Back to canvas';
-      btn.title = label;
-      btn.setAttribute('aria-label', label);
-    }
-  }
-
   // ── Internal ───────────────────────────────────────────────────────────
 
   #applyState() {
@@ -128,7 +106,6 @@ class UpscalerToolbar extends HTMLElement {
     setDisplay('.clear-crop-btn',   s === TOOLBAR_STATE.READY && this.#hasCrop);
 
     setHidden('.canvas-toolbar-left',   s === TOOLBAR_STATE.EMPTY);
-    setHidden('.canvas-toolbar-center', s === TOOLBAR_STATE.EMPTY);
     setHidden('.canvas-toolbar-right',  s !== TOOLBAR_STATE.DONE);
     // The compare badge belongs to a finished result; it's always shown there
     // (labelled for whichever layer is in view) and hidden in every other phase.
@@ -147,7 +124,6 @@ class UpscalerToolbar extends HTMLElement {
     this.#q('.back-to-crop-btn' ).addEventListener('click', fire('back-to-crop-click'));
     this.#q('.open-in-tab-btn'  ).addEventListener('click', fire('open-in-tab-click'));
     this.#q('.download-btn'     ).addEventListener('click', fire('download-click'));
-    this.#q('.scroll-top-btn'   ).addEventListener('click', fire('scroll-top-click'));
 
     // Re-emit view-mode-controls' change as a bubbling event so the
     // orchestrator can forward to canvas-area without poking through.
@@ -215,14 +191,6 @@ class UpscalerToolbar extends HTMLElement {
           right: 0.75rem;
           max-width: calc(100% - 1.5rem);
           pointer-events: auto;
-        }
-        upscaler-toolbar .canvas-toolbar-center {
-          position: absolute;
-          top: 0;
-          left: 50%;
-          transform: translateX(-50%);
-          pointer-events: auto;
-          z-index: 1;
         }
         upscaler-toolbar .canvas-toolbar[hidden] {
           display: none;
@@ -334,16 +302,6 @@ class UpscalerToolbar extends HTMLElement {
           white-space: nowrap;
           max-width: 14rem;
         }
-        upscaler-toolbar .canvas-toolbar-center .scroll-top-btn {
-          padding: 0.2rem 0.45rem;
-          min-width: 0;
-          border-radius: 999px;
-          font-size: 0.68rem;
-          opacity: 0.85;
-        }
-        upscaler-toolbar .canvas-toolbar-center .scroll-top-btn .fas {
-          margin-right: 0.2rem;
-        }
       </style>
 
       <div class="canvas-toolbar-stack-left">
@@ -370,11 +328,6 @@ class UpscalerToolbar extends HTMLElement {
             <i class="fas fa-eye compare-icon"></i><span class="compare-label">HR</span>
           </span>
         </div>
-      </div>
-      <div class="canvas-toolbar canvas-toolbar-center" hidden>
-        <button class="scroll-top-btn secondary outline" type="button" title="Back to top controls" aria-label="Back to top controls">
-          <i class="fas fa-arrow-up scroll-nav-icon"></i><i class="fas fa-sliders"></i>
-        </button>
       </div>
       <div class="canvas-toolbar canvas-toolbar-right" hidden>
         <button class="open-in-tab-btn secondary outline" type="button" title="Open the upscaled image in a new tab">

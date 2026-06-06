@@ -67,7 +67,7 @@ class ImageCropper extends HTMLElement {
     this.style.setProperty('--ar-num', `${image.width / image.height}`);
     this.style.setProperty('--natural-w', `${image.width}px`);
     this.#render();
-    this.style.display = 'block';
+    this.style.display = 'flex';
     this.#resizeCanvas();
     this.#drawOverlay();
   }
@@ -194,63 +194,52 @@ class ImageCropper extends HTMLElement {
   #render() {
     morph(this, `
       <style>
-        .image-cropper { display: none; }
-        .image-cropper:not(.expanded):not(.native-size):not(.zoomed) {
-          width: 100%;
-          max-width: 100%;
-          aspect-ratio: var(--ar, auto);
-          margin-inline: auto;
-        }
-        .image-cropper.expanded {
-          height: calc(100vh - 1rem);
-          width: calc((100vh - 1rem) * var(--ar-num, 1));
-          max-width: none;
-          margin-inline: auto;
-        }
-        /* native-size: canvas at its natural pixel dimensions, centered in
-           a workspace-sized scroll container. Mirrors the compare-slider. */
-        .image-cropper.native-size {
+        /* The workspace is always a viewport-sized scroll container, so the
+           image can be panned (scrollbar / trackpad / wheel) in every mode --
+           not just when explicitly zoomed. The view modes only change how the
+           canvas is sized *inside* this constant box. */
+        .image-cropper {
+          display: none;
           width: 100%;
           max-width: 100%;
           height: calc(100vh - 1rem);
           max-height: calc(100vh - 1rem);
           overflow: auto;
-          display: flex;
           margin-inline: auto;
-        }
-        .image-cropper.native-size canvas {
-          margin: auto;
-          width: auto;
-          height: auto;
-          max-width: none;
-          flex: 0 0 auto;
-        }
-        /* zoomed: explicit scale factor. Same scroll container as native-size,
-           but the canvas is sized to natural-width × --zoom. */
-        .image-cropper.zoomed {
-          width: 100%;
-          max-width: 100%;
-          height: calc(100vh - 1rem);
-          max-height: calc(100vh - 1rem);
-          overflow: auto;
-          display: flex;
-          margin-inline: auto;
-        }
-        .image-cropper.zoomed canvas {
-          margin: auto;
-          width: calc(var(--natural-w, 100%) * var(--zoom, 1));
-          height: auto;
-          max-width: none;
-          flex: 0 0 auto;
         }
         .image-cropper canvas {
           display: block;
-          width: 100%;
-          height: auto;
-          max-width: 100%;
+          margin: auto;
+          flex: 0 0 auto;
+          background: #000;
           border: 1px solid var(--pico-muted-border-color, #333);
           border-radius: var(--pico-border-radius, 4px);
           cursor: crosshair;
+        }
+        /* fit-width: fill the box width; overflow (and pan) vertically when the
+           image is taller than the viewport. */
+        .image-cropper:not(.expanded):not(.native-size):not(.zoomed) canvas {
+          width: 100%;
+          height: auto;
+          max-width: 100%;
+        }
+        /* fit-height: fill the box height; overflow horizontally when wide. */
+        .image-cropper.expanded canvas {
+          height: 100%;
+          width: auto;
+          max-width: none;
+        }
+        /* 1:1 -- native pixels. */
+        .image-cropper.native-size canvas {
+          width: auto;
+          height: auto;
+          max-width: none;
+        }
+        /* explicit zoom factor (natural width × --zoom). */
+        .image-cropper.zoomed canvas {
+          width: calc(var(--natural-w, 100%) * var(--zoom, 1));
+          height: auto;
+          max-width: none;
         }
       </style>
       <canvas></canvas>
